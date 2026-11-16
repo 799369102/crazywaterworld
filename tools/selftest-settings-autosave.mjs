@@ -120,6 +120,24 @@ await test('连续自动保存只更新常驻状态，不显示成功横幅或�
   assert.equal(f.env.renders, renders); assert.equal(f.env.focuses, 0);
 });
 
+await test('保存规范化补齐舰队任务后重绘一次，草稿与已保存配置同步', async () => {
+  const f = fixture(); await f.load(); const renders = f.env.renders;
+  const priority = f.editor.draft.fleetDispatch.priority.filter(key => !['worldBoss', 'follow'].includes(key));
+  f.set('fleetDispatch.priority', priority);
+  assert.equal(await f.save(null, { automatic: true }), true);
+  const saved = f.view('a').settings;
+  assert.deepEqual(f.posts()[0].payload.settings.fleetDispatch.priority, priority);
+  assert(saved.fleetDispatch.priority.includes('worldBoss'));
+  assert(saved.fleetDispatch.priority.includes('follow'));
+  assert.deepEqual(f.editor.draft, saved); assert.deepEqual(f.editor.baseline, saved);
+  assert.equal(f.env.renders, renders + 1); assert.equal(f.env.focuses, 0);
+  assert.equal(f.editor.saveError, null); assert.deepEqual(f.editor.errors, {}); assert(!f.dirty());
+  assert.equal(f.node('config-message').hidden, true);
+  assert.match(f.node('config-state').textContent, /配置已同步/);
+  await f.tick(10000);
+  assert.equal(f.posts().length, 1); assert.equal(f.env.renders, renders + 1);
+});
+
 await test('多选、顺序、开关和互斥联动一起自动保存', async () => {
   const f = fixture(); await f.load();
   f.set('treasure.followNames', ['甲', '乙']);

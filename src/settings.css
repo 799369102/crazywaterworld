@@ -28,6 +28,19 @@
 .config-row[data-kind=switch] .config-control { justify-self:end }
 .config-control>button[role=switch] { margin-left:0 }
 
+/* 主项与参数共用一个分组，嵌套参数沿左侧引导线逐层缩进。 */
+.config-branch { min-width:0; margin:10px 0; padding:0 14px }
+.config-branch>.config-row { border-bottom:0; padding-block:12px }
+.config-children { min-width:0; margin:0 0 12px 6px; padding:2px 14px }
+.config-children>.config-branch { margin:4px 0; padding:0 }
+.config-children .config-children { margin-left:6px; padding-right:8px }
+.config-row.has-children>.config-control { display:flex; justify-content:flex-end; align-items:center; gap:10px; flex-wrap:wrap }
+.config-row.has-children>.config-control>.config-select { flex:1; width:auto; min-width:0 }
+.config-row.has-children>.config-control>.config-field-error { flex-basis:100% }
+.config-disclosure { flex:none; display:inline-flex; align-items:center; gap:6px; min-height:32px; padding:4px 6px; font-size:12px; white-space:nowrap }
+.config-disclosure::after { content:''; width:6px; height:6px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(45deg) translateY(-2px) }
+.config-disclosure[aria-expanded=true]::after { transform:rotate(225deg) translate(-2px,-1px) }
+
 .config-number { display:flex; align-items:center; justify-content:flex-end; gap:8px; max-width:100% }
 .config-number span { color:var(--muted-foreground); flex:none; min-width:1em }
 .config-input,.config-select { width:100% }
@@ -95,12 +108,23 @@
   .config-sheet>.config-subtabs,#config-fields .config-subtabs { margin:12px 16px 0; max-width:calc(100% - 32px) }
   .config-section { margin:0 16px; padding-block:12px }
   .config-row { grid-template-columns:minmax(100px,44%) minmax(0,1fr); gap:6px 8px }
+  .config-branch { padding-inline:10px }
+  .config-children { margin-left:2px; padding-inline:10px }
+  .config-children .config-children { margin-left:2px; padding-right:0 }
+  .config-row.has-children { grid-template-columns:minmax(0,1fr) }
+  .config-row.has-children[data-kind=switch] { grid-template-columns:minmax(0,1fr) auto }
+  .config-row.has-children[data-kind=switch]>.config-control { gap:4px }
   .config-row.is-wide,.config-row[data-kind=multi],.config-row[data-kind=names],.config-row[data-kind=players] { grid-template-columns:minmax(0,1fr) }
   .config-number input { min-width:0; flex:0 1 108px }
   .config-preview { padding:16px }
   .config-foot { align-items:flex-start }
 }
 @media (max-width:480px) {
+  .config-children .config-row { grid-template-columns:minmax(0,1fr) }
+  .config-children .config-row[data-kind=switch] { grid-template-columns:minmax(0,1fr) auto }
+  .config-children .config-row.has-children[data-kind=switch] { grid-template-columns:minmax(0,1fr) }
+  .config-children .config-row.has-children[data-kind=switch]>.config-control { justify-self:stretch; justify-content:space-between }
+  .config-children .config-label-line { flex-wrap:nowrap; align-items:flex-start }
   .config-order-row { grid-template-columns:22px minmax(0,1fr) }
   .config-order-tools { grid-column:2; justify-content:flex-start }
 }
