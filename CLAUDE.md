@@ -15,7 +15,7 @@ npm start                     # prestart 先构建界面，再启动；端口 17
 .\start-console.cmd status    # 只检查 MITM 证书状态，不启动控制台
 npm run build:ui              # 改 TSX 或 theme.css 后运行，提交 src/ui/dist 产物
 npm test                      # pretest 先构建，再依次执行下面三组，遇错即停
-npm run test:offline           # 构建、类型检查及无需本机协议的核心回归，CI使用此入口
+npm run test:offline           # 构建、类型检查及无需本机协议的核心回归
 npm run typecheck              # 账本与文件事务的JSDoc静态检查
 npm run test:core             # 核心协议、日常、原有玩法、阵容与掉线处理
 npm run test:progression      # 装备、情报、订单、博物馆、海兽、预留与迁移接线
