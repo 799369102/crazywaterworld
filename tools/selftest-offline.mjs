@@ -12,6 +12,7 @@ const cases = [
   ['selftest-settings-persistence.mjs'],
   ['selftest-order-reservations.mjs'],
   ['selftest-progression-budgets.mjs'],
+  ['selftest-base-status.mjs'],
   ['selftest-pending-operation.mjs'],
   ['selftest-guard-lifecycle.mjs'],
   ['selftest-loop-scheduler.mjs'],

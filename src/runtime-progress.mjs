@@ -1,3 +1,34 @@
+// 博物馆旧规则可独立于基地执行；详细探宝开启后由基地计划统一报告。
+export function museumRuntimeStatus(settings, { status, nextCheck }) {
+  if (settings.museum?.runEnabled === false) return { observation: null, nextCheck: null };
+  if (settings.loop?.world && settings.museum?.enabled) {
+    return { observation: status('museum.runEnabled') ?? null, nextCheck: nextCheck('museum.runEnabled') ?? null };
+  }
+  const selected = [];
+  if (settings.schedule?.museumCollect) selected.push(['museumCollect', '旧规则领奖']);
+  if (settings.schedule?.museumExplore) selected.push(['museumExplore', '旧规则派遣']);
+  if (settings.loop?.world && settings.museum?.upgrade) selected.push(['museum.upgrade', '技能与展区升级']);
+  const entries = selected.map(([key, label]) => {
+    const observation = status(key);
+    return { label, observation: observation?.text === '由游戏配置中的博物馆接管' ? null : observation };
+  });
+  const observed = entries.filter(entry => entry.observation);
+  const deadlines = selected.map(([key]) => nextCheck(key)).filter(value => Number.isFinite(value) && value > 0);
+  const next = deadlines.length ? Math.min(...deadlines) : null;
+  if (!observed.length) return { observation: null, nextCheck: next };
+  if (entries.length === 1) return { observation: observed[0].observation, nextCheck: next };
+  const state = ['pending', 'error', 'waiting'].find(value => observed.some(entry => entry.observation.state === value))
+    ?? (observed.length === entries.length && observed.every(entry => entry.observation.state === 'ok') ? 'ok' : 'waiting');
+  return {
+    observation: {
+      text: entries.map(entry => entry.label + '：' + (entry.observation?.text || '尚无检查结果')).join('；'),
+      state,
+      checkedAt: Math.max(...observed.map(entry => entry.observation.checkedAt ?? 0)),
+    },
+    nextCheck: next,
+  };
+}
+
 // 只读展示层：进度使用已观测计数，条件保留真实阻断原因，不从开关推断已完成。
 export function runtimeProgress(control,observation,usage={counters:{}},{running=false,connected=false,treasureReward='今日奖励未同步',freeTimes,now=Date.now()}={}){
  const text=observation?.text||'',state=observation?.state,counters=usage.counters??{};

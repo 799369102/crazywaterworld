@@ -43,7 +43,7 @@ import { surveyWorld, planWorld, runWorldRound, displayBuilding } from './world.
 import { createFactorySchedule } from './factory-schedule.mjs';
 import { createLoopScheduler } from './loop-scheduler.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
-import { surveyBaseAutomation, planBaseAutomation, runBaseAutomation, baseDemands } from './base-automation.mjs';
+import { surveyBaseAutomation, planBaseAutomation, observeBaseAutomationPlan, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
 import { treasureAutomationEnabled, runTreasureLoot } from './treasure-loot.mjs';
 import {watchTreasureTravel,matchesFollowDeparture} from './treasure-follow.mjs';
@@ -960,11 +960,7 @@ export async function runLoop(client, protocol, {
           const survey = await surveyWorld(client, protocol, { config, player, includeWeekOrder: false });
           const extra = await surveyBaseAutomation(client, protocol, config, player, latest, survey, { ledger: usageLedger, enabled: () => !stop.aborted && client.connected !== false });
           const plan = planBaseAutomation(extra, config, latest, usage(), { diveCompleted });
-          for(const [group,fields]of Object.entries(latest))for(const [field,value]of Object.entries(fields??{})){
-            const key=group+'.'+field;if(value!==true||!['pet','museum','events','gold'].includes(group))continue;
-            const actions=plan.actions.filter(a=>a.setting===key);
-            rewards?.observe(key,actions.length?'本次计划 '+actions.length+' 项':'已核对，当前无符合条件的动作'+(plan.notes.length?'：'+plan.notes.join('；'):''));rewards?.expect(key,rewards.now()+Math.ceil(getEveryMs()/1000));
-          }
+          observeBaseAutomationPlan(rewards, plan, latest, getEveryMs());
           const results = await runBaseAutomation(client, protocol, config, plan, { player, getSettings, ledger: usageLedger,
             enabled: () => !stop.aborted && client.connected, onStep: stepLog('world') });
           summary.world.planned += plan.actions.length;

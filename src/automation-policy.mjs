@@ -411,11 +411,11 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
 }
 
 export function budgetPreview(actions, stock, settings, usage = {}) {
-  if (!settings) return { actions, notes: [] };
+  if (!settings) return { actions, notes: [], notesBySetting: {} };
   const balances = new Map(stock);
   const used = { ...usage.counters };
   const limits = usageLimits(settings);
-  const kept = [], notes = [];
+  const kept = [], notes = [], notesBySetting = {};
   for (const step of actions) {
     const costs = actionCosts(step);
     const counters = actionCounters(step);
@@ -425,10 +425,15 @@ export function budgetPreview(actions, stock, settings, usage = {}) {
       else if ((balances.get(id) ?? 0) - cost < resourceReserve(settings, id)) reason = `${id}不足或会低于保留数量`;
     }
     for (const [key, amount] of Object.entries(counters)) if (limits[key] != null && Math.max(used[key] ?? 0, step.counterMinimums?.[key] ?? 0) + amount > limits[key]) reason = '会超过今日使用上限';
-    if (reason) { notes.push(`${step.label}：${reason}`); continue; }
+    if (reason) {
+      const note = `${step.label}：${reason}`;
+      notes.push(note);
+      if (step.setting) (notesBySetting[step.setting] ??= []).push(note);
+      continue;
+    }
     for (const [id, cost] of costs) balances.set(id, (balances.get(id) ?? 0) - cost);
     for (const [key, amount] of Object.entries(counters)) used[key] = Math.max(used[key] ?? 0, step.counterMinimums?.[key] ?? 0) + amount;
     kept.push(step);
   }
-  return { actions: kept, notes };
+  return { actions: kept, notes, notesBySetting };
 }
