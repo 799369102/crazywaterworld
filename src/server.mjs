@@ -2043,13 +2043,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(await heroes(session, account));
         return;
       }
-      if (route === 'GET /api/material-sources') {
-        const config = loadConfigSafe();
-        if (!config) throw new Error('缺少游戏材料配置');
-        json(config.tables.ItemJumpCfg.data.map(r => ({ name: displayMaterial(config, r.id), sources: config.materialSources(r.id) }))
-          .filter(r => r.name !== '未知材料' && r.sources.length));
-        return;
-      }
       if (route === 'GET /api/pirates') {
         const { account, session } = scoped_(parsed);
         const result = await progressionJob(session, account, route, null, client => pirateTracker(client, loadConfigSafe(), session.player), { read: true });

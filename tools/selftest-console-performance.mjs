@@ -158,6 +158,14 @@ await test('首页带 gzip 和 ETag，重新验证返回 304；不支持压缩�
   assert.equal(plain.body.toString(), PAGE);
 });
 
+await test('活动页移除材料来源查询及专用接口', async () => {
+  assert.doesNotMatch(PAGE, /材料来源查询|source-query|source-results|sourceIndex|renderSourceSearch|\/api\/material-sources/);
+  assert.match(PAGE, /id="activities-refresh"/);
+  assert.match(PAGE, /id="activity-panel"/);
+  const removed = await raw('/api/material-sources');
+  assert.equal(removed.status, 404);
+});
+
 await test('较大的 JSON 按需压缩，小响应不压缩', async () => {
   const large = await raw('/api/settings?account=a', { 'accept-encoding': 'gzip' });
   assert.equal(large.headers['content-encoding'], 'gzip');

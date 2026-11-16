@@ -323,12 +323,8 @@ async function refreshActivities() {
   }
   status.textContent = '正在读取活动…';
   try {
-    const [data, sources] = await Promise.all([
-      call('/api/activities'),
-      sourceIndex ?? call('/api/material-sources').catch(() => null),
-    ]);
+    const data = await call('/api/activities');
     if (version !== activitiesVersion || account !== current) return;
-    if (sources) { sourceIndex = sources; renderSourceSearch(); }
     // A settings save can overlap this read. Preserve the newer local value.
     for (const task of data.eventTasks) {
       const local = activityTaskEdits.get(account + ':' + task.key);

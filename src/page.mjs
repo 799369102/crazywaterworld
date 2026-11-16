@@ -1368,16 +1368,6 @@ function putCell(td, spec) {
   td.textContent = spec.text || '';
 }
 
-let sourceIndex;
-function renderSourceSearch() {
-  const box = clear($('source-results')), query = $('source-query').value.trim();
-  if (!query || !sourceIndex) return;
-  const matches = sourceIndex.filter(row => row.name.includes(query));
-  if (!matches.length) box.textContent = '未找到已配置来源的材料';
-  else box.appendChild(table(['材料', '游戏内来源'], matches.map(r => [r.name, r.sources.join('、')])));
-}
-$('source-query').oninput = renderSourceSearch;
-
 ${activitiesScript}
 
 function table(headers, rows) {

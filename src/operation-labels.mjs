@@ -28,7 +28,7 @@ export const operationLabels = {
   '/api/capture': '读取采集状态', '/api/capture/start': '开始采集账号', '/api/capture/stop': '停止采集',
   '/api/capture/recover': '恢复上次采集残留',
   '/api/overview': '刷新总览', '/api/heroes': '查看英雄', '/api/heroes/run': '执行英雄养成',
-  '/api/activities': '读取活动', '/api/material-sources': '查询材料来源', '/api/pirates': '查看海盗首杀',
+  '/api/activities': '读取活动', '/api/pirates': '查看海盗首杀',
   '/api/pirates/hunt': '海盗首杀出征', '/api/trials': '查看试炼进度',
   '/api/equipment': '查看英雄装备', '/api/equipment/wear': '为英雄补齐装备', '/api/equipment/enhance': '强化英雄装备',
   '/api/guild': '查看联盟', '/api/guild/welfare': '领取联盟福利礼包',

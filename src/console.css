@@ -203,9 +203,7 @@ section h2:first-child { margin-top:0 }
 .inventory-search input { width:240px }
 .inventory-category .icons { margin-bottom:12px }
 #world-stock-panel>summary { width:fit-content }
-label:is([for=source-query],[for=gift-code-input]) { display:block; margin-bottom:8px }
-#source-query { width:100% }
-#source-results:not(:empty) { margin-top:12px }
+label[for=gift-code-input] { display:block; margin-bottom:8px }
 
 /* ---- 挑战 ---- */
 #stage-view { display:inline; font-size:14px; font-weight:400; color:var(--muted-foreground) }

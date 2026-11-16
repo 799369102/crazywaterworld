@@ -75,7 +75,6 @@ export function activitiesPage() {
         </Card>
       </section>
     </div>
-    <Panel title="材料来源查询"><label htmlFor="source-query">游戏材料名称</label><Input id="source-query" placeholder="例如：有机土壤" /><div id="source-results" aria-live="polite" /></Panel>
     <template id="ui-event-switch"><Switch className="p-0" /></template>
   </div>)
 }
