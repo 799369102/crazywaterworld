@@ -1,5 +1,6 @@
 import { normalize } from './worlds.mjs';
 import { uidText } from './hero-equipment.mjs';
+import { emitDiagnostic } from './trace-log.mjs';
 
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 const read = async (client, name) => {
@@ -56,16 +57,28 @@ export function factoryProductionOperation(water, buildingId, batch) {
   const before = factoryProductionSnapshot(water, buildingId);
   if (!before) throw new Error('无法完整确认排产前的队列和待收成品');
   const baseline = new Map(before.totals);
-  const operation = { confirmed: false };
+  const operation = { confirmed: false, factoryBuildingId: buildingId };
   operation.verify = async client => {
-    if (!batch.sealed || !batch.attempted.length) return false;
-    const next = await read(client, 'OnWater'), after = factoryProductionSnapshot(next, buildingId);
-    if (!after || after.building.level !== before.building.level) return false;
-    const serverNow = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
-    if (after.building.factory.autoProductId && (next.autoProduceForever || next.autoProduceEndTime > serverNow)) return false;
     const expected = new Map();
     for (const step of batch.attempted) expected.set(step.body.productId, (expected.get(step.body.productId) ?? 0) + 1);
-    return [...expected].every(([id, count]) => (after.totals.get(id) ?? 0) - (baseline.get(id) ?? 0) >= count);
+    const details = snapshot => snapshot ? { level: snapshot.building.level, queue: snapshot.queue,
+      finished: snapshot.building.factory.finishedProducts, totals: Object.fromEntries(snapshot.totals) } : null;
+    const record = (confirmed, reason, after = null, error) => {
+      emitDiagnostic(client, 'factory-production-verification', { buildingId, expected: Object.fromEntries(expected),
+        before: details(before), after: details(after), confirmed, reason, ...(error ? { error: error.message } : {}) });
+      return confirmed;
+    };
+    if (!batch.sealed || !batch.attempted.length) return record(false, '批次尚未结束或没有已发送请求');
+    let next;
+    try { next = await read(client, 'OnWater'); }
+    catch (error) { record(false, '读取工厂状态失败，保留待确认记录', null, error); throw error; }
+    const after = factoryProductionSnapshot(next, buildingId);
+    if (!after) return record(false, '目标工厂队列或待收成品不完整');
+    if (after.building.level !== before.building.level) return record(false, '工厂等级已变化，不能归属原排产', after);
+    const serverNow = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
+    if (after.building.factory.autoProductId && (next.autoProduceForever || next.autoProduceEndTime > serverNow)) return record(false, '原生自动生产已开启，不能归属新增成品', after);
+    const confirmed = [...expected].every(([id, count]) => (after.totals.get(id) ?? 0) - (baseline.get(id) ?? 0) >= count);
+    return record(confirmed, confirmed ? '队列与待收成品总量已增加到预期' : '队列与待收成品增量不足，保留待确认记录', after);
   };
   return operation;
 }
@@ -168,6 +181,12 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
     'PetBreedRequest', 'PetFeedRequest', 'FishingLevelUpRequest', 'DivingLevelUpRequest', 'SalvageLevelUpRequest']);
   if (!waterRequests.has(request)) return operation;
   const before = waterSnapshot ? structuredClone(waterSnapshot) : await read(client, 'OnWater'), buildings = buildingList(before);
+  if (request === 'StartFactoryProduceRequest') {
+    // The single-request/manual path needs the same evidence as a batch: a
+    // product can finish before the next read, and an old queued slot starting
+    // is not proof of this new request.
+    return factoryProductionOperation(before, body.buildingId, { sealed: true, attempted: [{ body }] });
+  }
   if (!buildings) return operation;
   const old = buildings.find(row => row.buildingId === body.buildingId);
   if (request === 'UpgradeBuildingRequest' && (!old || !integer(old.level))) return operation;
@@ -191,23 +210,6 @@ export async function captureSpendOperation(client, step, { waterSnapshot } = {}
       if (!current || !integer(current.level)) return false;
       return current.level > (old?.level ?? 0) || (integer(current.buildStartTime) && integer(current.buildFinishTime)
         && current.buildStartTime > (old?.buildStartTime ?? 0) && current.buildFinishTime > current.buildStartTime);
-    }
-    if (request === 'StartFactoryProduceRequest') {
-      const beforeQ = factoryQueue(old), nextQ = factoryQueue(current);
-      return !!beforeQ && !!nextQ && nextQ.some(job => job.productId === body.productId
-        && integer(job.finishTime) && job.finishTime > 0
-        && !beforeQ.some(prior => {
-          if (prior.idx != null && job.idx != null && prior.idx === job.idx) {
-            if (prior.productId !== job.productId) return false;
-            // A stable queue slot can be present without finishTime until the
-            // server starts it. Filling that field is the business evidence
-            // for the just-sent production request.
-            return integer(prior.finishTime) ? prior.finishTime >= job.finishTime : false;
-          }
-          // An unkeyed pre-existing row cannot be replaced by another unkeyed
-          // row and still prove a new production request.
-          return prior.idx == null && job.idx == null && prior.productId === job.productId;
-        }));
     }
     if (request === 'SpeedUpUpgradeBuildingRequest') return integer(old?.buildFinishTime) && integer(current?.buildFinishTime)
       && current.buildFinishTime > 0 && current.buildFinishTime < old.buildFinishTime && current.level === old.level;

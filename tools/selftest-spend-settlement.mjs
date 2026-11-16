@@ -269,7 +269,7 @@ await test('其他账号的完整库存不能结算本账号操作', async () =>
 const worldCases = [
   ['建造', 'BuildBuildingRequest', { buildingId: '1民居' }, [], s => s.buildings.push({ buildingId: '1民居', level: 1 })],
   ['升级', 'UpgradeBuildingRequest', { buildingId: '1民居' }, [{ buildingId: '1民居', level: 1 }], s => s.buildings[0].level++],
-  ['排产', 'StartFactoryProduceRequest', { buildingId: '1食品厂', productId: '鱼罐头' }, [{ buildingId: '1食品厂', level: 1, factory: { factoryQ: [] } }], s => s.buildings[0].factory.factoryQ.push({ idx: 1, productId: '鱼罐头', finishTime: now() + 600 })],
+  ['排产', 'StartFactoryProduceRequest', { buildingId: '1食品厂', productId: '鱼罐头' }, [{ buildingId: '1食品厂', level: 1, factory: { factoryQ: [], finishedProducts: [] } }], s => s.buildings[0].factory.factoryQ.push({ idx: 1, productId: '鱼罐头', finishTime: now() + 600 })],
   ['建筑加速', 'SpeedUpUpgradeBuildingRequest', { buildingId: '1民居', speedUp: { type: 2, useNum: 1 } }, [{ buildingId: '1民居', level: 1, buildFinishTime: now() + 3600 }], s => s.buildings[0].buildFinishTime -= 60],
   ['生产加速', 'SpeedUpFactoryProduceRequest', { buildingId: '1食品厂', index: 1, speedUp: { type: 2, useNum: 1 } }, [{ buildingId: '1食品厂', level: 1, factory: { factoryQ: [{ idx: 1, productId: '鱼罐头', finishTime: now() + 3600 }] } }], s => s.buildings[0].factory.factoryQ[0].finishTime -= 60],
   ['农田加速', 'FarmSpeedUpRequest', { buildingId: '1农田', param: { type: 2, useNum: 1 } }, [{ buildingId: '1农田', level: 1, farm: { productId: '小麦', plantTime: now(), ripeTime: now() + 3600 } }], s => s.buildings[0].farm.ripeTime -= 60]

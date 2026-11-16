@@ -43,8 +43,17 @@ await test('原有工厂队列缺少完成时间，后来补全字段不能冒�
     building([{idx:2,productId:'fish',finishTime:100},{idx:3,productId:'fish'},{idx:4,productId:'fish',finishTime:200}])),true,
     '服务端省略其他排队槽位的完成时间时，新增带编号任务仍可确认');
   assert.equal(await proves(step,'OnWater',building([{idx:2,productId:'fish'},{idx:3,productId:'fish'}]),
-    building([{idx:2,productId:'fish',finishTime:200},{idx:3,productId:'fish'}])),true,
-    '服务端为稳定队列槽位补齐完成时间时可确认本次排产');
+    building([{idx:2,productId:'fish',finishTime:200},{idx:3,productId:'fish'}])),false,
+    '旧队列开始计时不能证明本次新增排产');
+});
+
+await test('单件排产在回读前已完成时以待收成品确认，旧队列自然成熟不能冒充', async()=>{
+  const step={request:'StartFactoryProduceRequest',body:{buildingId:'factory',productId:'fish'}};
+  const water=(queue,finished=[])=>({building:[{buildingId:'factory',level:1,factory:{factoryQ:queue,finishedProducts:finished}}]});
+  const product={type:0,id:'fish',num:1};
+  assert.equal(await proves(step,'OnWater',water([]),water([],[product])),true);
+  assert.equal(await proves(step,'OnWater',water([{productId:'fish',finishTime:100}]),water([],[product])),false);
+  assert.equal(await proves(step,'OnWater',water([{productId:'fish',finishTime:100}]),water([],[{...product,num:2}])),true);
 });
 
 await test('工厂加速前后缺少productId，时间缩短不能确认未知加速',async()=>{

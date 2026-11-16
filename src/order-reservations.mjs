@@ -170,6 +170,26 @@ export function pendingMuseumMaterialSpends(player) {
   return [...(materialSpends.get(accountKey(player)) ?? [])].filter(handle => handle.museum);
 }
 
+// Only a confirmed handoff from manual play may retire these old balance
+// barriers. This is not evidence that the historical request succeeded.
+export function captureManualProductionMaterialState(player) {
+  const account = accountKey(player), all = [...(materialSpends.get(account) ?? [])];
+  const handles = all.filter(handle => !handle.manualSyncBlocked && !handle.operation?.onConfirmed
+    && (handle.farm || handle.operation?.factoryBuildingId));
+  return { account, all, handles };
+}
+
+export function assertManualProductionMaterialState(player, snapshot) {
+  const current = [...(materialSpends.get(accountKey(player)) ?? [])];
+  if (snapshot.account !== accountKey(player) || current.length !== snapshot.all.length
+    || current.some(handle => !snapshot.all.includes(handle))) throw new Error('同步期间材料记录已变化，请重新同步');
+}
+
+export function retireManualProductionMaterialState(player, snapshot) {
+  assertManualProductionMaterialState(player, snapshot);
+  for (const handle of snapshot.handles) removeMaterialSpend(handle);
+}
+
 // Only after matching the expedition (or its completed progress), followed by
 // a complete inventory read. A stock decrease alone does not prove dispatch.
 export function settleMuseumMaterialSpend(player, handle) {

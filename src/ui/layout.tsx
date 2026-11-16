@@ -48,6 +48,7 @@ export function journal() {
         <button type="button" id="log-all" aria-pressed="true">全部</button>
         <button type="button" id="log-issues" aria-pressed="false">警告与错误</button>
       </div>
+      <a href="https://github.com/xutongxue233/crazywaterworld/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer" title="复现后附上数据目录中的 protocol.log 和 protocol.log.1（如有），以及发生时间、设置和实际结果；不要上传账号文件。">问题反馈（附日志）</a>
       <Button id="log-clear" size="sm" variant="outline" title="清空当前账号的运行日志">清空日志</Button>
     </div>
     <div id="log" role="log" aria-live="polite" aria-label="操作记录" />

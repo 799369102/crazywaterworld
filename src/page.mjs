@@ -426,7 +426,7 @@ function subscribe() {
     if (account !== current) return;
     const entry = JSON.parse(event.data);
     appendLog(entry);
-    if (entry.extra?.pauseChanged && entry.account === current) void loadAccounts(false);
+    if ((entry.extra?.pauseChanged || entry.extra?.loginBlocked) && entry.account === current) void loadAccounts(false);
     if (entry.extra?.worldUpdated && entry.account === current && Date.now() - entry.t < 10_000) refreshManualWorld();
   };
 }
@@ -438,7 +438,10 @@ function setBusy(text, state) {
   pill.dataset.state = state;
 }
 function paintConnection() {
-  if (snapshot.paused) setBusy('已暂停 · 可自行上号', 'paused');
+  if (snapshot.syncingProduction) setBusy('正在同步生产状态', 'busy');
+  else if (snapshot.paused) setBusy('已暂停 · 可自行上号', 'paused');
+  else if (snapshot.reconnecting) setBusy('异地登录 · 等待自动重连', 'busy');
+  else if (snapshot.loginBlocked) setBusy('异地登录 · 等待恢复托管', 'paused');
   else if (snapshot.connected) setBusy('已连接', 'on');
   else setBusy('未连接', 'off');
 }
@@ -468,8 +471,8 @@ function renderAccountSelect() {
   if(activityStatsOwner!==null&&activityStatsOwner!==current)resetActivityStatistics();
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   $('account-pause').disabled = !current;
-  $('account-pause').textContent = snapshot.paused ? '恢复托管' : '暂停托管';
-  $('account-pause').title = snapshot.paused ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
+  $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
+  $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.connected || !accounts.length;
   $('disconnect').disabled = !snapshot.connected;
@@ -515,7 +518,7 @@ $('account-pause').onclick = async () => {
   const account = current;
   $('account-pause').disabled = true;
   try {
-    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify({ paused: !snapshot.paused }) });
+    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify({ paused: !(snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting)) }) });
     const row = accounts.find(a => a.id === account);
     if (row) row.status = status;
     if (current !== account) return;
@@ -539,6 +542,8 @@ $('connect').onclick = async () => {
     disconnected.delete(current);
     refreshManualWorld();
     snapshot.connected = true;
+    snapshot.loginBlocked = false;
+    snapshot.reconnecting = false;
     renderAccountSelect();
     refreshProgression();
     refreshOverview();
@@ -605,7 +610,7 @@ function renderOverview(data) {
 
 let overviewPending = false;
 async function refreshOverview() {
-  if (overviewPending===current || !current || snapshot.paused || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&$('tab-account').classList.contains('hidden'))) return;
+  if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&$('tab-account').classList.contains('hidden'))) return;
   const account = current;
   overviewPending = account;
   if (!snapshot.connected) setBusy('连接中…', 'busy');
@@ -912,6 +917,11 @@ $('loop-start').onclick = async () => {
         everySeconds: Number($('loop-every').value || 60),
       }),
     });
+    if (account === current) {
+      snapshot.loginBlocked = false;
+      snapshot.reconnecting = false;
+      renderAccountSelect();
+    }
     refreshLoop();
   } catch (error) {
     $('loop-hint').textContent = '';

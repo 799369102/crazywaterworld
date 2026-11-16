@@ -25,10 +25,10 @@ GameClient.prototype.connect = async function () {
   logins++;
   if (loginError) throw loginError;
   live.add(this);
-  return { playerInfo: { nickname: '测试', level: 5 } };
+  return { playerInfo: { playerId: 600001, worldId: 9001, nickname: '测试', level: 5 } };
 };
 GameClient.prototype.send = () => {};
-GameClient.prototype.request = async () => ({});
+GameClient.prototype.request = async name => name === 'OnWaterRequest' ? { building: [] } : name === 'AllItemRequest' ? { items: [] } : {};
 GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.stop = function () { this.stopping = true; live.delete(this); };
 const dropConnection = client => { live.delete(client); client.emit('close', {}); };

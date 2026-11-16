@@ -94,6 +94,11 @@ try {
   const fleets = Array.from({ length: 20 }, (_, index) => ({ buildingId: (index + 1) + '远征船', state: 0, curGridIdx: 123456 + index }));
   const webBefore = webEntries.length;
   session.client.emit('message', { name: 'MyFleetsResponse', seq: 7, body: { fleets } });
+  // 基地完整状态是“已发送却未生效 / 材料扣款待确认”反馈的核对依据。
+  for (const name of ['OnWaterResponse', 'AllItemResponse', 'AllResourceResponse', 'AllPetResponse']) {
+    session.client.emit('message', { name, seq: 9, body: { records: Array.from({ length: 30 }, (_, index) =>
+      ({ id: `${name}-${index}`, num: index })), token: 'secret-base-packet' } });
+  }
   session.client.emit('frame', { dir: 'out', name: 'TreasureLootSendFleetsRequest', seq: 8, bytes: Buffer.alloc(32), body: { uid: 5001, fleetBuildingIds: ['20远征船'] } });
   emitDiagnostic(session.client, 'treasure-plan', { notes: ['首杀占用待核对'], fleets, accessToken: 'secret-plan' });
   assert.equal(webEntries.length, webBefore, '完整协议与诊断事件只写文件');
@@ -105,6 +110,12 @@ try {
   assert.match(trace, /-> \[TreasureLootSendFleetsRequest\] seq=8 32B .*5001.*20远征船/);
   assert.match(trace, /diagnostic .*treasure-plan/);
   assert.match(trace, /business .*舰队暂不派遣/);
+  assert.match(trace, /runtime .*startedAt.*node/);
+  for (const name of ['OnWaterResponse', 'AllItemResponse', 'AllResourceResponse', 'AllPetResponse']) {
+    const line = trace.split('\n').find(line => line.includes(`[${name}] seq=9`));
+    assert(line?.includes(`${name}-29`), name + ' 必须保留回包末尾的记录');
+    assert(!line.includes('正文已截断'), name + ' 不能按 400 字截断');
+  }
   assert.doesNotMatch(trace, /secret-/);
   const writeSync = fs.writeSync;
   try {

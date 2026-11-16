@@ -52,9 +52,12 @@ GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.request = async function (name) {
   const state = this.fixtureState;
   state.requests.push({ client: this, name });
+  if (name === 'OnWaterRequest') return { building: [] };
+  if (name === 'AllItemRequest') return { items: [] };
   if (name === 'EmailBoxRequest') {
     await state.mailGate?.promise;
     if (state.dropOnMail > 0) { state.dropOnMail--; drop(this); }
+    if (state.kickOnMail > 0) { state.kickOnMail--; drop(this, 'kicked'); }
     return { email: [] };
   }
   return {};
@@ -337,6 +340,109 @@ try {
         await sleep(100);
         assert.equal(f.state.logins, initiallyConnected ? 2 : 1);
         assert.equal(f.automation().enabled, false);
+      } finally { await f.close(); }
+    }
+  });
+
+  await test('顶号后总览和只读查询不抢回登录，明确连接、开始挂机或恢复托管才能解除', async () => {
+    for (const running of [false, true]) for (const action of ['connect', 'loop/start', 'accounts/pause']) {
+      const f = await fixture();
+      try {
+        if (running) {
+          await f.start(0, 3600);
+          await waitFor(() => f.session().loop.completed === 1, '顶号前首轮');
+        } else await f.api('connect', {});
+        const job = f.session().loop.job;
+        drop(f.session().client, 'kicked');
+        await job;
+        assert.equal(f.session().loginBlocked, true);
+        assert.equal(f.automation().loginBlocked, true, '保护状态持久保存');
+        for (const route of ['overview', 'heroes', 'overview']) {
+          const result = await f.response(route);
+          assert.equal(result.status, 400, route);
+          assert.match(result.data.error, /账号在别处登录/);
+        }
+        assert.equal(f.state.logins, 1, '网页轮询不能发起登录');
+        const status = (await f.api('accounts')).accounts.find(account => account.id === f.id).status;
+        assert.equal(status.loginBlocked, true, '新打开的网页也能显示恢复托管');
+        await f.api(action, action === 'loop/start' ? { rounds: 0, everySeconds: 3600 }
+          : action === 'accounts/pause' ? { paused: false } : {});
+        await f.api('overview');
+        assert.equal(f.state.logins, 2, action + '明确恢复后只登录一次');
+        assert.equal(f.session().loginBlocked, false);
+        assert.equal(f.automation().loginBlocked, false);
+      } finally { await f.close(); }
+    }
+  });
+
+  await test('顶号保护跨控制台重启保留，主动断开也不会绕过保护', async () => {
+    const f = await fixture();
+    let restarted;
+    try {
+      await f.api('connect', {});
+      drop(f.session().client, 'kicked');
+      await f.api('disconnect', {});
+      assert.equal((await f.response('overview')).status, 400);
+      await f.close();
+      restarted = createConsole({ port: 0 }); apps.add(restarted);
+      const root = await restarted.listen();
+      const response = await fetch(root + '/api/overview?account=' + f.id, { signal: AbortSignal.timeout(5000) });
+      assert.equal(response.status, 400);
+      assert.match((await response.json()).error, /账号在别处登录/);
+      assert.equal(f.state.logins, 1, '重启后不能通过总览自动重新登录');
+      assert.equal(restarted.sessions.get(f.id).loginBlocked, true);
+    } finally {
+      if (restarted) { await restarted.close(); apps.delete(restarted); }
+      await f.close();
+    }
+  });
+
+  await test('明确开启的顶号重连仍按策略恢复，次数耗尽后只读查询不能绕过停止', async () => {
+    const f = await fixture({ delay: 100 });
+    try {
+      const login = await f.api('login-settings');
+      await f.api('login-settings', { revision: login.revision, settings: { ...login.settings, reconnectEnabled: true, maxRetries: 1 } });
+      await f.start(0, 3600);
+      await waitFor(() => f.session().loop.completed === 1, '自动顶号恢复前首轮');
+      drop(f.session().client, 'kicked');
+      assert.equal((await f.response('overview')).status, 400, '网页不能绕过已配置的等待');
+      assert.equal(f.state.logins, 1);
+      assert.equal(f.automation().loginBlocked, true, '后台重连等待期间也保护页面登录');
+      await waitFor(() => f.state.logins === 2 && f.session().loop.completed === 2, '按设置恢复');
+      assert.equal(f.session().loginBlocked, false);
+      f.state.kickOnMail = 1;
+      drop(f.session().client, 'kicked');
+      await waitFor(() => !f.session().loop.running, '连续顶号次数耗尽');
+      assert.equal(f.state.logins, 3);
+      assert.equal(f.session().loginBlocked, true);
+      assert.equal((await f.response('overview')).status, 400);
+      assert.equal(f.state.logins, 3);
+    } finally { await f.close(); }
+  });
+
+  await test('顶号恢复被停止、登录拒绝或协议错误中止时继续阻止页面自动登录', async () => {
+    for (const end of ['stop', 'rejected', 'protocol']) {
+      const f = await fixture({ delay: 150 });
+      try {
+        const login = await f.api('login-settings');
+        await f.api('login-settings', { revision: login.revision, settings: { ...login.settings, reconnectEnabled: true } });
+        await f.start(0, 3600);
+        await waitFor(() => f.session().loop.completed === 1, end + '顶号前首轮');
+        drop(f.session().client, 'kicked');
+        await waitFor(() => f.session().loop.recovery, end + '进入顶号恢复等待');
+        if (end === 'stop') await f.stop();
+        else {
+          f.state.loginError = end === 'rejected'
+            ? Object.assign(new Error('login rejected'), { loginResponse: { result: 1 }, recoverable: false })
+            : Object.assign(new Error('unexpected auth reply'), { recoverable: false });
+          await waitFor(() => !f.session().loop.running, end + '恢复中止');
+        }
+        const before = f.state.logins;
+        f.state.loginError = null;
+        assert.equal(f.session().loginBlocked, true, end);
+        assert.equal(f.automation().loginBlocked, true, end);
+        assert.equal((await f.response('overview')).status, 400, end);
+        assert.equal(f.state.logins, before, end + '不能绕过终止原因重新登录');
       } finally { await f.close(); }
     }
   });

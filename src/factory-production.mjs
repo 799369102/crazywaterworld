@@ -4,6 +4,7 @@ import { goldAccountKey } from './gold-reservations.mjs';
 import { farmInventory } from './farm-planting.mjs';
 import { pendingOrderMaterialSpends, settleOrderMaterialState } from './order-reservations.mjs';
 import { factoryProductionSnapshot, factoryProductionOperation } from './spend-evidence.mjs';
+import { emitDiagnostic } from './trace-log.mjs';
 
 const pending = new Map(), busy = new Set();
 const resourceIds = new Set(['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT']);
@@ -20,6 +21,26 @@ const costsOf = steps => {
   return [...costs].map(([id, num]) => ({ id, num }));
 };
 const skipped = (step, error) => ({ step, ok: false, skipped: true, error });
+
+export function captureManualFactoryProductionState(player) {
+  const account = goldAccountKey(player), prefix = account + ':';
+  if ([...busy].some(key => key.startsWith(prefix))) throw new Error('工厂仍在处理排产，请等待旧任务退出');
+  return { account, batches: [...pending].filter(([key]) => key.startsWith(prefix))
+    .map(([key, batch]) => ({ key, batch, buildingId: key.slice(prefix.length) })) };
+}
+
+export function assertManualFactoryProductionState(player, snapshot) {
+  const current = captureManualFactoryProductionState(player);
+  if (current.account !== snapshot.account || current.batches.length !== snapshot.batches.length
+    || current.batches.some(row => !snapshot.batches.some(old => row.key === old.key && row.batch === old.batch))) {
+    throw new Error('同步期间工厂记录已变化，请重新同步');
+  }
+}
+
+export function retireManualFactoryProductionState(player, snapshot) {
+  assertManualFactoryProductionState(player, snapshot);
+  for (const row of snapshot.batches) pending.delete(row.key);
+}
 
 async function settlePrevious(client, player, account, key, enabled) {
   const previous = pending.get(key);
@@ -43,11 +64,29 @@ async function settlePrevious(client, player, account, key, enabled) {
 export async function confirmFactoryProductionBeforeHarvest(client, protocol, buildingId, { player, enabled = () => true } = {}) {
   if (!player) return false;
   const account = goldAccountKey(player), key = account + ':' + buildingId;
-  if (!pending.has(key)) return false;
+  // Manual/single-request production uses the shared material guard instead
+  // of this module's batch map. Harvesting must preserve that evidence too.
+  const handles = pendingOrderMaterialSpends(player).filter(handle => handle.operation.factoryBuildingId === buildingId);
+  if (!pending.has(key) && !handles.length) return false;
   if (busy.has(key)) throw new AutomationSkip('工厂正在核对排产，暂缓领取成品');
   for (const name of ['OnWaterRequest', 'OnWaterResponse', 'AllItemRequest', 'AllItemResponse']) if (!protocol[name]) throw new AutomationSkip('当前协议无法核对上次排产，暂缓领取成品');
   busy.add(key);
-  try { return await settlePrevious(client, player, account, key, enabled); }
+  try {
+    const live = () => enabled() && client.connected !== false && goldAccountKey(player) === account;
+    const check = () => { if (!live()) throw new AutomationSkip('操作已暂停、断开或账号已切换，保留排产记录'); };
+    check();
+    const settled = await settlePrevious(client, player, account, key, live);
+    const remaining = handles.filter(handle => pendingOrderMaterialSpends(player).includes(handle));
+    if (!remaining.length) return settled;
+    for (const handle of remaining) {
+      if (!handle.operation.confirmed && !await handle.operation.verify(client)) throw new AutomationSkip('上次排产结果待确认，暂缓领取成品');
+      check(); handle.operation.confirmed = true;
+    }
+    const stock = farmInventory(normalize(await client.request('AllItemRequest', {}, 'AllItemResponse')));
+    check();
+    settleOrderMaterialState(player, { account: remaining[0].account, handles: remaining }, stock);
+    return true;
+  }
   catch (error) { throw error.code === 'AUTOMATION_SKIP' ? error : new AutomationSkip('上次排产尚未完整核对，暂缓领取成品：' + error.message); }
   finally { busy.delete(key); }
 }
@@ -155,6 +194,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
         results.push(entry); attemptedEntries.add(entry);
       } catch (error) {
         const notSent = !attempted || error.notSent === true || error.prompt && error.request === step.request;
+        emitDiagnostic(client, 'factory-production-write-stopped', { buildingId, productId: step.body.productId,
+          notSent: !!notSent, rejected: !!(error.prompt && error.request === step.request), reason: error.message });
         if (attempted && notSent) batch.attempted.pop();
         const entry = { step, ok: false, ...(notSent ? { skipped: error.code === 'AUTOMATION_SKIP' } : { status: 'unknown' }), error: error.message, failureError: error };
         results.push(entry); if (attempted && !notSent) attemptedEntries.add(entry);
@@ -188,6 +229,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
       }
     }
   } catch (error) {
+    emitDiagnostic(client, 'factory-production-batch-blocked', { buildingId: steps[0]?.body?.buildingId,
+      attempted: batch?.attempted?.length ?? 0, reason: error.message });
     if (batch) batch.sealed = true;
     if (prepared && !batch?.attempted.length) await actionGuard.cancel(batchStep, ticket, { notSent: true });
     if (batch?.attempted.length && prepared) {

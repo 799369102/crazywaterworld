@@ -79,6 +79,7 @@ import { readWorldOnlineReward, worldOnlineRewardKey } from './world-online-rewa
 import { readEquipmentForge, planEquipmentForge, releaseStaleEquipmentForge, forgeEnabled } from './equipment-forge.mjs';
 import { readAntiqueUpgrade, planAntiqueUpgrade, antiqueEnabled } from './antique-upgrade.mjs';
 import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands, previewNativeAutomation } from './base-automation.mjs';
+import { reconcileManualProduction } from './manual-production-sync.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
@@ -101,7 +102,8 @@ const TRACE_MAX_BYTES = (() => {
   const value = Number(process.env.CW_PROTOCOL_LOG_MAX_BYTES);
   return Number.isSafeInteger(value) && value > 0 ? value : 5 * 1024 * 1024;
 })();
-const FULL_TRACE_MESSAGE = /Fleet|Pirate|TreasureLoot|CampaignReport|DailyTaskInfo|Fishing|GainBig/;
+// 基地回包包含全部建筑、库存和海兽；截到 400 字会丢掉核销生产/种植/进阶所需的证据。
+const FULL_TRACE_MESSAGE = /Fleet|Pirate|TreasureLoot|CampaignReport|DailyTaskInfo|Fishing|GainBig|^(?:OnWater|AllItem|AllResource|AllPet)Response$|^SC(?:Factory|Farm|Pet)/;
 
 const STATE_TEXT = {
   IDLE: '未连接',
@@ -144,6 +146,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     for (const [id, entry] of pendingPhoneLogins) if (entry.createdAt < cutoff) pendingPhoneLogins.delete(id);
   }
   let logId = 0;
+  trace(null, 'runtime', { startedAt: RUN_VERSION, node: process.version });
 
   const logLimit = (list) => {
     while (list.length > LOG_LIMIT) list.shift();
@@ -220,6 +223,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       preferencesRevision: detailed.revision,
       preferencesSavedAt: detailed.savedAt,
       paused: saved?.paused === true,
+      loginBlocked: saved?.loginBlocked === true,
+      productionSyncRequired: saved?.productionSyncRequired === true,
+      productionSyncDrain: null,
+      syncingProduction: null,
       generation: 0,
       client: null,
       connecting: null,
@@ -261,7 +268,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   // 页面读取：队列空闲时照常排队；挂机一轮可持续一分钟以上，此时改在它两次请求之间读取，不等整轮结束。
   function readJob(session, work) {
     const client = session.client, generation = session.generation;
-    if (!session.queueTail || !client?.connected || !client.interleaveRead) return enqueue(session, work);
+    if (!session.queueTail || !client?.connected || !client.interleaveRead
+      || session.connecting || session.syncingProduction || session.productionSyncRequired) return enqueue(session, work);
     return client.interleaveRead(() => {
       if (session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
       return work();
@@ -357,7 +365,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     watchFleetMaintenance(instance);
     // 任务已停或关闭自动派遣时也处理返航。合并同一批推送，进入账号原有的串行队列。
     let settlementTimer=null, settlementBusy=false, settlementDirty=false;
-    const current=()=>session.client===instance && instance.connected && session.player && !session.paused;
+    const current=()=>session.client===instance && instance.connected && session.player && !session.paused && !session.productionSyncRequired;
     function scheduleSettlement(){
       if(!current())return;
       settlementDirty=true;
@@ -562,6 +570,22 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return Math.max(1000, (base + offset) * 1000);
   }
 
+  function blockImplicitLogin(session, recovering = false) {
+    if (session.loginBlocked) return;
+    saveAutomation(session.id, { loginBlocked: true });
+    session.loginBlocked = true;
+    emit(session, 'warn', recovering ? '账号在别处登录，网页已停止自动登录；挂机将按已保存的顶号重连设置等待恢复，自己上号时请先暂停托管'
+      : '账号在别处登录，已停止自动登录。自行上号结束后，请点击「恢复托管」「连接」或「开始挂机」', { loginBlocked: true });
+  }
+
+  function requireProductionSync(session) {
+    saveAutomation(session.id, { productionSyncRequired: true });
+    session.productionSyncRequired = true;
+    // 只等待交接时已经存在的操作。outer loop.job 会执行自动重连，不能等待它自己。
+    const oldJobs = [session.productionSyncDrain, session.queueTail, session.client?.readTail];
+    session.productionSyncDrain = Promise.allSettled(oldJobs);
+  }
+
   function connectionLost(session, instance) {
     if (instance.lostHandled || instance.stopping || session.client !== instance) return;
     instance.lostHandled = true;
@@ -573,8 +597,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.mutualAid.stop(reason);
     for (const task of session.trials.values()) task.stop(reason);
     const loop = session.loop;
-    if (!loop.running || loop.controller?.signal.aborted) return;
+    // 顶号后只读页面仍会轮询；不能让 ensureConnected 绕过停止挂机而抢回登录。
+    // 仅正在运行且用户明确允许的顶号重连继续按原恢复策略处理。
+    if (kicked) {
+      requireProductionSync(session);
+      blockImplicitLogin(session, loop.running && !loop.controller?.signal.aborted && policy.autoReconnect);
+    }
     session.generation++;
+    if (!loop.running || loop.controller?.signal.aborted) return;
     const recoverable = (kicked ? policy.autoReconnect : instance.closeReason !== 'protocol' && instance.closeReason !== 'login-rejected');
     loop.connectionFailure = { reason, recoverable };
     if (recoverable) loop.attemptController?.abort();
@@ -598,18 +628,58 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   async function loginSession(session, account) {
     if (session.client?.connected) throw new Error('这个账号已经连上了');
+    const generation = session.generation, drain = session.productionSyncDrain;
+    const syncToken = session.productionSyncRequired ? {} : null;
+    if (syncToken) session.syncingProduction = syncToken;
     const client = new GameClient({ url: account.url, protocol });
     wire(session, client);
     session.client = client;
     session.player = null;
+    if (syncToken) {
+      emit(session, 'info', '正在自动同步手动操作后的生产状态，等待旧任务退出后读取工厂、农田和库存', { pauseChanged: true });
+      await drain;
+      if (session.generation !== generation || session.paused || session.client !== client || client.stopping) {
+        if (session.syncingProduction === syncToken) session.syncingProduction = null;
+        client.stop();
+        emit(session, 'state', '生产状态同步已取消，保留原记录', { pauseChanged: true });
+        throw Object.assign(new Error('连接已取消，保留待同步生产记录'), { recoverable: false });
+      }
+    }
+    try {
     const response = await client.connect(account.login);
-    if (session.client !== client) {
+    if (session.client !== client || session.generation !== generation || session.paused) {
       client.stop();
       throw new Error('连接已取消');
     }
     session.player = response.playerInfo || null;
     watchResidentRefreshes(client,usageFor(session),session.player);
     client.send('LoginFinishRequest', {});
+    if (syncToken) {
+      const player = session.player;
+      const enabled = () => session.generation === generation && !session.paused && session.client === client
+        && session.player === player && client.connected;
+      try {
+        const result = await reconcileManualProduction(client, protocol, { player, enabled });
+        if (!enabled()) throw new Error('同步期间账号连接已变化');
+        saveAutomation(session.id, { productionSyncRequired: false });
+        session.productionSyncRequired = false;
+        if (session.productionSyncDrain === drain) session.productionSyncDrain = null;
+        emit(session, 'info', result.message + '；继续按当前状态执行已启用任务', { pauseChanged: true });
+      } catch (error) {
+        // 读取暂时失败可以自动重试，但不能开放任何经营写操作。
+        const cause = client.closeReason;
+        const recoverable = !session.paused && session.client === client && !error.loginResponse
+          && !['protocol', 'login-rejected'].includes(cause)
+          && (enabled() || ['network', 'heartbeat-timeout', 'sequence-gap'].includes(cause)
+            || cause === 'kicked' && session.loop.running && reconnectPolicy(session).autoReconnect);
+        client.stop();
+        error.recoverable = recoverable;
+        error.productionSyncRetry = recoverable && cause !== 'kicked' && client.fatalReason !== 'SCChannelExpired';
+        error.productionSyncGeneration = session.generation;
+        emit(session, 'warn', '生产状态暂未同步，保留原记录并暂停本次操作，后续连接会自动重试：' + error.message);
+        throw error;
+      }
+    }
     try {
       const samePrefix = loadStore().accounts.filter(a => a.id.slice(0,8) === account.id.slice(0,8));
       const recovered = recoverPirateHunts(client, session.player, usageFor(session), account.id,
@@ -623,16 +693,38 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const role = describeRole(session.player);
     emit(session, 'info', `已进入游戏：${role?.nickname ?? '未知角色'}（${role?.level ?? '?'} 级）`);
     return { url: account.url, result: response.result, initSeqNo: response.initSeqNo, playerInfo: session.player };
+    } finally {
+      if (syncToken && session.syncingProduction === syncToken) {
+        session.syncingProduction = null;
+        emit(session, 'state', session.productionSyncRequired ? '生产状态仍待同步，保留原记录' : '生产状态已同步', { pauseChanged: true });
+      }
+    }
   }
 
-  async function connect(session, account, { backgroundRecovery = false } = {}) {
+  async function connect(session, account, { backgroundRecovery = false, explicitLogin = false } = {}) {
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
+    const authorizedRecovery = backgroundRecovery && session.loop.running && !session.loop.controller?.signal.aborted && reconnectPolicy(session).autoReconnect;
+    if (session.loginBlocked && !explicitLogin && !authorizedRecovery) throw new Error('账号在别处登录，已停止自动登录；退出游戏后请点击「恢复托管」「连接」或「开始挂机」');
     if (session.loop.running && (session.loop.recovery || session.loop.connectionFailure) && !backgroundRecovery) throw new Error('后台正在恢复连接，请稍后重试');
     if (session.connecting) return session.connecting;
     const connecting = loginSession(session, account);
     session.connecting = connecting;
     try {
-      return await connecting;
+      const result = await connecting;
+      if ((explicitLogin || authorizedRecovery) && session.loginBlocked && session.client?.connected) {
+        saveAutomation(session.id, { loginBlocked: false });
+        session.loginBlocked = false;
+        emit(session, 'state', '游戏连接已恢复', { pauseChanged: true });
+      }
+      return result;
+    } catch (error) {
+      if (explicitLogin && error.productionSyncRetry && session.loginBlocked && !session.paused
+        && session.generation === error.productionSyncGeneration) {
+        saveAutomation(session.id, { loginBlocked: false });
+        session.loginBlocked = false;
+        emit(session, 'state', '已允许重新连接，生产状态同步将在后续读取时自动重试', { pauseChanged: true });
+      }
+      throw error;
     } finally {
       if (session.connecting === connecting) session.connecting = null;
     }
@@ -656,6 +748,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function accountStatus(session) {
     return {
       paused: session.paused,
+      syncingProduction: Boolean(session.syncingProduction),
+      loginBlocked: session.loginBlocked,
+      reconnecting: session.loginBlocked && session.loop.running && !session.loop.controller?.signal.aborted && reconnectPolicy(session).autoReconnect,
       connected: Boolean(session.client?.connected),
       state: session.client?.snapshot?.().state ?? 'IDLE',
       busy: session.busy,
@@ -908,6 +1003,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const scoped_ = (url) => {
       const found = resolve(url);
       scoped = found.session;
+      if (req.method === 'POST' && found.session.syncingProduction
+        && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
+          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/logs/clear'].includes(parsed.pathname)) {
+        throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
+      }
       if (longRunning) found.session.busy = route;
       return found;
     };
@@ -1403,11 +1503,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         const { paused } = jsonBody();
         if (typeof paused !== 'boolean') throw new Error('请选择暂停或恢复');
-        if (session.paused !== paused) {
-          saveAutomation(account.id, { paused });
+        if (session.paused !== paused || (!paused && session.loginBlocked) || (paused && session.syncingProduction)) {
+          saveAutomation(account.id, { paused, ...(!paused ? { loginBlocked: false } : {}) });
           session.paused = paused;
+          if (!paused) session.loginBlocked = false;
           const generation = ++session.generation;
           if (paused) {
+            requireProductionSync(session);
             stopLoop(session, '账号暂停，结束挂机');
             session.stages.stop('账号已暂停'); session.mutualAid.stop('账号已暂停'); for (const task of session.trials.values()) task.stop('账号已暂停');
             session.client?.stop();
@@ -1428,11 +1530,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/connect') {
         const payload = jsonBody();
         const { account, session } = scoped_(parsed);
-        json(await connect(session, account));
+        json(await connect(session, account, { explicitLogin: true }));
         return;
       }
       if (route === 'POST /api/disconnect') {
         const { session } = scoped_(parsed);
+        requireProductionSync(session);
+        session.generation++;
         stopLoop(session, '账号已断开');
         session.stages.stop('账号已断开'); session.mutualAid.stop('账号已断开'); for (const task of session.trials.values()) task.stop('账号已断开');
         session.client?.stop();
@@ -1564,6 +1668,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         if (session.claiming) await session.claiming;
         session.overviewRead ??= (session.queueTail && session.client?.connected && session.client.interleaveRead
+          && !session.connecting && !session.syncingProduction && !session.productionSyncRequired
           ? session.client.interleaveRead(() => overview(session, account)) : overview(session, account)).finally(() => { session.overviewRead = null; });
         json(await session.overviewRead);
         return;
@@ -2176,7 +2281,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const payload = jsonBody();
         needConfirm(payload);
         const { account, session } = scoped_(parsed);
-        startLoop(session, account, { rounds: payload.rounds, everySeconds: payload.everySeconds });
+        startLoop(session, account, { rounds: payload.rounds, everySeconds: payload.everySeconds, explicitLogin: true });
         json(loopView(session));
         return;
       }
@@ -2276,6 +2381,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function startLoop(session, account, options = {}) {
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
+    if (session.loginBlocked && !options.explicitLogin) throw new Error('账号在别处登录，请先恢复托管或重新开始挂机');
     const loop = session.loop;
     if (loop.running) throw new Error('这个账号的挂机已在运行');
     const current = settingsView(session);
@@ -2291,11 +2397,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       next.loop.everySeconds = everySeconds;
       adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
     }
-    saveAutomation(account.id, { enabled: rounds === 0, rounds, everySeconds });
+    saveAutomation(account.id, { enabled: rounds === 0, rounds, everySeconds, loginBlocked: false });
+    session.loginBlocked = false;
     Object.assign(loop, { running: true, rounds, completed: 0, everyMs: everySeconds * 1000,
       history: [], error: null, recovery: null, connectionFailure: null, challengeRun: createChallengeRun(), controller: new AbortController() });
     const { signal } = loop.controller;
     emit(session, 'info', `自动挂机开始，${rounds === 0 ? '持续运行' : '共 ' + rounds + ' 轮'}，每 ${everySeconds} 秒检查一次；关闭网页后继续运行，请保留启动窗口`);
+    trace(session, 'automation-run', { startedAt: RUN_VERSION, settingsRevision: session.preferencesRevision,
+      rounds, everySeconds, tasks: loop.tasks, reconnect: reconnectPolicy(session), settings: settingsView(session).settings });
     let credentialFailed = false, recoveryAttempts = 0, kickedRecovery = false;
     loop.job = (async () => {
       try {
@@ -2397,6 +2506,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const attempt = ++recoveryAttempts;
           const maxRetries = reconnectPolicyForAttempt.maxRetries;
           if (kickedRecovery && attempt > maxRetries) {
+            blockImplicitLogin(session);
             const message = `自动重连已达到最大重试次数（${maxRetries} 次），已停止重试`;
             loop.recovery = null;
             loop.error = message;
@@ -2428,7 +2538,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         loop.attemptController = null;
         loop.recovery = null;
         loop.job = null;
-        emit(session, 'info', '自动挂机结束');
+        emit(session, 'info', '自动挂机结束', session.loginBlocked ? { pauseChanged: true } : undefined);
         if (credentialFailed) {
           saveAutomation(account.id, { enabled: false });
           emit(session, 'error', '服务器拒绝登录，凭证可能已失效。请在账号页重新采集后再开始挂机');
@@ -2555,6 +2665,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       for (const stream of streams) stream.destroy();
       streams.clear();
       for (const session of sessions.values()) {
+        session.generation++;
         session.loop.controller?.abort();
         session.pirateAdvance.stop('控制台已关闭'); session.stages.stop('控制台已关闭'); session.mutualAid.stop('控制台已关闭'); for (const task of session.trials.values()) task.stop('控制台已关闭');
         session.client?.stop();

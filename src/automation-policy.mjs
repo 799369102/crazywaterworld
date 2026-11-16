@@ -175,6 +175,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       let settings = getSettings?.();
       const planting = step.request === 'FarmPlantRequest';
       const exploring = step.request === 'MuseumStartExploreRequest';
+      const producing = step.request === 'StartFactoryProduceRequest';
       if (planting && !player) throw new AutomationSkip('无法确认播种账号');
       if (exploring && !player) throw new AutomationSkip('无法确认探宝账号');
       if (!settings && !player) return null;
@@ -182,14 +183,14 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       if (planting && !costs.size) throw new AutomationSkip('无法确认播种种子消耗');
       if (exploring && !costs.size) throw new AutomationSkip('无法确认探宝材料消耗');
       // Legacy callers without detailed settings still share resource barriers.
-      if (!settings && !costs.size && !step.factoryBatch) return null;
+      if (!settings && !costs.size && !step.factoryBatch && !producing) return null;
       if (!enabled()) throw new AutomationSkip('操作已暂停');
       if (!worldPreferenceEnabled(settings, step.kind)) throw new AutomationSkip('对应设置已关闭');
       if (settings && step.setting) {
         const [group, key] = step.setting.split('.');
         if (!settings[group]?.[key] || (step.scope === 'base' && !settings.loop.world)) throw new AutomationSkip('对应设置已关闭');
       }
-      const account = player && (costs.size || step.factoryBatch) ? goldAccountKey(player) : null;
+      const account = player && (costs.size || step.factoryBatch || producing) ? goldAccountKey(player) : null;
       let actualGold, materialStock, museumDetails;
       const nextBalances = new Map();
       if (costs.size) {
@@ -268,11 +269,19 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       if (account) {
         try {
           if (!enabled() || goldAccountKey(player) !== account) throw new AutomationSkip('操作已暂停或账号已切换');
-          operation = !planting && !exploring ? await captureSpendOperation(client, step, { waterSnapshot }).catch(() => ({ confirmed: false })) : null;
+          operation = !planting && !exploring ? await captureSpendOperation(client, step, { waterSnapshot }).catch(error => {
+            // A production request without its baseline cannot be reconciled
+            // later; do not send it and create a permanently unprovable lock.
+            if (producing) throw error;
+            return { confirmed: false };
+          }) : null;
+          if (producing && (typeof operation?.verify !== 'function'
+            || operation.factoryBuildingId !== step.body?.buildingId)) throw new AutomationSkip('无法完整确认排产前的队列和待收成品');
           if (!enabled() || goldAccountKey(player) !== account) throw new AutomationSkip('操作已暂停或账号已切换');
           if (operation && ticket) operation.onConfirmed = () => ledger.confirm(ticket);
           if (materialStock) materials = beginOrderMaterialSpend(player, [...costs].filter(([id]) => !['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id)).map(([id, need]) => ({ id, need, have: materialStock.get(id) ?? 0 })), step.label || step.request,
             planting ? { farm: { args: farmPlantArgs(step) } } : exploring ? { museum: museumDetails } : { operation });
+          if (materials && (ticket || [...costs.keys()].some(id => ['GOLD', 'RUBY', 'EXP', 'ARENA_POINT', 'LEAGUE_POINT'].includes(id)))) materials.manualSyncBlocked = true;
           if (costs.has('GOLD')) gold = reserveGold(player, actualGold, costs.get('GOLD'), step.request, { operation });
         } catch (error) {
           cancelOrderMaterialSpend(materials); cancelUnsentGold(gold);

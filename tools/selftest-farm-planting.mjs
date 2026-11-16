@@ -22,8 +22,10 @@ const plant = (crop, buildingId = '1农田') => ({
   costs: [{ id: seed(crop), num: 1 }], label: '农田播种 ' + crop,
 });
 const ordinary = {
-  kind: 'startProduce', request: 'StartFactoryProduceRequest', response: 'OkResponse',
-  body: { buildingId: '1加工厂', productId: '测试加工品' }, costs: [{ id: '木材', num: 1 }], label: '普通材料消费',
+  // Use a consumer with a business receipt: production itself now requires a
+  // readable factory baseline, independently of an older farm reservation.
+  kind: 'finishOrder', request: 'FinishWorkerOrderRequest', response: 'FinishWorkerOrderResponse',
+  body: { index: 1 }, costs: [{ id: '木材', num: 1 }], label: '普通材料消费',
 };
 
 function fixture({ player, state } = {}) {
@@ -71,10 +73,10 @@ function fixture({ player, state } = {}) {
         if (state.mode === 'timeoutAfterPlant') throw new Error('timeout waiting for OkResponse (sent FarmPlantRequest)');
         return {};
       }
-      if (name === 'StartFactoryProduceRequest') {
+      if (name === 'FinishWorkerOrderRequest') {
         state.writes.push({ name, body: structuredClone(body) });
         state.stock.set('木材', state.stock.get('木材') - 1);
-        return {};
+        return { reward: { asset: [{ type: 1, id: 'EXP', num: 1 }] } };
       }
       throw new Error('测试出现意外请求 ' + name);
     },
@@ -168,7 +170,7 @@ await test('未知结果后来在地块上确认，由普通材料消费触发�
   f.state.mode = 'normal';
   assert.equal((await f.run(ordinary)).results[0].ok, true);
   assert.equal(f.pending().length, 0);
-  assert.deepEqual(f.state.writes.map(row => row.name), ['FarmPlantRequest', 'StartFactoryProduceRequest']);
+  assert.deepEqual(f.state.writes.map(row => row.name), ['FarmPlantRequest', 'FinishWorkerOrderRequest']);
 });
 
 await test('旧播种回读失败不阻止无关材料消费者', async () => {

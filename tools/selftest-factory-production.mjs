@@ -225,4 +225,76 @@ await test('无关零级工厂的合法空消息不阻塞已建工厂，异常�
   const g = fixture(); g.state.otherBuildings = [{ buildingId:'2材料厂', level:0, factory:{ finishedProducts:[{type:0,id:'产品甲',num:1}] } }];
   const blocked = await g.batch(); assert.equal(g.state.writes.length,0); assert(blocked.results.every(row=>row.skipped));
 });
+await test('单件兼容入口的秒产也核对成品，下一次消费不会残留材料锁', async () => {
+  const f = fixture(); f.state.instant = true;
+  const run = () => runWorld(f.client, protocol, { actions: [f.step()] }, { ...f.options(), config: undefined, allowMutate: true });
+  const first = await run();
+  assert.equal(first.results[0].status, 'confirmed');
+  assert.equal(pendingOrderMaterialSpends(f.player).length, 0);
+  assert.equal((await run()).results[0].status, 'confirmed');
+  assert.equal(f.state.writes.length, 2);
+});
+await test('单件排产首次状态读取失败或基线不完整时不发送、不留下材料锁', async () => {
+  for (const failure of ['read', 'missing', 'duplicate', 'queue', 'finished']) {
+    const f = fixture(), original = f.client.request.bind(f.client);
+    f.client.request = async (name, body, response) => {
+      if (name !== 'OnWaterRequest') return original(name, body, response);
+      if (failure === 'read') throw new Error('初次工厂状态读取失败');
+      if (failure === 'missing') return {};
+      const value = await original(name, body, response);
+      if (failure === 'duplicate') value.building.push(structuredClone(value.building[0]));
+      if (failure === 'queue') value.building[0].factory.factoryQ.push({ idx: 0, finishTime: now() + 60 });
+      if (failure === 'finished') value.building[0].factory.finishedProducts.push({ type: 0, id: '产品甲', num: -1 });
+      return value;
+    };
+    const run = () => runWorld(f.client, protocol, { actions: [f.step()] }, { ...f.options(), config: undefined, allowMutate: true });
+    const result = (await run()).results[0];
+    assert.equal(result.skipped, true, failure);
+    assert.equal(result.ok, false, failure);
+    assert.equal(f.state.writes.length, 0, failure);
+    assert.equal(pendingOrderMaterialSpends(f.player).length, 0, failure);
+    f.client.request = original;
+    assert.equal((await run()).results[0].status, 'confirmed', failure + '：读取恢复后可以正常生产');
+    assert.equal(f.state.writes.length, 1, failure);
+    assert.equal(pendingOrderMaterialSpends(f.player).length, 0, failure);
+  }
+});
+await test('不耗原料的单件兼容排产也必须先读取完整工厂基线', async () => {
+  const f = fixture(); f.config.tables.BuildingProduceCfg.data[0].costItem = [];
+  f.state.afterRead = name => { if (name === 'OnWaterRequest') throw new Error('初次工厂状态读取失败'); };
+  const result = await runWorld(f.client, protocol, { actions: [f.step()] }, {
+    ...f.options(), config: undefined, getSettings: () => null, allowMutate: true,
+  });
+  assert.equal(result.results[0].skipped, true); assert.equal(f.state.writes.length, 0);
+  assert.equal(pendingOrderMaterialSpends(f.player).length, 0);
+});
+await test('单件排产核对暂时失败，收成品前恢复证据和材料结算', async () => {
+  const f = fixture(); f.state.instant = true;
+  f.state.afterRead = name => { if (name === 'OnWaterRequest' && f.state.writes.length) throw new Error('测试临时水面读取失败'); };
+  await runWorld(f.client, protocol, { actions: [f.step()] }, { ...f.options(), config: undefined, allowMutate: true });
+  assert.equal(pendingOrderMaterialSpends(f.player).length, 1);
+  const harvest = { kind: 'gainFactory', request: 'GainFactoryProduceRequest', response: 'GainFactoryProduceResponse', body: { buildingId: '1材料厂' } };
+  const blocked = await runWorld(f.client, protocol, { actions: [harvest] }, { ...f.options(), allowMutate: true });
+  assert.equal(blocked.results[0].skipped, true); assert.equal(f.state.harvests, 0);
+  f.state.afterRead = null;
+  const recovered = await runWorld(f.client, protocol, { actions: [harvest, f.step()] }, { ...f.options(), allowMutate: true });
+  assert(recovered.results.every(row => row.ok));
+  assert.equal(f.state.harvests, 1); assert.equal(f.state.writes.length, 2);
+  assert.equal(pendingOrderMaterialSpends(f.player).length, 0);
+});
+await test('生产诊断保留期待数量与前后证据，日志观察者报错不影响结果', async () => {
+  const f = fixture(), diagnostics = []; f.state.instant = true;
+  f.client.emit = (event, data) => { assert.equal(event, 'diagnostic'); diagnostics.push(data); throw new Error('日志观察者失败'); };
+  assert((await f.batch([f.step(), f.step()])).results.every(row => row.ok));
+  const verified = diagnostics.find(row => row.event === 'factory-production-verification');
+  assert.equal(verified.buildingId, '1材料厂'); assert.equal(verified.confirmed, true);
+  assert.deepEqual(verified.expected, { '产品甲': 2 });
+  assert.deepEqual(verified.before.totals, {}); assert.deepEqual(verified.after.totals, { '产品甲': 2 });
+  const g = fixture(), failures = [];
+  g.client.emit = (event, data) => failures.push(data); g.state.mode = 'unknown'; g.state.failAt = 1;
+  await g.batch();
+  assert(failures.some(row => row.event === 'factory-production-write-stopped' && !row.notSent && !row.rejected));
+  assert(failures.some(row => row.event === 'factory-production-verification' && !row.confirmed && row.expected['产品甲'] === 1));
+  assert.equal(pendingOrderMaterialSpends(g.player).length, 1);
+});
 console.log('生产批次专项 ' + passed + '/' + passed + ' 通过');
