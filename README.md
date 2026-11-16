@@ -95,3 +95,8 @@ npm start
 - 活动下线范围、时间依据及恢复方式。[活动配置规则](docs/activity-availability.md)
 
 项目采用自定义的学习交流使用许可，仅允许非商业性的学习、技术研究、教学和交流用途。商业使用须取得相应权利人的书面授权。第三方组件和既有授权内容按各自适用的许可执行，具体范围见许可正文。[许可证](LICENSE)
+
+## 反馈与交流
+
+- 问题反馈与功能建议。[提交 Issue](https://github.com/xutongxue233/crazywaterworld/issues/new)
+- 加入 QQ 群交流。[560376980](https://qm.qq.com/q/Djwu07B9PU)
