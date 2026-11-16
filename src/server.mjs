@@ -130,6 +130,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   const globalLog = [];
   const streams = new Set();
   const sessions = new Map();
+  let closing = false;
   const resources = resourceUpdater || (resourceUpdates ? createResourceUpdater({ onEvent: ({ level, message }) => emit(null, level, message) }) : null);
   // 手机号登录分两步：先认证并换游戏凭证，用户核对 openId 后再保存。
   // 密码只用于当次请求；待保存凭证和待选账号只放在内存，十分钟后清理。
@@ -224,6 +225,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       preferencesSavedAt: detailed.savedAt,
       paused: saved?.paused === true,
       loginBlocked: saved?.loginBlocked === true,
+      loginRecovery: saved?.loginRecovery ?? null,
+      loginRecoveryJob: null,
+      loginRecoveryController: null,
+      loginRecoveryWait: null,
       productionSyncRequired: saved?.productionSyncRequired === true,
       productionSyncDrain: null,
       syncingProduction: null,
@@ -308,6 +313,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   function adoptPreferences(session, entry) {
+    const previousLogin = JSON.stringify(session.preferences?.login);
     session.preferences = entry.settings;
     session.preferencesRevision = entry.revision;
     session.preferencesSavedAt = entry.savedAt;
@@ -316,6 +322,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.loop.everyMs = entry.settings.loop.everySeconds * 1000;
     if (!session.loop.running) session.loop.rounds = entry.settings.loop.rounds;
     session.client?.emit?.('automationSettingsChanged');
+    if (previousLogin !== JSON.stringify(entry.settings.login)) refreshLoginRecovery(session);
   }
 
   function settingsView(session) {
@@ -574,8 +581,148 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (session.loginBlocked) return;
     saveAutomation(session.id, { loginBlocked: true });
     session.loginBlocked = true;
-    emit(session, 'warn', recovering ? '账号在别处登录，网页已停止自动登录；挂机将按已保存的顶号重连设置等待恢复，自己上号时请先暂停托管'
+    emit(session, 'warn', recovering ? '账号在别处登录，将按登录设置等待自动重连，连接后自动同步生产状态'
       : '账号在别处登录，已停止自动登录。自行上号结束后，请点击「恢复托管」「连接」或「开始挂机」', { loginBlocked: true });
+  }
+
+  function loginRecoveryActive(session) {
+    return ['waiting', 'connecting'].includes(session.loginRecovery?.status);
+  }
+
+  function saveLoginRecovery(session, state, { loginBlocked = session.loginBlocked } = {}) {
+    saveAutomation(session.id, { loginRecovery: state, loginBlocked });
+    session.loginRecovery = state;
+    session.loginBlocked = loginBlocked;
+    if (session.loop.running) session.loop.recovery = loginRecoveryActive(session) ? {
+      attempt: state.attempts + (state.status === 'waiting' ? 1 : 0),
+      nextAttemptAt: state.nextAttemptAt,
+      reason: '账号在别处登录，连接被顶掉',
+    } : null;
+  }
+
+  function cancelLoginRecovery(session, status = 'cancelled') {
+    const state = session.loginRecovery;
+    session.loginRecoveryController?.abort();
+    session.loginRecoveryWait?.abort();
+    if (state?.status === 'connecting') {
+      session.generation++;
+      session.client?.stop();
+    }
+    if (state && state.status !== status) {
+      saveLoginRecovery(session, { ...state, status });
+      if (status === 'cancelled' && ['waiting', 'connecting'].includes(state.status)) {
+        emit(session, 'state', '已取消异地登录自动重连', { pauseChanged: true });
+      }
+    }
+  }
+
+  function scheduleLoginRecovery(session, waitStartedAt = Date.now()) {
+    const attempts = session.loginRecovery?.attempts ?? 0;
+    const policy = reconnectPolicy(session);
+    if (!policy.autoReconnect) {
+      saveLoginRecovery(session, { status: 'disabled', attempts, waitStartedAt, nextAttemptAt: null });
+      return;
+    }
+    if (attempts >= policy.maxRetries) {
+      saveLoginRecovery(session, { status: 'exhausted', attempts, waitStartedAt, nextAttemptAt: null });
+      emit(session, 'error', `自动重连已达到最大重试次数（${policy.maxRetries} 次），已停止重试`, { pauseChanged: true });
+      return;
+    }
+    const delay = reconnectDelayMs(session, attempts + 1, true);
+    saveLoginRecovery(session, { status: 'waiting', attempts, waitStartedAt, nextAttemptAt: waitStartedAt + delay });
+    emit(session, 'warn', `账号在别处登录；${Math.ceil(Math.max(0, waitStartedAt + delay - Date.now()) / 1000)} 秒后自动重连（第 ${attempts + 1}/${policy.maxRetries} 次），连接后自动同步生产状态`,
+      { reconnect: { attempt: attempts + 1, maxRetries: policy.maxRetries, delayMs: delay }, pauseChanged: true });
+  }
+
+  function refreshLoginRecovery(session) {
+    const state = session.loginRecovery;
+    if (!state || !session.loginBlocked || session.paused || closing || ['cancelled', 'failed', 'connected'].includes(state.status)) return;
+    if (!reconnectPolicy(session).autoReconnect) {
+      cancelLoginRecovery(session, 'disabled');
+      emit(session, 'state', '已关闭异地登录自动重连', { pauseChanged: true });
+      return;
+    }
+    if (state.status !== 'connecting') {
+      scheduleLoginRecovery(session, state.status === 'waiting' ? state.waitStartedAt : Date.now());
+      session.loginRecoveryWait?.abort();
+      startLoginRecovery(session);
+    }
+  }
+
+  // 账号级恢复独立于挂机循环。页面读取只能观察等待，循环在旧轮次退出后复用这次恢复。
+  function startLoginRecovery(session) {
+    if (closing || sessions.get(session.id) !== session || session.paused || !loginRecoveryActive(session) || session.loginRecoveryJob) return session.loginRecoveryJob;
+    const controller = new AbortController();
+    session.loginRecoveryController = controller;
+    const active = () => !controller.signal.aborted && !closing && !session.paused;
+    const job = Promise.resolve().then(async () => {
+      while (active() && loginRecoveryActive(session)) {
+        const policy = reconnectPolicy(session);
+        const state = session.loginRecovery;
+        if (!policy.autoReconnect) { cancelLoginRecovery(session, 'disabled'); break; }
+        if (state.attempts >= policy.maxRetries) { scheduleLoginRecovery(session); break; }
+        const delay = Math.max(0, state.nextAttemptAt - Date.now());
+        if (delay > 0) {
+          const wait = new AbortController();
+          session.loginRecoveryWait = wait;
+          const cancel = () => wait.abort();
+          controller.signal.addEventListener('abort', cancel, { once: true });
+          try { await recoveryWait(delay, undefined, { signal: wait.signal }); }
+          catch (error) { if (error.name !== 'AbortError') throw error; }
+          finally {
+            controller.signal.removeEventListener('abort', cancel);
+            if (session.loginRecoveryWait === wait) session.loginRecoveryWait = null;
+          }
+          continue;
+        }
+        // 顶号可能发生在认证/同步中，先等旧连接收尾，避免并发登录和旧操作跨会话执行。
+        await session.connecting?.catch(() => {});
+        await session.productionSyncDrain;
+        if (!active() || session.loginRecovery !== state) continue;
+        const account = loadStore().accounts.find(row => row.id === session.id);
+        if (!account) {
+          session.loginRecovery = null;
+          break;
+        }
+        saveLoginRecovery(session, { ...state, status: 'connecting', attempts: state.attempts + 1 });
+        const generation = session.generation;
+        try {
+          await connect(session, account, { loginRecoveryController: controller });
+          if (!active()) break;
+          if (!session.client?.connected || session.generation !== generation) throw Object.assign(new Error('连接尚未恢复'), { recoverable: true });
+          // 挂机完整一轮后才清零，防止刚登录又被顶号无限重试。
+          saveLoginRecovery(session, session.loop.running ? { ...session.loginRecovery, status: 'connected' } : null, { loginBlocked: false });
+          emit(session, 'state', '游戏连接已恢复', { pauseChanged: true });
+          return;
+        } catch (error) {
+          if (!active()) break;
+          const client = session.client;
+          const cause = client?.closeReason;
+          client?.stop();
+          if (error.loginResponse || error.recoverable === false || ['protocol', 'login-rejected'].includes(cause)) {
+            saveLoginRecovery(session, { ...session.loginRecovery, status: 'failed', error: error.message });
+            emit(session, 'error', '自动重连已停止：' + error.message, { pauseChanged: true });
+            break;
+          }
+          emit(session, 'warn', '自动重连暂未成功：' + error.message);
+          scheduleLoginRecovery(session);
+        }
+      }
+    }).catch(error => {
+      if (active()) {
+        saveLoginRecovery(session, { ...session.loginRecovery, status: 'failed', error: error.message });
+        emit(session, 'error', '自动重连已停止：' + error.message, { pauseChanged: true });
+      }
+    }).finally(() => {
+      if (session.loginRecoveryJob === job) {
+        session.loginRecoveryJob = null;
+        session.loginRecoveryController = null;
+        // 关闭后重新开启设置可能发生在旧尝试收尾期间。
+        if (loginRecoveryActive(session)) startLoginRecovery(session);
+      }
+    });
+    session.loginRecoveryJob = job;
+    return job;
   }
 
   function requireProductionSync(session) {
@@ -597,18 +744,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.mutualAid.stop(reason);
     for (const task of session.trials.values()) task.stop(reason);
     const loop = session.loop;
-    // 顶号后只读页面仍会轮询；不能让 ensureConnected 绕过停止挂机而抢回登录。
-    // 仅正在运行且用户明确允许的顶号重连继续按原恢复策略处理。
     if (kicked) {
       requireProductionSync(session);
-      blockImplicitLogin(session, loop.running && !loop.controller?.signal.aborted && policy.autoReconnect);
+      blockImplicitLogin(session, policy.autoReconnect);
     }
     session.generation++;
+    if (kicked && (!session.loginRecoveryJob || !loginRecoveryActive(session))) {
+      if (session.loginRecovery?.status !== 'connected') saveLoginRecovery(session, null);
+      scheduleLoginRecovery(session);
+      startLoginRecovery(session);
+    }
     if (!loop.running || loop.controller?.signal.aborted) return;
     const recoverable = (kicked ? policy.autoReconnect : instance.closeReason !== 'protocol' && instance.closeReason !== 'login-rejected');
     loop.connectionFailure = { reason, recoverable };
     if (recoverable) loop.attemptController?.abort();
-    else stopLoop(session, reason + '，已停止挂机');
+    else stopLoop(session, reason + '，已停止挂机', { cancelRecovery: false });
   }
 
   // 每次连接把服务端给的昵称/等级/区服写回账号文件，账号列表里就能看到人话标记。
@@ -671,7 +821,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const recoverable = !session.paused && session.client === client && !error.loginResponse
           && !['protocol', 'login-rejected'].includes(cause)
           && (enabled() || ['network', 'heartbeat-timeout', 'sequence-gap'].includes(cause)
-            || cause === 'kicked' && session.loop.running && reconnectPolicy(session).autoReconnect);
+            || cause === 'kicked' && reconnectPolicy(session).autoReconnect);
         client.stop();
         error.recoverable = recoverable;
         error.productionSyncRetry = recoverable && cause !== 'kicked' && client.fatalReason !== 'SCChannelExpired';
@@ -689,6 +839,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
     try {await checkFleetSettlement(client,session.player,usageFor(session));}
     catch(error){emit(session,'warn','舰队历史占用待核对：'+error.message);}
+    if (session.client !== client || session.generation !== generation || session.paused || !client.connected) {
+      throw new Error('连接初始化期间已断开或取消');
+    }
     persistIdentity(account, session.player);
     const role = describeRole(session.player);
     emit(session, 'info', `已进入游戏：${role?.nickname ?? '未知角色'}（${role?.level ?? '?'} 级）`);
@@ -701,19 +854,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  async function connect(session, account, { backgroundRecovery = false, explicitLogin = false } = {}) {
+  async function connect(session, account, { backgroundRecovery = false, explicitLogin = false, loginRecoveryController = null } = {}) {
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
-    const authorizedRecovery = backgroundRecovery && session.loop.running && !session.loop.controller?.signal.aborted && reconnectPolicy(session).autoReconnect;
+    const authorizedRecovery = loginRecoveryController && loginRecoveryController === session.loginRecoveryController
+      && !loginRecoveryController.signal.aborted && reconnectPolicy(session).autoReconnect;
+    if (loginRecoveryActive(session) && !authorizedRecovery) throw new Error('账号在别处登录，正在按登录设置等待自动重连');
     if (session.loginBlocked && !explicitLogin && !authorizedRecovery) throw new Error('账号在别处登录，已停止自动登录；退出游戏后请点击「恢复托管」「连接」或「开始挂机」');
-    if (session.loop.running && (session.loop.recovery || session.loop.connectionFailure) && !backgroundRecovery) throw new Error('后台正在恢复连接，请稍后重试');
+    if (session.loop.running && (session.loop.recovery || session.loop.connectionFailure) && !backgroundRecovery && !authorizedRecovery) throw new Error('后台正在恢复连接，请稍后重试');
     if (session.connecting) return session.connecting;
+    if (explicitLogin && session.loginRecovery) saveLoginRecovery(session, null);
     const connecting = loginSession(session, account);
     session.connecting = connecting;
     try {
       const result = await connecting;
-      if ((explicitLogin || authorizedRecovery) && session.loginBlocked && session.client?.connected) {
-        saveAutomation(session.id, { loginBlocked: false });
-        session.loginBlocked = false;
+      if (explicitLogin && session.loginBlocked && session.client?.connected) {
+        saveLoginRecovery(session, null, { loginBlocked: false });
         emit(session, 'state', '游戏连接已恢复', { pauseChanged: true });
       }
       return result;
@@ -750,7 +905,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       paused: session.paused,
       syncingProduction: Boolean(session.syncingProduction),
       loginBlocked: session.loginBlocked,
-      reconnecting: session.loginBlocked && session.loop.running && !session.loop.controller?.signal.aborted && reconnectPolicy(session).autoReconnect,
+      reconnecting: session.loginBlocked && loginRecoveryActive(session),
+      loginRecovery: session.loginRecovery,
       connected: Boolean(session.client?.connected),
       state: session.client?.snapshot?.().state ?? 'IDLE',
       busy: session.busy,
@@ -1410,6 +1566,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         saveStore(store);
         const removed = sessions.get(account.id);
         if (removed) removed.generation += 1;
+        removed?.loginRecoveryController?.abort();
+        removed?.loginRecoveryWait?.abort();
         removed?.loop.controller?.abort();
         removed?.pirateAdvance.stop('账号已删除'); removed?.stages.stop('账号已删除'); removed?.mutualAid.stop('账号已删除'); for (const task of removed?.trials.values() ?? []) task.stop('账号已删除');
         removed?.client?.stop();
@@ -1503,10 +1661,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { account, session } = scoped_(parsed);
         const { paused } = jsonBody();
         if (typeof paused !== 'boolean') throw new Error('请选择暂停或恢复');
+        if (!paused && !session.paused && loginRecoveryActive(session)) {
+          json(accountStatus(session));
+          return;
+        }
         if (session.paused !== paused || (!paused && session.loginBlocked) || (paused && session.syncingProduction)) {
+          cancelLoginRecovery(session);
           saveAutomation(account.id, { paused, ...(!paused ? { loginBlocked: false } : {}) });
           session.paused = paused;
-          if (!paused) session.loginBlocked = false;
+          if (!paused) {
+            session.loginBlocked = false;
+            saveLoginRecovery(session, null);
+          }
           const generation = ++session.generation;
           if (paused) {
             requireProductionSync(session);
@@ -2370,7 +2536,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     saveStore(store);
   }
 
-  function stopLoop(session, reason) {
+  function stopLoop(session, reason, { cancelRecovery = true } = {}) {
+    if (cancelRecovery) cancelLoginRecovery(session);
     session.pirateAdvance?.stop(reason);
     const loop = session.loop;
     if (!loop.running || loop.controller?.signal.aborted) return;
@@ -2381,7 +2548,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function startLoop(session, account, options = {}) {
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
-    if (session.loginBlocked && !options.explicitLogin) throw new Error('账号在别处登录，请先恢复托管或重新开始挂机');
+    if (session.loginBlocked && !options.explicitLogin && !loginRecoveryActive(session)) throw new Error('账号在别处登录，请先恢复托管或重新开始挂机');
     const loop = session.loop;
     if (loop.running) throw new Error('这个账号的挂机已在运行');
     const current = settingsView(session);
@@ -2397,15 +2564,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       next.loop.everySeconds = everySeconds;
       adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
     }
-    saveAutomation(account.id, { enabled: rounds === 0, rounds, everySeconds, loginBlocked: false });
-    session.loginBlocked = false;
+    if (!loginRecoveryActive(session)) {
+      if (options.explicitLogin || session.loginRecovery?.status !== 'connected') saveLoginRecovery(session, null);
+      session.loginBlocked = false;
+    }
+    saveAutomation(account.id, { enabled: rounds === 0, rounds, everySeconds, loginBlocked: session.loginBlocked });
     Object.assign(loop, { running: true, rounds, completed: 0, everyMs: everySeconds * 1000,
       history: [], error: null, recovery: null, connectionFailure: null, challengeRun: createChallengeRun(), controller: new AbortController() });
     const { signal } = loop.controller;
     emit(session, 'info', `自动挂机开始，${rounds === 0 ? '持续运行' : '共 ' + rounds + ' 轮'}，每 ${everySeconds} 秒检查一次；关闭网页后继续运行，请保留启动窗口`);
     trace(session, 'automation-run', { startedAt: RUN_VERSION, settingsRevision: session.preferencesRevision,
       rounds, everySeconds, tasks: loop.tasks, reconnect: reconnectPolicy(session), settings: settingsView(session).settings });
-    let credentialFailed = false, recoveryAttempts = 0, kickedRecovery = false;
+    let credentialFailed = false, recoveryAttempts = 0;
     loop.job = (async () => {
       try {
         while (!signal.aborted && (rounds === 0 || loop.completed < rounds)) {
@@ -2421,7 +2591,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         try {
         // 旧轮次及已取消的排队操作必须全部退出，不能跨连接并发重放消费。
         await session.queueTail?.catch(() => {});
+        while (!signal.aborted && session.loginRecoveryJob) await session.loginRecoveryJob;
         if (signal.aborted) break;
+        if (session.loginBlocked) throw Object.assign(new Error('账号在别处登录，自动重连已停止，请检查登录设置和日志'), { recoverable: false });
         const currentAccount = loadStore().accounts.find(row => row.id === account.id);
         if (!currentAccount || session.paused) break;
         const connecting = ensureConnected(session, currentAccount, { backgroundRecovery: true });
@@ -2458,7 +2630,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           onRound(summary) {
             summary = { ...summary, round: completedBefore + summary.round };
             recoveryAttempts = 0;
-            kickedRecovery = false;
+            if (session.loginRecovery?.status === 'connected') saveLoginRecovery(session, null);
             if (summary.world.factories?.length) {
               try {
                 fs.writeFileSync(factoryReportFile(session.id), JSON.stringify({ time: new Date().toLocaleString('zh-CN'), lines: summary.world.factories }));
@@ -2490,35 +2662,31 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (signal.aborted) break;
           const failedClient = attemptClient ?? session.client;
           const failure = loop.connectionFailure;
-          const reconnectPolicyForAttempt = reconnectPolicy(session);
           const kicked = failedClient?.fatalReason === 'SCChannelExpired' || failure?.reason === '账号在别处登录，连接被顶掉';
-          kickedRecovery ||= kicked;
-          // 顶号通常同时带 fatalReason=SCChannelExpired 与 closeReason=kicked；
-          // closeReason 不能再次把已开启自动重连的顶号排除掉。
-          const recoverable = !error.loginResponse && error.recoverable !== false && (!kicked || reconnectPolicyForAttempt.autoReconnect)
-            && (!kicked ? !['protocol', 'kicked', 'login-rejected'].includes(failedClient?.closeReason)
-              : !['protocol', 'login-rejected'].includes(failedClient?.closeReason))
+          if (kicked || session.loginBlocked && session.loginRecovery) {
+            while (!signal.aborted && session.loginRecoveryJob) await session.loginRecoveryJob;
+            if (signal.aborted) break;
+            if (session.loginBlocked) throw Object.assign(new Error('账号在别处登录，自动重连已停止，请检查登录设置和日志'), { recoverable: false });
+            continue;
+          }
+          const recoverable = !error.loginResponse && error.recoverable !== false
+            && !['protocol', 'kicked', 'login-rejected'].includes(failedClient?.closeReason)
             && (failure ? failure.recoverable : !failedClient?.connected &&
               (error.recoverable === true || ['network', 'heartbeat-timeout', 'sequence-gap'].includes(failedClient?.closeReason)
                 || /login timeout|socket error during login|socket closed during login|^not connected$/i.test(error.message)));
           if (!recoverable) throw error;
           failedClient?.stop();
-          const attempt = ++recoveryAttempts;
-          const maxRetries = reconnectPolicyForAttempt.maxRetries;
-          if (kickedRecovery && attempt > maxRetries) {
-            blockImplicitLogin(session);
-            const message = `自动重连已达到最大重试次数（${maxRetries} 次），已停止重试`;
-            loop.recovery = null;
-            loop.error = message;
-            emit(session, 'error', message, { reconnect: { attempt, maxRetries, reason: failure?.reason ?? error.message } });
-            throw new Error(message);
+          if (session.loginRecovery?.status === 'connected') {
+            blockImplicitLogin(session, true);
+            scheduleLoginRecovery(session);
+            startLoginRecovery(session);
+            continue;
           }
-          const delay = reconnectDelayMs(session, attempt, kickedRecovery);
+          const attempt = ++recoveryAttempts;
+          const delay = reconnectDelayMs(session, attempt);
           loop.recovery = { attempt: recoveryAttempts, nextAttemptAt: Date.now() + delay, reason: failure?.reason ?? error.message };
-          const timing = inReconnectQuietHours(reconnectPolicyForAttempt) ? '深夜窗口' : '常规窗口';
-          const retryText = kickedRecovery ? `第 ${recoveryAttempts}/${maxRetries} 次，${timing}` : `第 ${recoveryAttempts} 次`;
-          emit(session, 'warn', `${loop.recovery.reason}；${Math.ceil(delay / 1000)} 秒后自动重连（${retryText}），保留挂机进度`,
-            { reconnect: { attempt, maxRetries: kickedRecovery ? maxRetries : null, delayMs: delay, quietHours: kickedRecovery && timing === '深夜窗口' } });
+          emit(session, 'warn', `${loop.recovery.reason}；${Math.ceil(delay / 1000)} 秒后自动重连（第 ${recoveryAttempts} 次），保留挂机进度`,
+            { reconnect: { attempt, delayMs: delay } });
           await recoveryWait(delay, undefined, { signal });
         } finally {
           signal.removeEventListener('abort', cancelAttempt);
@@ -2651,8 +2819,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const address = `http://${host}:${server.address().port}`;
           emit(null, 'info', `控制台已启动 ${address}`);
           for (const account of loadStore().accounts) {
-            if (!account.automation?.enabled || account.automation.paused) continue;
+            if (account.automation?.paused) continue;
+            if (!account.automation?.enabled && !account.automation?.loginBlocked) continue;
             const session = sessionFor(account.id);
+            if (session.loginBlocked) {
+              // 旧版本仅保存 loginBlocked；迁移时按当前配置安排完整等待。
+              if (!session.loginRecovery || session.loginRecovery.status === 'connecting') scheduleLoginRecovery(session);
+              else if (loginRecoveryActive(session) && !reconnectPolicy(session).autoReconnect) cancelLoginRecovery(session, 'disabled');
+              startLoginRecovery(session);
+            }
+            if (!account.automation?.enabled) continue;
             try { startLoop(session, account, { rounds: 0 }); }
             catch (error) { emit(session, 'error', `无法恢复挂机：${error.message}`); }
           }
@@ -2661,11 +2837,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       });
     },
     close: async () => {
+      closing = true;
       await resources?.stop();
       for (const stream of streams) stream.destroy();
       streams.clear();
       for (const session of sessions.values()) {
         session.generation++;
+        session.loginRecoveryController?.abort();
+        session.loginRecoveryWait?.abort();
         session.loop.controller?.abort();
         session.pirateAdvance.stop('控制台已关闭'); session.stages.stop('控制台已关闭'); session.mutualAid.stop('控制台已关闭'); for (const task of session.trials.values()) task.stop('控制台已关闭');
         session.client?.stop();

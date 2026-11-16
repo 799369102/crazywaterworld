@@ -440,7 +440,10 @@ function setBusy(text, state) {
 function paintConnection() {
   if (snapshot.syncingProduction) setBusy('正在同步生产状态', 'busy');
   else if (snapshot.paused) setBusy('已暂停 · 可自行上号', 'paused');
-  else if (snapshot.reconnecting) setBusy('异地登录 · 等待自动重连', 'busy');
+  else if (snapshot.reconnecting) {
+    const seconds = Math.max(0, Math.ceil((snapshot.loginRecovery?.nextAttemptAt - Date.now()) / 1000));
+    setBusy(snapshot.loginRecovery?.status === 'connecting' ? '异地登录 · 正在自动重连' : '异地登录 · ' + seconds + ' 秒后重试', 'busy');
+  }
   else if (snapshot.loginBlocked) setBusy('异地登录 · 等待恢复托管', 'paused');
   else if (snapshot.connected) setBusy('已连接', 'on');
   else setBusy('未连接', 'off');
@@ -474,8 +477,8 @@ function renderAccountSelect() {
   $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
   $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
   paintConnection();
-  $('connect').disabled = snapshot.paused || snapshot.connected || !accounts.length;
-  $('disconnect').disabled = !snapshot.connected;
+  $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || !accounts.length;
+  $('disconnect').disabled = !snapshot.connected && !snapshot.reconnecting;
 }
 
 async function loadAccounts(reload) {
@@ -560,6 +563,8 @@ $('disconnect').onclick = async () => {
   await call('/api/disconnect', { method: 'POST' });
   if (account !== current) return;
   snapshot.connected = false;
+  snapshot.reconnecting = false;
+  snapshot.syncingProduction = false;
   paintConnection();
   renderAccountSelect();
 };
@@ -1977,6 +1982,7 @@ async function boot() {
 }
 boot();
 setInterval(refreshOverview, 20000);
+setInterval(() => { if (!document.hidden && snapshot.reconnecting) paintConnection(); }, 1000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshLoop();refreshStages();}});
 setInterval(() => { if (!loopReads) refreshLoop(); }, 3000);
 setInterval(refreshStages, 3000);
