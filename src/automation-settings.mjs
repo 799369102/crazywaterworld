@@ -63,7 +63,9 @@ export const DEFAULT_SETTINGS = {
     autoRepair: true, maxRepairCost: 15000, dailyRepairPetrolLimit: 20000,
     fallbackEnabled: false, fallbackAfter: '21:00', fallbackTargetRewards: 3,
     fallbackQualities: ['PURPLE', 'BLUE'], fallbackMediumRewardPriority: [], fallbackSmallRewardPriority: [] },
-  cityWar: { enabled: false, fleetIds: [], defenceFleetIds: [], targetMode: 'alliance', targetPriority: 'fewestAllied', cityRefs: [], autoRepair: true,
+  // 原目标字段用于进攻，防守单独保存；旧共享设置通过版本迁移复制到防守侧。
+  cityWar: { enabled: false, fleetIds: [], defenceFleetIds: [], targetMode: 'alliance', targetPriority: 'fewestAllied', cityRefs: [],
+    defenceTargetMode: 'alliance', defenceTargetPriority: 'fewestAllied', defenceCityRefs: [], autoRepair: true,
     nativeCommissionLimit: -1, repairBelowPercent: 80, petrolReserve: 0, maxRepairCost: 15000, dailyPetrolLimit: 20000,
     dailyDispatchLimit: 10, reserveDuringWar: true, checkEverySeconds: 15 },
   forge: { decompose: false, decomposeQualities: [], enabled: false, buildingIds: [], recipeIds: [], universal: false, materialReserve: 0,
@@ -130,6 +132,9 @@ const constraints = {
   'cityWar.fleetIds': strings(10), 'cityWar.defenceFleetIds': strings(10), 'cityWar.targetMode': { kind: 'choice', values: ['alliance', 'selected'] },
   'cityWar.targetPriority': { kind: 'choice', values: ['fewestAllied', 'original'] },
   'cityWar.cityRefs': strings(100), 'cityWar.nativeCommissionLimit': { kind: 'number', min: -1, max: 1000 },
+  'cityWar.defenceTargetMode': { kind: 'choice', values: ['alliance', 'selected'] },
+  'cityWar.defenceTargetPriority': { kind: 'choice', values: ['fewestAllied', 'original'] },
+  'cityWar.defenceCityRefs': strings(100),
   'cityWar.repairBelowPercent': int(100, 1), 'cityWar.petrolReserve': int(),
   'cityWar.maxRepairCost': int(10000000), 'cityWar.dailyPetrolLimit': int(100000000),
   'cityWar.dailyDispatchLimit': int(1000, 1), 'cityWar.checkEverySeconds': int(300, 5),
@@ -284,8 +289,14 @@ export function validateSettings(input, { partial = false, catalog = null } = {}
   if (output.cityWar.enabled && !output.cityWar.fleetIds.length) errors['cityWar.fleetIds'] = '请明确选择参与城战接续的舰队';
   if (output.cityWar.fleetIds.some(value => !/^[1-9]\d*远征船$/.test(value))) errors['cityWar.fleetIds'] = '请选择有效的远征舰队';
   if (output.cityWar.defenceFleetIds.some(value => !output.cityWar.fleetIds.includes(value))) errors['cityWar.defenceFleetIds'] = '防守舰队必须包含在城战参与舰队中';
-  if (output.cityWar.enabled && output.cityWar.targetMode === 'selected' && !output.cityWar.cityRefs.length) errors['cityWar.cityRefs'] = '指定目标模式至少选择一座城市';
-  if (output.cityWar.cityRefs.some(value => !/^[1-9]\d{0,3}:[1-9]\d{0,5}$/.test(value))) errors['cityWar.cityRefs'] = '城市选项必须包含有效场景和城市编号';
+  const attackFleets = output.cityWar.fleetIds.filter(id => !output.cityWar.defenceFleetIds.includes(id));
+  for (const [mode, refs, fleets, label] of [
+    ['targetMode', 'cityRefs', attackFleets, '进攻'],
+    ['defenceTargetMode', 'defenceCityRefs', output.cityWar.defenceFleetIds, '防守'],
+  ]) {
+    if (output.cityWar.enabled && fleets.length && output.cityWar[mode] === 'selected' && !output.cityWar[refs].length) errors['cityWar.' + refs] = '请至少选择一座' + label + '目标城市';
+    if (output.cityWar[refs].some(value => !/^[1-9]\d{0,3}:[1-9]\d{0,5}$/.test(value))) errors['cityWar.' + refs] = '城市选项必须包含有效场景和城市编号';
+  }
   if (output.forge.enabled && !output.forge.buildingIds.length) errors['forge.buildingIds'] = '请选择装备锻造工厂';
   if (output.forge.enabled && !output.forge.recipeIds.length) errors['forge.recipeIds'] = '请选择至少一种锻造配方';
   if (output.forge.recipeIds.some(value => !/^[1-9]\d{0,8}$/.test(value))) errors['forge.recipeIds'] = '请选择有效的锻造配方';
@@ -296,7 +307,7 @@ export function validateSettings(input, { partial = false, catalog = null } = {}
       'heroes.heroIds': 'heroes', 'pet.species': 'petSpecies',
       'treasure.fleetIds': 'expeditionFleets', 'treasure.rewardItems': 'materials',
       'treasure.fallbackMediumRewardPriority': 'materials', 'treasure.fallbackSmallRewardPriority': 'materials',
-      'cityWar.fleetIds': 'expeditionFleets', 'cityWar.cityRefs': 'cityTargets',
+      'cityWar.fleetIds': 'expeditionFleets', 'cityWar.cityRefs': 'cityTargets', 'cityWar.defenceCityRefs': 'cityTargets',
       'radar.fleetIds':'expeditionFleets','worldBoss.fleetIds':'expeditionFleets',
       'pirateHunt.fleetIds': 'expeditionFleets', 'pirateHunt.types': 'pirateTypes',
       'forge.buildingIds': 'forgeBuildings', 'forge.recipeIds': 'forgeRecipes',
@@ -388,6 +399,14 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   const input = { ...settings };
   if (!Object.hasOwn(input, 'progression')) {
     input.progression = { ...DEFAULT_SETTINGS.progression, mainline: input.schedule?.stageAuto === true };
+  }
+  if (plain(input.cityWar)) {
+    input.cityWar = { ...input.cityWar };
+    for (const [field, legacy] of [['defenceTargetMode', 'targetMode'], ['defenceTargetPriority', 'targetPriority'], ['defenceCityRefs', 'cityRefs']]) {
+      if (!Object.hasOwn(input.cityWar, field)) {
+        input.cityWar[field] = copy(Object.hasOwn(input.cityWar, legacy) ? input.cityWar[legacy] : DEFAULT_SETTINGS.cityWar[legacy]);
+      }
+    }
   }
   if (source === 'stored') return input;
 

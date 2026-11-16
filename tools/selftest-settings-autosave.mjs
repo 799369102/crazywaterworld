@@ -23,7 +23,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 let serial = 0, passed = 0;
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
 
-function fixture() {
+function fixture({ catalog = {} } = {}) {
   const file = path.join(directory, 'settings-' + (++serial) + '.json');
   for (const id of ['a', 'b']) saveAutomationSettings(id, defaultSettings(), { file, revision: 0 });
   let now = 0, timerId = 0;
@@ -34,7 +34,7 @@ function fixture() {
     });
     return nodes.get(id);
   };
-  const view = account => ({ ...loadAutomationSettings(account, { file }), catalog: {}, rules: {}, tasks: [], usage: {}, pendingUsage: {}, running: false });
+  const view = account => ({ ...loadAutomationSettings(account, { file }), catalog, rules: {}, tasks: [], usage: {}, pendingUsage: {}, running: false });
   const env = {
     node, calls: [], renders: 0, focuses: 0, confirmations: 0, failPosts: 0, inFlight: 0, maxInFlight: 0,
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { at: now + delay, callback }); return id; },
@@ -62,13 +62,13 @@ function fixture() {
     const accounts = [], $ = env.node, window = { confirm: env.confirm };
     const setTimeout = env.setTimeout, clearTimeout = env.clearTimeout;
     const call = (route, options) => env.call(current, route, options);
-    const configRenderUsage = () => {}, configUpdateVisibility = () => {};
+    const configRenderUsage = () => {}, configUpdateVisibility = () => env.updateVisibility?.();
     const configActivate = () => { env.focuses++; }, configActivateGroup = () => {};
     const configRender = () => { env.renders++; };
     const resetWorldMap = () => {}, resetActivityRanks = () => {};
     const clear = node => node, el = () => ({});
     return {
-      editor: configEditor, set: configSet, load: configLoad, save: configSave, flush: configFlush,
+      editor: configEditor, groups: configGroups, set: configSet, load: configLoad, save: configSave, flush: configFlush,
       dirty: configIsDirty, importFile: configImportFile, mayChange: configMayChangeAccount,
       revision: () => loopSettingsRevision,
       change(next) { current = next; configAccountChanged(); },
@@ -306,6 +306,88 @@ await test('城战职责控件逐队切换，参与名单变化即刷新且不�
   draft.cityWar.fleetIds = []; root.refresh();
   assert.equal(selects().length, 0); assert.match(root.children[0].textContent, /先选择城战参与舰队/);
   assert(writes.every(key => key === 'cityWar.defenceFleetIds'));
+});
+
+await test('攻守目标控件独立显示、校验和自动保存，刷新及切号保留各自目标', async () => {
+  const f = fixture({ catalog: { cityTargets: [
+    { value: '1:2', label: '城市甲' }, { value: '1:3', label: '城市乙' }, { value: '1:4', label: '城市丙' },
+  ] } });
+  await f.load();
+  f.set('cityWar.fleetIds', ['1远征船', '2远征船']);
+  f.set('cityWar.defenceFleetIds', ['2远征船']);
+  f.set('cityWar.enabled', true);
+  const node = (tag, className = '', textContent = '') => ({
+    tag, className, textContent, childNodes: [], attributes: {}, dataset: {}, value: '', hidden: false,
+    classList: { add() {}, remove() {} },
+    append(...items) { this.childNodes.push(...items); },
+    setAttribute(key, value) { this.attributes[key] = value; },
+    removeAttribute(key) { delete this.attributes[key]; },
+    querySelectorAll() { return []; }, focus() {}, scrollIntoView() {},
+  });
+  const clear = element => { element.childNodes = []; return element; };
+  const renderer = new Function('configEditor', 'configSet', 'el', 'clear', 'makeHelpTip', 'configPlacePanel', `
+    const configGet = key => key.split('.').reduce((value, part) => value[part], configEditor.draft);
+    ${section('function configUpdateVisibility(', 'function configRender(')}
+    ${section('function configRenderField(', 'function configRenderUsage(')}
+    ${section('function configMultiselect(', 'function configPriorityEditor(')}
+    return { render: configRenderField, updateVisibility: configUpdateVisibility };
+  `)(f.editor, f.set, node, clear, () => node('span'), () => {});
+  const keys = ['targetMode', 'targetPriority', 'cityRefs', 'defenceTargetMode', 'defenceTargetPriority', 'defenceCityRefs'];
+  const fields = f.groups.find(group => group.id === 'cityWar').fields.filter(field => keys.includes(field.key.split('.')[1]));
+  assert.equal(fields.length, 6);
+  assert.deepEqual(fields.map(field => field.label), ['进攻目标来源', '进攻目标优先', '指定进攻城市', '防守目标来源', '防守目标优先', '指定防守城市']);
+  for (const field of fields) renderer.render(field);
+  f.env.updateVisibility = renderer.updateVisibility;
+  renderer.updateVisibility();
+  const widget = key => f.editor.widgets.get('cityWar.' + key);
+  const choose = (key, value) => { const select = widget(key).control; select.value = value; select.onchange(); };
+  const checkCity = (key, name, checked = true) => {
+    const control = widget(key).control; control.open = true; control.ontoggle();
+    const list = control.childNodes[1].childNodes[1];
+    const option = list.childNodes.find(label => label.childNodes[1]?.textContent === name);
+    assert(option, name);
+    const input = option.childNodes[0]; input.checked = checked; input.onchange();
+  };
+  assert.equal(widget('cityRefs').row.hidden, true);
+  assert.equal(widget('defenceCityRefs').row.hidden, true);
+  choose('targetMode', 'selected');
+  assert.equal(widget('cityRefs').row.hidden, false);
+  assert.equal(widget('defenceCityRefs').row.hidden, true);
+  checkCity('cityRefs', '城市甲');
+  choose('targetPriority', 'original');
+  choose('defenceTargetMode', 'selected');
+  assert.equal(widget('defenceCityRefs').row.hidden, false);
+  await f.tick(600);
+  assert(f.editor.errors['cityWar.defenceCityRefs']);
+  assert.equal(widget('defenceCityRefs').error.hidden, false);
+  assert.deepEqual(f.view('a').settings.cityWar.cityRefs, []);
+  checkCity('defenceCityRefs', '城市乙');
+  assert.equal(widget('defenceCityRefs').error.hidden, true);
+  await f.tick(600);
+  const saved = f.view('a').settings.cityWar;
+  assert.equal(saved.targetMode, 'selected'); assert.equal(saved.defenceTargetMode, 'selected');
+  assert.equal(saved.targetPriority, 'original'); assert.equal(saved.defenceTargetPriority, 'fewestAllied');
+  assert.deepEqual(saved.cityRefs, ['1:2']); assert.deepEqual(saved.defenceCityRefs, ['1:3']);
+  assert.equal(widget('cityRefs').control.childNodes[0].textContent, '城市甲');
+  assert.equal(widget('defenceCityRefs').control.childNodes[0].textContent, '城市乙');
+
+  choose('targetMode', 'alliance');
+  assert.equal(widget('cityRefs').row.hidden, true);
+  assert.equal(widget('defenceCityRefs').row.hidden, false);
+  checkCity('defenceCityRefs', '城市丙');
+  choose('defenceTargetPriority', 'original');
+  await f.tick(600); await f.load(true);
+  assert.equal(f.editor.draft.cityWar.targetMode, 'alliance');
+  assert.deepEqual(f.editor.draft.cityWar.cityRefs, ['1:2']);
+  assert.deepEqual(f.editor.draft.cityWar.defenceCityRefs, ['1:3', '1:4']);
+  assert.equal(f.editor.draft.cityWar.defenceTargetPriority, 'original');
+
+  assert.equal(await f.mayChange('b'), true); f.change('b'); await f.load();
+  assert.deepEqual(f.editor.draft.cityWar.defenceCityRefs, []);
+  assert.equal(await f.mayChange('a'), true); f.change('a'); await f.load();
+  assert.equal(f.editor.draft.cityWar.defenceTargetMode, 'selected');
+  assert.deepEqual(f.editor.draft.cityWar.defenceCityRefs, ['1:3', '1:4']);
+  assert.deepEqual(f.editor.draft.cityWar.cityRefs, ['1:2']);
 });
 
 console.log('配置自动保存专项 ' + passed + '/' + passed + ' 通过');

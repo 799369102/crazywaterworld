@@ -30,6 +30,9 @@ function legacySettings() {
   delete settings.cityWar.defenceFleetIds;
   delete settings.cityWar.targetPriority;
   delete settings.cityWar.nativeCommissionLimit;
+  delete settings.cityWar.defenceTargetMode;
+  delete settings.cityWar.defenceTargetPriority;
+  delete settings.cityWar.defenceCityRefs;
   delete settings.gather.enabled;
   delete settings.museum.runEnabled;
   delete settings.radar.runEnabled;
@@ -72,6 +75,51 @@ try {
     assert.deepEqual(loadAutomationSettings('old', { file }).settings, imported);
     assert.equal(JSON.parse(fs.readFileSync(file)).version, SETTINGS_SCHEMA_VERSION);
     assert.throws(() => saveAutomationSettings('old', imported, { file, revision: 7 }), /其他页面更新/);
+  });
+  test('旧城战共享目标迁移到防守侧，保存与导入保留顺序及独立副本', () => {
+    const settings = legacySettings();
+    Object.assign(settings.cityWar, {
+      enabled: true, fleetIds: ['1远征船', '2远征船'], defenceFleetIds: ['2远征船'],
+      targetMode: 'selected', targetPriority: 'original', cityRefs: ['1:3', '1:2'],
+    });
+    const before = structuredClone(settings);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { war: { settings, revision: 4 } } }));
+    const bytes = fs.readFileSync(file);
+    const stored = loadAutomationSettings('war', { file });
+    const imported = importAutomationSettings({ format: SETTINGS_FORMAT, version: 1, settings });
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    assert.deepEqual(stored.settings, imported);
+    assert.deepEqual(settings, before);
+    for (const migrated of [stored.settings, imported]) {
+      assert.equal(migrated.cityWar.defenceTargetMode, 'selected');
+      assert.equal(migrated.cityWar.defenceTargetPriority, 'original');
+      assert.deepEqual(migrated.cityWar.defenceCityRefs, ['1:3', '1:2']);
+      assert.notEqual(migrated.cityWar.defenceCityRefs, migrated.cityWar.cityRefs);
+      assert.deepEqual(migrateSettingsVersion(migrated, 1), migrated);
+    }
+    imported.cityWar.defenceCityRefs = ['1:3'];
+    imported.cityWar.targetMode = 'alliance';
+    imported.cityWar.targetPriority = 'fewestAllied';
+    saveAutomationSettings('war', imported, { file, revision: stored.revision });
+    assert.deepEqual(loadAutomationSettings('war', { file }).settings.cityWar, imported.cityWar);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(imported)).cityWar, imported.cityWar);
+  });
+  test('城战迁移逐项保留显式防守配置，非法值继续拒绝', () => {
+    const settings = legacySettings();
+    Object.assign(settings.cityWar, {
+      targetMode: 'selected', targetPriority: 'original', cityRefs: ['1:2'],
+      defenceTargetMode: 'alliance', defenceCityRefs: [],
+    });
+    const document = { format: SETTINGS_FORMAT, version: 1, settings };
+    const migrated = importAutomationSettings(document);
+    assert.equal(migrated.cityWar.defenceTargetMode, 'alliance');
+    assert.equal(migrated.cityWar.defenceTargetPriority, 'original');
+    assert.deepEqual(migrated.cityWar.defenceCityRefs, []);
+    for (const [field, value] of [['defenceTargetMode', null], ['defenceTargetPriority', 'unknown'], ['defenceCityRefs', undefined]]) {
+      const invalid = structuredClone(document);
+      invalid.settings.cityWar[field] = value;
+      assert.throws(() => importAutomationSettings(invalid), error => !!error.fields?.['cityWar.' + field]);
+    }
   });
   test('旧账号缺少详细设置时仍返回版本0且不会创建详细配置', () => {
     const bytes = fs.readFileSync(file);

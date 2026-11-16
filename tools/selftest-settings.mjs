@@ -100,6 +100,41 @@ try {
     }
   });
 
+  await check('城战攻守目标独立校验，按参与职责要求指定名单', () => {
+    const settings = defaultSettings();
+    Object.assign(settings.cityWar, {
+      enabled: true, fleetIds: ['1远征船', '2远征船'], defenceFleetIds: ['2远征船'],
+      targetMode: 'selected', cityRefs: ['1:2'], targetPriority: 'original',
+      defenceTargetMode: 'selected', defenceCityRefs: ['1:3'], defenceTargetPriority: 'fewestAllied',
+    });
+    const catalog = { expeditionFleets: [{ value: '1远征船' }, { value: '2远征船' }], cityTargets: [{ value: '1:2' }, { value: '1:3' }] };
+    assert.deepEqual(validateSettings(settings, { catalog }).cityWar, settings.cityWar);
+    for (const [field, values] of [
+      ['defenceTargetMode', ['invalid', null, 1]],
+      ['defenceTargetPriority', ['invalid', null, true]],
+      ['defenceCityRefs', [[], ['1:3', '1:3'], ['3'], ['1:999'], [3], null]],
+      ['cityRefs', [[]]],
+    ]) {
+      for (const value of values) {
+        const invalid = structuredClone(settings); invalid.cityWar[field] = value;
+        assert.throws(() => validateSettings(invalid, { catalog }), error => !!error.fields?.['cityWar.' + field]);
+      }
+    }
+    const onlyAttack = structuredClone(settings);
+    Object.assign(onlyAttack.cityWar, { fleetIds: ['1远征船'], defenceFleetIds: [], defenceCityRefs: [] });
+    assert.deepEqual(validateSettings(onlyAttack).cityWar, onlyAttack.cityWar);
+    const onlyDefence = structuredClone(settings);
+    Object.assign(onlyDefence.cityWar, { fleetIds: ['2远征船'], cityRefs: [] });
+    assert.deepEqual(validateSettings(onlyDefence).cityWar, onlyDefence.cityWar);
+    const disabled = structuredClone(settings);
+    Object.assign(disabled.cityWar, { enabled: false, cityRefs: [], defenceCityRefs: [] });
+    assert.deepEqual(validateSettings(disabled).cityWar, disabled.cityWar);
+    const file = path.join(directory, 'city-war-targets.json');
+    const saved = saveAutomationSettings('targets', settings, { file, revision: 0, catalog });
+    assert.deepEqual(loadAutomationSettings('targets', { file }).settings.cityWar, saved.settings.cityWar);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings), { catalog }).cityWar, settings.cityWar);
+  });
+
   await check('工厂兜底间隔默认值、边界、保存与导入严格校验', () => {
     const initial = defaultSettings(); assert.equal(initial.factory.checkEverySeconds, 30);
     const file = path.join(directory, 'factory-settings.json');

@@ -1,5 +1,5 @@
 import {readTreasureLoot,planTreasureLoot} from './treasure-loot.mjs';
-import {readCityWar,planCityWar,cityWarReservedFleets} from './city-war.mjs';
+import {readCityWar,planCityWar,cityWarReservedFleets,cityWarTargetSelected} from './city-war.mjs';
 import {readAllianceRadar} from './alliance-radar.mjs';
 import {planRadarPreview,pendingPetrol} from './dispatch-preview.mjs';
 import {inspectHunt} from './pirates.mjs';
@@ -51,7 +51,7 @@ export async function readWorldTarget(client,protocol,config,player,settings,led
  const state=await readCityWar(client,protocol,config,player,settings.cityWar),id=Number(key.replace(/^city-/,''));
  const target=state.targets.find(t=>t.id===id);
  if(!target&&!state.reason)view.notes.push('此城市不是本联盟当前有效进攻或防守目标');
- if(target&&settings.cityWar.targetMode==='selected'&&!settings.cityWar.cityRefs.includes(target.ref))view.notes.push('此城市不在已保存的目标范围');
+ if(target&&!cityWarTargetSelected(settings.cityWar,target))view.notes.push('此城市不在已保存的'+(target.role==='defence'?'防守':'进攻')+'目标范围');
  if(target)view.notes.push('此城市为'+(target.role==='defence'?'本盟防守':'本盟进攻')+'目标，仅安排对应职责的舰队');
  state.targets=target?[target]:[];
  const plan=planCityWar(state,settings,{usage:ledger.snapshot(),keys:ledger.keyRecords(),pendingPetrol:pendingPetrol(ledger)});

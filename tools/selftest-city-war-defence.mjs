@@ -51,6 +51,18 @@ function onlyDefence(settings) {
   settings.cityWar.defenceFleetIds = ['2远征船'];
 }
 
+function multipleTargetsFixture() {
+  const fixture = defenceFixture(), { f } = fixture;
+  for (const [id, name, guildIdx, gridIdx] of [[4, '第二攻城', 8, 40], [5, '第二守城', 7, 50]]) {
+    f.config.tables['1_CityCfg'].data.push({ id, name, guildIndex: 0 });
+    f.map.cityInfo[id] = { gridIdx };
+    f.state.cities.push({ id, guildIdx, state: 2, attackFleetNum: 0, priorityAtkFleetNum: 0,
+      defenceFleetNum: 0, priorityDefFleetNum: 0, battlePoints: [] });
+    f.state.war.declarations.push({ attackGuildIdx: guildIdx === 7 ? 8 : 7, defenceGuildIdx: guildIdx, cityId: id });
+  }
+  return fixture;
+}
+
 await check('旧设置未指定防守队时仍只进攻，不自动改变已有舰队任务', async () => {
   const { f, settings } = defenceFixture();
   delete settings.cityWar.defenceFleetIds;
@@ -149,14 +161,115 @@ await check('守军身份与己盟不符时跳过人数优先选点，不把未�
 
 await check('指定城市仍按各队职责过滤，不能把防守队派向所选敌城', async () => {
   const { f, settings } = defenceFixture();
-  settings.cityWar.targetMode = 'selected'; settings.cityWar.cityRefs = ['1:2'];
+  settings.cityWar.targetMode = settings.cityWar.defenceTargetMode = 'selected';
+  settings.cityWar.cityRefs = settings.cityWar.defenceCityRefs = ['1:2'];
   assert.deepEqual((await plan(f, settings)).actions.map(step => [step.buildingId, step.cityId]), [['1远征船', 2]]);
   assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), ['1远征船']);
-  settings.cityWar.cityRefs = ['1:3'];
+  settings.cityWar.cityRefs = settings.cityWar.defenceCityRefs = ['1:3'];
   assert.deepEqual((await plan(f, settings)).actions.map(step => [step.buildingId, step.cityId]), [['2远征船', 3]]);
-  settings.cityWar.cityRefs = ['2:3'];
+  settings.cityWar.cityRefs = settings.cityWar.defenceCityRefs = ['2:3'];
   assert.equal((await plan(f, settings)).actions.length, 0);
   assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), []);
+});
+
+await check('进攻和防守使用各自指定名单，预览与实际派遣一致', async () => {
+  const { f, settings } = multipleTargetsFixture();
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:4'],
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:5'] });
+  const preview = await plan(f, settings);
+  assert.deepEqual(preview.actions.map(step => [step.buildingId, step.cityId]), [['1远征船', 4], ['2远征船', 5]]);
+  assert.deepEqual(preview.reservedFleetIds, ['1远征船', '2远征船']);
+  assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), preview.reservedFleetIds);
+  await run(f, settings);
+  assert.deepEqual(f.client.writes, [
+    { name: 'MoveFleetsToCityRequest', body: { buildingId: ['1远征船'], cityId: 4 } },
+    { name: 'MoveFleetsToCityRequest', body: { buildingId: ['2远征船'], cityId: 5 } },
+  ]);
+});
+
+await check('攻守可以分别跟随联盟或指定城市', async () => {
+  const { f, settings } = multipleTargetsFixture();
+  Object.assign(settings.cityWar, { targetMode: 'alliance', cityRefs: ['1:4'],
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:5'] });
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 2], ['defence', 5]]);
+  settings.cityWar.targetMode = 'selected';
+  settings.cityWar.defenceTargetMode = 'alliance';
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 4], ['defence', 3]]);
+});
+
+await check('攻守独立按各自名单顺序或队数距离排序', async () => {
+  const { f, settings } = multipleTargetsFixture();
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:4', '1:2'], targetPriority: 'original',
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:5', '1:3'], defenceTargetPriority: 'fewestAllied' });
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 4], ['defence', 3]]);
+  settings.cityWar.targetPriority = 'fewestAllied';
+  settings.cityWar.defenceTargetPriority = 'original';
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 2], ['defence', 5]]);
+});
+
+await check('人数未知按各自攻守优先策略处理并继续预留对应舰队', async () => {
+  const { f, settings } = defenceFixture();
+  f.state.war.declarations.push({ attackGuildIdx: 9, defenceGuildIdx: 8, cityId: 2 });
+  f.state.cities.find(city => city.id === 3).battlePoints = [
+    { index: 0, leftFighter: fighter(8), rightFighter: fighter(9) },
+  ];
+  settings.cityWar.targetPriority = 'original';
+  settings.cityWar.defenceTargetPriority = 'fewestAllied';
+  let preview = await plan(f, settings);
+  assert.deepEqual(preview.actions.map(step => step.role), ['attack']);
+  assert.deepEqual(preview.reservedFleetIds, ['1远征船', '2远征船']);
+  settings.cityWar.targetPriority = 'fewestAllied';
+  settings.cityWar.defenceTargetPriority = 'original';
+  preview = await plan(f, settings);
+  assert.deepEqual(preview.actions.map(step => step.role), ['defence']);
+  assert.deepEqual(preview.reservedFleetIds, ['1远征船', '2远征船']);
+});
+
+await check('每侧指定范围无有效目标时仅释放该侧舰队预留', async () => {
+  const { f, settings } = defenceFixture();
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:2'],
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:2'] });
+  assert.deepEqual((await plan(f, settings)).reservedFleetIds, ['1远征船']);
+  assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), ['1远征船']);
+  settings.cityWar.cityRefs = ['1:3'];
+  settings.cityWar.defenceCityRefs = ['1:3'];
+  assert.deepEqual((await plan(f, settings)).reservedFleetIds, ['2远征船']);
+  assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), ['2远征船']);
+  settings.cityWar.defenceCityRefs = [];
+  assert.equal((await plan(f, settings)).actions.length, 0);
+  assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), []);
+});
+
+await check('攻守城市易主并反向宣战后仍受各自名单约束', async () => {
+  const { f, settings } = defenceFixture();
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:2'],
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:3'] });
+  f.state.cities.find(city => city.id === 2).guildIdx = 7;
+  f.state.cities.find(city => city.id === 3).guildIdx = 8;
+  f.state.war.declarations = [
+    { attackGuildIdx: 8, defenceGuildIdx: 7, cityId: 2 },
+    { attackGuildIdx: 7, defenceGuildIdx: 8, cityId: 3 },
+  ];
+  const snapshot = await read(f, settings), preview = planCityWar(snapshot, settings);
+  assert.deepEqual(snapshot.targets.map(target => [target.id, target.role]), [[2, 'defence'], [3, 'attack']]);
+  assert.equal(preview.actions.length, 0);
+  assert.deepEqual(preview.reservedFleetIds, []);
+  assert.deepEqual(cityWarReservedFleets(snapshot, settings), []);
+  await run(f, settings);
+  assert.equal(f.client.writes.length, 0);
+});
+
+await check('缺少独立防守字段的旧对象继续使用原共享来源名单及优先策略', async () => {
+  const { f, settings } = multipleTargetsFixture();
+  delete settings.cityWar.defenceTargetMode;
+  delete settings.cityWar.defenceTargetPriority;
+  delete settings.cityWar.defenceCityRefs;
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:5', '1:4', '1:3', '1:2'], targetPriority: 'original' });
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 4], ['defence', 5]]);
+  settings.cityWar.targetPriority = 'fewestAllied';
+  assert.deepEqual((await plan(f, settings)).actions.map(step => [step.role, step.cityId]), [['attack', 2], ['defence', 3]]);
+  settings.cityWar.cityRefs = ['1:4'];
+  assert.deepEqual(cityWarReservedFleets(await read(f, settings), settings), ['1远征船']);
 });
 
 await check('防守选城使用守方队列，进攻人数不影响防守队选点', async () => {
@@ -186,7 +299,7 @@ await check('免费防守仍比较实际距离，攻方少队目标不干扰守�
 
 await check('已在受攻主城的防守队不重复派同城，预览说明原因', async () => {
   const { f, settings } = defenceFixture(); onlyDefence(settings);
-  settings.cityWar.targetMode = 'selected'; settings.cityWar.cityRefs = ['1:1'];
+  settings.cityWar.defenceTargetMode = 'selected'; settings.cityWar.defenceCityRefs = ['1:1'];
   f.state.war.declarations.push({ attackGuildIdx: 8, defenceGuildIdx: 7, cityId: 1 });
   const preview = await plan(f, settings);
   assert.equal(preview.actions.length, 0); assert.match(preview.fleets[0].reason, /已在/);
@@ -210,10 +323,29 @@ await check('仍处于原生委任阶段的防守队等待接管，不伪称已�
 
 await check('指定城市详情读取失败时返回未确认，不访问不存在的目标', async () => {
   const { f, settings } = defenceFixture(); onlyDefence(settings);
-  settings.cityWar.targetMode = 'selected'; settings.cityWar.cityRefs = ['1:3'];
+  settings.cityWar.defenceTargetMode = 'selected'; settings.cityWar.defenceCityRefs = ['1:3'];
   f.beforeRead = name => { if (name === 'WarDeclarationRequest') throw Error('离线模拟读取失败'); };
   const result = await readWorldTarget(f.client, f.protocol, f.config, f.player, settings, ledger(), { layer: 'cities', key: 'city-3' });
   assert(result.notes.some(note => /未确认/.test(note)));
+  assert.equal(f.client.writes.length, 0);
+});
+
+await check('地图城市详情按对应攻守名单解释目标并生成预览', async () => {
+  const { f, settings } = multipleTargetsFixture();
+  Object.assign(settings.cityWar, { targetMode: 'selected', cityRefs: ['1:2'],
+    defenceTargetMode: 'selected', defenceCityRefs: ['1:5'] });
+  const mapFile = path.join(directory, 'target-detail-map.json');
+  const mapData = Array(f.map.width * f.map.height).fill(0);
+  fs.writeFileSync(mapFile, JSON.stringify([null, null, null, null, null, [[null, null,
+    { mapInfo: f.map, cityInfo: f.map.cityInfo, mapData }]]]));
+  f.config.resources = { mapFiles: { 1: mapFile } };
+  for (const [id, role, selected] of [[2, '进攻', true], [3, '防守', false], [4, '进攻', false], [5, '防守', true]]) {
+    const result = await readWorldTarget(f.client, f.protocol, f.config, f.player, settings, ledger(), { layer: 'cities', key: 'city-' + id });
+    assert.equal(result.reason, '');
+    assert.equal(result.actions.length, selected ? 1 : 0);
+    assert.equal(result.notes.includes('此城市不在已保存的' + role + '目标范围'), !selected);
+    if (selected) assert.equal(result.actions[0].cityId, id);
+  }
   assert.equal(f.client.writes.length, 0);
 });
 
@@ -280,6 +412,22 @@ await check('防守发送前失城、停战、职责修改或关闭功能时均�
     let reads = 0;
     f.beforeRead = name => { if (name === 'WarDeclarationRequest' && ++reads === 2) change(f, settings); };
     await run(f, settings); assert.equal(f.client.writes.length, 0);
+  }
+});
+
+await check('发送前修改防守名单来源或优先策略会取消已失效的目标计划', async () => {
+  for (const change of [
+    settings => { settings.cityWar.defenceCityRefs = ['1:3']; },
+    settings => { settings.cityWar.defenceTargetMode = 'alliance'; },
+    settings => { settings.cityWar.defenceTargetPriority = 'fewestAllied'; },
+  ]) {
+    const { f, settings } = multipleTargetsFixture(); onlyDefence(settings);
+    Object.assign(settings.cityWar, { defenceTargetMode: 'selected', defenceCityRefs: ['1:5', '1:3'], defenceTargetPriority: 'original' });
+    assert.equal((await plan(f, settings)).actions[0].cityId, 5);
+    let reads = 0;
+    f.beforeRead = name => { if (name === 'WarDeclarationRequest' && ++reads === 2) change(settings); };
+    await run(f, settings);
+    assert.equal(f.client.writes.length, 0);
   }
 });
 

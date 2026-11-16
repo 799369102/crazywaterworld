@@ -19,7 +19,19 @@ export const cityWarEnabled = settings => settings?.cityWar?.enabled === true;
 const fleetRole = (preferences, id) => preferences?.defenceFleetIds?.includes(id) ? 'defence' : 'attack';
 const targetRole = target => target.role ?? 'attack';
 const roleName = role => role === 'defence' ? '防守' : '进攻';
-const selectedTarget = (preferences, target) => preferences.targetMode === 'alliance' || preferences.cityRefs.includes(target.ref);
+function targetPreferences(preferences, role) {
+  if (role !== 'defence') return preferences;
+  return {
+    targetMode: preferences.defenceTargetMode ?? preferences.targetMode,
+    targetPriority: preferences.defenceTargetPriority ?? preferences.targetPriority,
+    cityRefs: preferences.defenceCityRefs ?? preferences.cityRefs,
+  };
+}
+
+export function cityWarTargetSelected(preferences, target) {
+  const selected = targetPreferences(preferences, targetRole(target));
+  return selected.targetMode === 'alliance' || selected.cityRefs.includes(target.ref);
+}
 
 function quantity(value) {
   if (integer(value)) return value;
@@ -191,7 +203,7 @@ function fleetGate(fleet, snapshot, p) {
 export function cityWarReservedFleets(snapshot, settings, now = snapshot?.now) {
   const p = settings?.cityWar;
   if (!p?.enabled || !p.reserveDuringWar || snapshot?.reason || !(snapshot?.startTime <= now && now < snapshot.endTime)) return [];
-  return p.fleetIds.filter(id => (snapshot.targets ?? []).some(target => selectedTarget(p, target) && targetRole(target) === fleetRole(p, id)));
+  return p.fleetIds.filter(id => (snapshot.targets ?? []).some(target => cityWarTargetSelected(p, target) && targetRole(target) === fleetRole(p, id)));
 }
 
 // 首杀发送前只刷新城战意向，不在候选复核期间另行派遣舰队。
@@ -236,23 +248,26 @@ export function planCityWar(snapshot, settings, { usage = { counters: {} }, keys
   }
   if (plan.nativeOffFleetIds.length) plan.notes.push('发送前关闭所选舰队的原生委任：' + plan.nativeOffFleetIds.map(nameOf).join('、'));
   const roles = new Set(p.fleetIds.map(id => fleetRole(p, id)));
-  const selected = snapshot.targets.filter(row => selectedTarget(p, row) && roles.has(targetRole(row)));
-  const fewest = p.targetPriority === 'fewestAllied';
+  const selected = snapshot.targets.filter(row => cityWarTargetSelected(p, row) && roles.has(targetRole(row)));
+  const fewest = target => targetPreferences(p, targetRole(target)).targetPriority === 'fewestAllied';
   const targetTotal = target => integer(target.alliedCount) && integer(target.transitCount) ? target.alliedCount + target.transitCount : null;
-  if (fewest) for (const target of selected) {
-    if (targetTotal(target) === null) plan.notes.push(target.name + '：' + (target.countReason || (target.transitCount == null ? target.transitReason : '') || '对应攻守队列、交战或在途数量未确认') + '，本次不按人数选择此点');
+  for (const target of selected) {
+    if (fewest(target) && targetTotal(target) === null) plan.notes.push(target.name + '：' + (target.countReason || (target.transitCount == null ? target.transitReason : '') || '对应攻守队列、交战或在途数量未确认') + '，本次不按人数选择此点');
   }
-  const candidates = selected.filter(row => !fewest || targetTotal(row) !== null);
+  const candidates = selected.filter(row => !fewest(row) || targetTotal(row) !== null);
   // 本轮已安排的舰队计入总数，但不再重复计算已同步在途舰队；在途数量已在读取时汇总。
   const assigned = new Map(candidates.map(target => [target.id, 0]));
   const totalOf = target => targetTotal(target) + (assigned.get(target.id) ?? 0);
   // 驻防己城汽油为零，仍用实际距离区分远近；进攻保留既有费用排序。
   const proximity = target => targetRole(target) === 'defence' ? target.distance : target.petrol;
-  const originalOrder = (a, b) => p.targetMode === 'selected' ? p.cityRefs.indexOf(a.ref) - p.cityRefs.indexOf(b.ref)
-    : Number(b.assemble) - Number(a.assemble) || proximity(a) - proximity(b) || a.id - b.id;
+  const originalOrder = (a, b) => {
+    const preferences = targetPreferences(p, targetRole(a));
+    return preferences.targetMode === 'selected' ? preferences.cityRefs.indexOf(a.ref) - preferences.cityRefs.indexOf(b.ref)
+      : Number(b.assemble) - Number(a.assemble) || proximity(a) - proximity(b) || a.id - b.id;
+  };
   // 队数最少的城为基准：相差 0–9 队时就近，差 10 队及以上时优先人少的城。
   const order = (a, b, choices) => {
-    if (!fewest) return originalOrder(a, b);
+    if (!fewest(a)) return originalOrder(a, b);
     const ta = totalOf(a), tb = totalOf(b), min = Math.min(...choices.map(totalOf));
     const bandA = ta - min <= 9 ? 0 : 1, bandB = tb - min <= 9 ? 0 : 1;
     if (bandA !== bandB) return bandA - bandB;
