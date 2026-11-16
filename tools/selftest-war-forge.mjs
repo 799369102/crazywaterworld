@@ -9,6 +9,7 @@ import { cityPetrolCost, readCityWar, planCityWar, runCityWar } from '../src/cit
 import { readEquipmentForge, planEquipmentForge, releaseStaleEquipmentForge, runEquipmentForge } from '../src/equipment-forge.mjs';
 import { readTreasureLoot, planTreasureLoot, runTreasureLoot } from '../src/treasure-loot.mjs';
 import { runLoop } from '../src/loop.mjs';
+import { exactAutomationId } from '../src/automation-policy.mjs';
 
 const parent = path.join(os.tmpdir(),'cw-war-forge-test-runs');
 fs.mkdirSync(parent, { recursive: true });
@@ -384,6 +385,150 @@ await check('空闲且产物已在工具外处理时，用户确认可解除旧�
   assert.equal(u.snapshot().counters.forgeStarts,1);
   assert.equal(u.snapshot().counters.forgeGold,2000);
 });
+await check('游戏内部分加速改变完成时间后，自动领取并继续下一件', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(f, settings, usage);
+  const original = usage.keyRecords()['forge:1001001:1'];
+  assert.equal(original.confirmed, true);
+  f.state.factory.equipMaking.finishTime -= 5;
+  f.finishForge();
+
+  const result = await forgeRun(f, settings, usage);
+  assert(result.results.some(row => row.step.kind === 'forgeClaim' && row.status === 'confirmed'));
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'PickMadeEquipRequest', 'MakeEquipRequest']);
+  assert.notEqual(usage.keyRecords()['forge:1001001:1'].id, original.id);
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+});
+await check('已确认产物在游戏内领取分解后，重建账本仍按空闲工厂接续并保留消耗', async () => {
+  const file = path.join(directory, 'forge-external-disposed.json');
+  const f = warForgeFixture(), settings = warForgeSettings();
+  let usage = createUsageLedger('a', { file });
+  await forgeRun(f, settings, usage);
+  const original = usage.keyRecords()['forge:1001001:1'];
+  f.finishForge();
+  // 外部领取并分解后，新产物已经消失，完整仓库与开工前相同。
+  f.state.factory.equipMaking = null;
+  usage = createUsageLedger('a', { file });
+
+  const result = await forgeRun(f, settings, usage);
+  assert.equal(result.results.at(-1).status, 'confirmed');
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'MakeEquipRequest']);
+  assert.notEqual(usage.keyRecords()['forge:1001001:1'].id, original.id);
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+  assert.equal(usage.confirmedCounters().forgeGold, 4000);
+  assert.equal(f.state.equipment.length, 1);
+});
+await check('游戏内领取旧产物后重开不同配方，工具领取当前批次并按配置续产', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  f.config.tables.BuildingEquipMakeCfg.data.push({
+    ...f.config.tables.BuildingEquipMakeCfg.data[0], makeId: 1003, type: '护甲',
+  });
+  await forgeRun(f, settings, usage);
+  f.finishForge();
+  // 旧产物已在游戏内处理，现在看到的是另一件已完成的装备。
+  f.state.factory.equipMaking = {
+    makeId: 1003,
+    finishTime: Math.floor((Date.now() + f.client.serverClockOffsetMs) / 1000) - 1,
+    equipId: '测试护甲',
+    star: 3,
+  };
+
+  const result = await forgeRun(f, settings, usage);
+  assert(result.results.some(row => row.step.kind === 'forgeClaim' && row.step.makeId === 1003 && row.status === 'confirmed'));
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'PickMadeEquipRequest', 'MakeEquipRequest']);
+  assert.equal(f.client.writes.at(-1).body.makeId, 1001);
+  assert(f.state.equipment.some(row => row.equipId === '测试护甲' && row.star === 3));
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+});
+await check('游戏内原生自动处理旧批次期间工具等待，关闭原生自动后接续', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(f, settings, usage);
+  f.finishForge();
+  f.state.factory.auto = true;
+  f.state.factory.equipMaking = null;
+  const native = await forgeRun(f, settings, usage);
+  assert(native.notes.some(note => note.includes('游戏原生自动锻造已开启')));
+  assert.equal(f.client.writes.length, 1);
+  assert.equal(usage.snapshot().counters.forgeGold, 2000);
+
+  f.state.factory.auto = false;
+  await forgeRun(f, settings, usage);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'MakeEquipRequest']);
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+});
+await check('真实协议省略星级时不记录默认0，兼容已保存默认0的外部领取记录', async () => {
+  for (const legacy of [false, true]) {
+    const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+    const sendWatch = f.client.sendWatch;
+    f.client.sendWatch = async (name, body) => {
+      await sendWatch(name, body);
+      if (name === 'MakeEquipRequest') delete f.state.factory.equipMaking.star;
+    };
+    await forgeRun(f, settings, usage);
+    const original = usage.keyRecords()['forge:1001001:1'];
+    const state = await forgeRead(f);
+    assert.equal(Object.hasOwn(state.buildings[0].equipMaking, 'star'), false);
+    assert.equal(state.buildings[0].equipMaking.star, 0);
+    assert.equal(Number.isSafeInteger(original.details.star), false, '原型默认值不能成为已知产物星级');
+    if (legacy) usage.updateKeyDetails('forge:1001001:1', { ...original.details, star: 0 });
+
+    f.finishForge();
+    f.state.equipment.push({ uid: '9007199254743001', equipId: '测试武器', star: 2, level: 0 });
+    f.state.factory.equipMaking = null;
+    await forgeRun(f, settings, usage);
+    assert.notEqual(usage.keyRecords()['forge:1001001:1'].id, original.id);
+    assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'MakeEquipRequest']);
+    assert.equal(usage.snapshot().counters.forgeGold, 4000);
+  }
+});
+await check('未知开工不凭超时或单次空闲恢复，跨断线和账本重建仍保留预算', async () => {
+  const file = path.join(directory, 'forge-unknown-idle-reconnect.json');
+  const f = warForgeFixture(), settings = warForgeSettings();
+  let usage = createUsageLedger('a', { file });
+  f.unknown = true;
+  await forgeRun(f, settings, usage);
+  const original = usage.keyRecords()['forge:1001001:1'];
+  assert.equal(original.confirmed, false);
+  assert.equal(f.state.factory.equipMaking, undefined);
+  f.unknown = false;
+  await forgeRun(f, settings, usage);
+  f.client.connected = false;
+  f.client.serverClockOffsetMs = 48 * 60 * 60 * 1000;
+  usage = createUsageLedger('a', { file });
+  f.client.connected = true;
+  await forgeRun(f, settings, usage);
+  await forgeRun(f, settings, usage);
+
+  assert.equal(usage.keyRecords()['forge:1001001:1'].id, original.id);
+  assert.equal(usage.keyRecords()['forge:1001001:1'].confirmed, false);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  assert.equal(usage.pendingCounters().forgeStarts, 1);
+  assert.equal(usage.pendingCounters().forgeGold, 2000);
+  assert.equal(usage.snapshot().counters.forgeGold, 2000);
+});
+await check('外部已处理批次接续时暂停阻止发送，恢复后的并发只开工一次', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(f, settings, usage);
+  f.finishForge();
+  f.state.factory.equipMaking = null;
+  let reads = 0, enabled = true;
+  f.beforeRead = name => {
+    if (name === 'OnWaterRequest' && ++reads === 2) enabled = false;
+  };
+  await forgeRun(f, settings, usage, { enabled: () => enabled });
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  assert.equal(usage.snapshot().counters.forgeGold, 2000);
+
+  f.beforeRead = null;
+  await Promise.all([forgeRun(f, settings, usage), forgeRun(f, settings, usage)]);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'MakeEquipRequest']);
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+});
 await check('领取前已有完成批次也可收取，金币预算不足仍不阻断免费领取', async () => {
   const f=warForgeFixture(),s=warForgeSettings(),u=ledger();s.forge.dailyGoldLimit=1;
   f.state.factory.equipMaking={makeId:1001,finishTime:Math.floor(Date.now()/1000)-5,equipId:'测试武器',star:2};
@@ -405,6 +550,151 @@ await check('领取空回包需真实入库证据，明确拒绝不撤销已花�
   const g=warForgeFixture(),v=ledger();await forgeRun(g,s,v);g.finishForge();g.reject=true;
   assert.equal((await forgeRun(g,s,v)).results[0].status,'rejected');assert.equal(v.snapshot().counters.forgeStarts,1);assert.equal(v.snapshot().counters.forgeGold,2000);
   assert.equal(v.snapshot().uncertain,0);await forgeRun(g,s,v);assert.equal(g.client.writes.filter(row=>row.name==='PickMadeEquipRequest').length,1);
+});
+await check('另一世界未决锻造不扣减当前世界材料和金币', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  const otherKey = 'forge:2001001:1';
+  usage.reserve({ forgeStarts: 1, forgeGold: 2000 }, {}, {}, { uniqueKey: otherKey,
+    details: { kind: 'forgeStart', buildingId: '1装备厂', costs: [{ id: '蓝武器材料', num: 400 }, { id: 'GOLD', num: 100000 }] } });
+  const other = usage.keyRecords()[otherKey];
+  const preview = await forgePlan(f, settings, usage);
+  assert.equal(preview.actions.length, 1, JSON.stringify(preview.notes));
+  assert.equal((await forgeRun(f, settings, usage)).results.at(-1).status, 'confirmed');
+  assert.deepEqual(usage.keyRecords()[otherKey], other);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest']);
+});
+await check('同世界其他角色未决开工保留原键，当前角色使用独立键且重建账本不重复开工', async () => {
+  const file = path.join(directory, 'forge-same-world-roles.json');
+  const previous = warForgeFixture(), current = warForgeFixture(), settings = warForgeSettings();
+  let usage = createUsageLedger('shared-account', { file });
+  previous.unknown = true;
+  await forgeRun(previous, settings, usage);
+  const legacyKey = 'forge:1001001:1';
+  const foreignRecord = usage.keyRecords()[legacyKey];
+  assert.equal(foreignRecord.confirmed, false);
+  assert.equal(foreignRecord.details.playerId, exactAutomationId(previous.player.playerId));
+  assert.equal(exactAutomationId(previous.player.worldId), exactAutomationId(current.player.worldId));
+
+  await forgeRun(current, settings, usage);
+  const scopedKey = legacyKey + ':' + exactAutomationId(current.player.playerId);
+  const currentRecord = usage.keyRecords()[scopedKey];
+  assert.equal(currentRecord.confirmed, true);
+  assert.equal(currentRecord.details.playerId, exactAutomationId(current.player.playerId));
+  assert.deepEqual(usage.keyRecords()[legacyKey], foreignRecord);
+  assert.equal(usage.pendingCounters().forgeGold, 2000);
+  assert.equal(usage.confirmedCounters().forgeGold, 2000);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+
+  usage = createUsageLedger('shared-account', { file });
+  await forgeRun(current, settings, usage);
+  assert.deepEqual(usage.keyRecords()[legacyKey], foreignRecord);
+  assert.equal(usage.keyRecords()[scopedKey].id, currentRecord.id);
+  assert.deepEqual(current.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  previous.unknown = false;
+  const returned = await forgeRun(previous, settings, usage);
+  assert(returned.notes.some(note => note.includes('上次下单结果待确认')));
+  assert.deepEqual(usage.keyRecords()[legacyKey], foreignRecord);
+  assert.equal(usage.keyRecords()[scopedKey].id, currentRecord.id);
+  assert.deepEqual(previous.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  assert.equal(usage.pendingCounters().forgeGold, 2000);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+});
+await check('同世界其他角色待确认领取保留，当前角色用独立领取键完成领取和续产', async () => {
+  const previous = warForgeFixture(), current = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(previous, settings, usage);
+  previous.finishForge();
+  previous.claimStale = true;
+  await forgeRun(previous, settings, usage);
+  const foreignStartKey = 'forge:1001001:1', foreignClaimKey = 'forgeClaim:1001001:1';
+  const foreignStart = usage.keyRecords()[foreignStartKey], foreignClaim = usage.keyRecords()[foreignClaimKey];
+  assert.equal(foreignStart.confirmed, true);
+  assert.equal(foreignClaim.confirmed, false);
+  current.state.factory.equipMaking = {
+    makeId: 1001, finishTime: Math.floor(Date.now() / 1000) - 5, equipId: '测试武器', star: 2,
+  };
+  const playerId = exactAutomationId(current.player.playerId);
+  const scopedClaimKey = foreignClaimKey + ':' + playerId;
+  let observedScopedClaim = false;
+  current.beforeSend = name => {
+    if (name !== 'PickMadeEquipRequest') return;
+    assert.equal(usage.keyRecords()[scopedClaimKey].details.playerId, playerId);
+    assert.deepEqual(usage.keyRecords()[foreignClaimKey], foreignClaim);
+    observedScopedClaim = true;
+  };
+
+  const result = await forgeRun(current, settings, usage);
+  assert(observedScopedClaim);
+  assert(result.results.some(row => row.step.uniqueKey === scopedClaimKey && row.status === 'confirmed'));
+  assert.deepEqual(current.client.writes.map(row => row.name), ['PickMadeEquipRequest', 'MakeEquipRequest']);
+  assert.equal(usage.hasKey(scopedClaimKey), false);
+  assert.equal(usage.keyRecords()[foreignStartKey + ':' + playerId].confirmed, true);
+  assert.deepEqual(usage.keyRecords()[foreignStartKey], foreignStart);
+  assert.deepEqual(usage.keyRecords()[foreignClaimKey], foreignClaim);
+  assert.equal(usage.snapshot().uncertain, 1);
+  assert.equal(usage.snapshot().counters.forgeStarts, 2);
+  assert.equal(usage.snapshot().counters.forgeGold, 4000);
+  assert.equal(usage.confirmedCounters().forgeGold, 4000);
+});
+await check('返回同世界原角色仍核对原始锻造键，领取续产不改其他角色独立记录', async () => {
+  const previous = warForgeFixture(), current = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(previous, settings, usage);
+  const legacyKey = 'forge:1001001:1';
+  const previousRecord = usage.keyRecords()[legacyKey];
+  await forgeRun(current, settings, usage);
+  const scopedKey = legacyKey + ':' + exactAutomationId(current.player.playerId);
+  const currentRecord = usage.keyRecords()[scopedKey];
+  previous.finishForge();
+
+  const result = await forgeRun(previous, settings, usage);
+  assert(result.results.some(row => row.step.kind === 'forgeClaim' && row.step.uniqueKey === 'forgeClaim:1001001:1' && row.status === 'confirmed'));
+  assert.deepEqual(previous.client.writes.map(row => row.name), ['MakeEquipRequest', 'PickMadeEquipRequest', 'MakeEquipRequest']);
+  assert.notEqual(usage.keyRecords()[legacyKey].id, previousRecord.id);
+  assert.equal(usage.keyRecords()[legacyKey].details.playerId, exactAutomationId(previous.player.playerId));
+  assert.equal(usage.hasKey(legacyKey + ':' + exactAutomationId(previous.player.playerId)), false);
+  assert.deepEqual(usage.keyRecords()[scopedKey], currentRecord);
+  assert.deepEqual(current.client.writes.map(row => row.name), ['MakeEquipRequest']);
+  assert.equal(usage.snapshot().counters.forgeStarts, 3);
+  assert.equal(usage.snapshot().counters.forgeGold, 6000);
+});
+await check('领取写请求明确未发送时释放领取键，下一轮可重新领取', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(f, settings, usage);
+  f.finishForge();
+  const request = f.client.request;
+  f.client.request = async (name, ...args) => {
+    if (name === 'PickMadeEquipRequest') throw Object.assign(new Error('领取明确未发送'), { notSent: true });
+    return request(name, ...args);
+  };
+  const attempt = await forgeRun(f, settings, usage);
+  assert.equal(attempt.results[0].status, 'cancelled');
+  assert.equal(usage.hasKey('forgeClaim:1001001:1'), false);
+  assert.equal(usage.keyRecords()['forge:1001001:1'].confirmed, true);
+  assert.equal(usage.snapshot().counters.forgeGold, 2000);
+  f.client.request = request;
+  const retried = await forgeRun(f, settings, usage);
+  assert(retried.results.some(row => row.step.kind === 'forgeClaim' && row.status === 'confirmed'));
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'PickMadeEquipRequest', 'MakeEquipRequest']);
+});
+await check('领取已发送后的回读明确未发送仍保留领取键，恢复后凭产出核销', async () => {
+  const f = warForgeFixture(), settings = warForgeSettings(), usage = ledger();
+  await forgeRun(f, settings, usage);
+  f.finishForge();
+  const request = f.client.request;
+  let claimed = false;
+  f.client.request = async (name, ...args) => {
+    if (claimed && name === 'OnWaterRequest') throw Object.assign(new Error('回读明确未发送'), { notSent: true });
+    const reply = await request(name, ...args);
+    if (name === 'PickMadeEquipRequest') claimed = true;
+    return reply;
+  };
+  const attempt = await forgeRun(f, settings, usage);
+  assert.equal(attempt.results[0].status, 'unknown');
+  assert.equal(usage.hasKey('forgeClaim:1001001:1'), true);
+  assert.equal(usage.snapshot().counters.forgeGold, 2000);
+  f.client.request = request;
+  await forgeRun(f, settings, usage);
+  assert.equal(usage.hasKey('forgeClaim:1001001:1'), false);
+  assert.deepEqual(f.client.writes.map(row => row.name), ['MakeEquipRequest', 'PickMadeEquipRequest', 'MakeEquipRequest']);
 });
 await check('领取复核期间暂停阻止领取，并发检查只领取一次', async () => {
   const f=warForgeFixture(),s=warForgeSettings(),u=ledger();await forgeRun(f,s,u);f.finishForge();let reads=0,active=true;

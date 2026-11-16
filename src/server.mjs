@@ -76,6 +76,7 @@ import { readTreasureLoot, planTreasureLoot, treasureAutomationEnabled } from '.
 import { readCityWar, planCityWar, cityWarEnabled, cityWarReservedFleets, refreshCityWarReservations } from './city-war.mjs';
 import { readWorldOnlineReward, worldOnlineRewardKey } from './world-online-rewards.mjs';
 import { readEquipmentForge, planEquipmentForge, releaseStaleEquipmentForge, forgeEnabled } from './equipment-forge.mjs';
+import { reconcileManualForge } from './manual-forge-sync.mjs';
 import { readAntiqueUpgrade, planAntiqueUpgrade, antiqueEnabled } from './antique-upgrade.mjs';
 import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands, previewNativeAutomation } from './base-automation.mjs';
 import { reconcileManualProduction } from './manual-production-sync.mjs';
@@ -942,11 +943,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         && session.player === player && client.connected;
       try {
         const result = await reconcileManualProduction(client, protocol, { player, enabled });
+        const forge = await reconcileManualForge(client, protocol, loadConfigSafe(), { player, ledger: usageFor(session), enabled });
         if (!enabled()) throw new Error('同步期间账号连接已变化');
         saveAutomation(session.id, { productionSyncRequired: false });
         session.productionSyncRequired = false;
         if (session.productionSyncDrain === drain) session.productionSyncDrain = null;
         emit(session, 'info', result.message + '；继续按当前状态执行已启用任务', { pauseChanged: true });
+        if (forge.factories.length) emit(session, 'info', '已同步手动操作后的装备厂，后续按当前批次和库存继续执行。历史锻造用量仍计入预算。');
       } catch (error) {
         // 读取暂时失败可以自动重试，但不能开放任何经营写操作。
         const cause = client.closeReason;

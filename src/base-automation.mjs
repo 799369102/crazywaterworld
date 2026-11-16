@@ -522,11 +522,14 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
       entry = { step, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
     }
     results.push(entry); onStep?.(entry);
-    if(step.kind==='petClaim'&&entry.ok){
-      const pref=getSettings();
-      const cleanup=await cleanupAfterClaim(client,config,pref,ledger,'pet',()=>enabled()&&client.connected&&getSettings()===pref&&pref.loop.world&&pref.pet.enabled&&pref.pet.claim);
-      if(cleanup){const row={...cleanup,step:{kind:'petRelease',label:cleanup.label}};results.push(row);onStep?.(row);}
-    }
+  }
+  const pref = getSettings();
+  const cleanup = await cleanupAfterClaim(client, config, pref, ledger, 'pet',
+    () => enabled() && client.connected && getSettings() === pref && pref.loop.world && pref.pet.enabled);
+  if (cleanup) {
+    const row = { ...cleanup, step: { kind: 'petRelease', label: cleanup.label } };
+    results.push(row);
+    onStep?.(row);
   }
   return results;
 }

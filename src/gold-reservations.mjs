@@ -44,6 +44,24 @@ export function reserveGold(player, value, cost, request, { operation = null } =
 
 export function pendingGoldSpend(player) { return pending.get(goldAccountKey(player)) ?? null; }
 
+export function captureManualForgeGoldState(player) {
+  const account = goldAccountKey(player), current = pending.get(account) ?? null;
+  return { account, current, ticket: current?.request === 'MakeEquipRequest' ? current : null };
+}
+
+export function assertManualForgeGoldState(player, snapshot) {
+  if (goldAccountKey(player) !== snapshot.account || (pending.get(snapshot.account) ?? null) !== snapshot.current) {
+    throw new Error('同步期间金币记录已变化，请重新同步');
+  }
+}
+
+// The new login and complete resource read establish the new balance. Retiring
+// this barrier leaves the historical operation's confirmation state untouched.
+export function retireManualForgeGoldState(player, snapshot) {
+  assertManualForgeGoldState(player, snapshot);
+  if (snapshot.ticket) pending.delete(snapshot.account);
+}
+
 // A receipt proves the operation, not the age of a previously read balance.
 // Keep the ticket until a complete balance is requested AFTER that evidence.
 export function confirmGoldOperation(ticket) {

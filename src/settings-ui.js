@@ -222,7 +222,7 @@ const configGroups = [
     configField('schedule.petBreed', '沿用原规则培育海兽', 'switch', { help: '每轮最多一只，最高橙色并保留一万金币。开启海兽培育总开关后，改用本组品种、品质与材料参数。' }),
     configField('pet.enabled', '总开关'), configField('pet.claim', '自动领取'), configField('pet.breed', '自动培育'),
     configField('pet.species', '培育种类', 'multi', { catalog: 'petSpecies', empty: '请选择要培育的海兽', when: d => d.pet.breed }),
-    configField('pet.release','自动放生','switch',{help:'确认领取后扫描全部库存，只处理所选品质的闲置未养成对象。游戏客户端本地锁定名单不可读。'}),
+    configField('pet.release','自动放生','switch',{help:'每轮核对全部库存及上阵、值守、养成状态，处理所选品质的闲置未养成对象。游戏客户端本地锁定名单不可读。'}),
     configField('pet.releaseQualities','处理品质','multi',{catalog:'petQualities',empty:'未选择，不处理',when:d=>d.pet.release}),
     configField('pet.quality', '培育品质上限', 'choice', { options: [['BLUE', '蓝色'], ['PURPLE', '紫色'], ['ORANGE', '橙色'], ['RED', '红色']], when: d => d.pet.breed, help: '在所选品质及以下，从材料足够的低品质开始尝试。' }),
     configField('pet.universal', '允许消耗万能基因', 'switch', { help: '仅在普通基因不足时，用对应的已有自选基因补足。', when: d => d.pet.breed }),
@@ -232,7 +232,7 @@ const configGroups = [
   { id: 'forge', title: '装备自动锻造', category: 'base', fields: [
     configField('forge.enabled', '自动锻造总开关', 'switch', { help: '开始挂机后生效，自动领取所选工厂已完成的装备，再安排下一件。下方选择“装备锻造”预览；不会开启游戏原生自动锻造。' }),
     configField('forge.buildingIds', '锻造工厂', 'multi', { catalog: 'forgeBuildings', empty: '请选择装备工厂' }),
-    configField('forge.decompose','自动分解','switch',{help:'确认领取后扫描全部库存，只处理所选品质的闲置未养成对象。游戏客户端本地锁定名单不可读。'}),
+    configField('forge.decompose','自动分解','switch',{help:'每轮核对全部库存及穿戴、养成状态，处理所选品质的闲置未养成对象。游戏客户端本地锁定名单不可读。'}),
     configField('forge.decomposeQualities','处理品质','multi',{catalog:'equipQualities',empty:'未选择，不处理',when:d=>d.forge.decompose}),
     configField('forge.recipeIds', '配方优先顺序', 'multi', { catalog: 'forgeRecipes', empty: '请选择锻造配方', help: '按勾选先后依次尝试，使用首个满足赛季、材料和预算的配方。产出装备和星级遵守游戏随机规则。' }),
     configField('forge.universal', '允许万能材料补足', 'switch', { help: '仅补实际不足的对应品质材料，不用来绕过普通材料保留量。' }),

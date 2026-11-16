@@ -10,8 +10,18 @@ const integer = (value, min = 0) => Number.isSafeInteger(value) && value >= min;
 const nowOf = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
 const universalItems = { BLUE: '蓝装材料自选包', PURPLE: '紫装材料自选包', ORANGE: '橙装材料自选包', RED: '红装材料自选包' };
 const active = new WeakSet(), rejected = new WeakMap();
-const keyOf = (world, buildingId) => 'forge:' + world + ':' + /^([1-9]\d*)装备厂$/.exec(buildingId)?.[1];
-const claimKeyOf = (world, buildingId) => 'forgeClaim:' + world + ':' + /^([1-9]\d*)装备厂$/.exec(buildingId)?.[1];
+const ownsRecord = (record, snapshot) => record?.details?.playerId == null
+  || exactAutomationId(record.details.playerId) === snapshot.playerId;
+
+function factoryKey(prefix, snapshot, buildingId, keys) {
+  const legacy = prefix + ':' + snapshot.worldId + ':' + /^([1-9]\d*)装备厂$/.exec(buildingId)?.[1];
+  const scoped = legacy + ':' + snapshot.playerId;
+  // Keep legacy keys readable while separating merged-world roles that share
+  // one account. An existing role-specific record always keeps its own key.
+  return keys[scoped] || !ownsRecord(keys[legacy], snapshot) ? scoped : legacy;
+}
+const keyOf = (snapshot, buildingId, keys) => factoryKey('forge', snapshot, buildingId, keys);
+const claimKeyOf = (snapshot, buildingId, keys) => factoryKey('forgeClaim', snapshot, buildingId, keys);
 export const forgeEnabled = settings => settings?.forge?.enabled === true;
 
 function quantity(value) {
@@ -23,6 +33,7 @@ function quantity(value) {
 }
 
 export async function readEquipmentForge(client, protocol, config, player, { enabled = () => true } = {}) {
+  const epoch = client.connectionEpoch;
   const worldId = exactAutomationId(player?.worldId);
   const snapshot = { now: nowOf(client), worldId, season: worldId ? Number(BigInt(worldId) / 1000000n % 1000n) : null,
     playerId: exactAutomationId(player?.playerId), forgeLevel: player?.forgeLevel ?? null, buildings: [], equipment: [], stock: new Map(), gold: null, reason: '' };
@@ -32,16 +43,23 @@ export async function readEquipmentForge(client, protocol, config, player, { ena
     return client.request(name, {}, response, 8000);
   };
   try {
+    if (!enabled() || client.connected === false) throw new Error('锻造读取已暂停');
     await refreshGoldSpend(client, player, { enabled });
     await refreshOrderMaterialSpends(client, player, { enabled });
     const [water, items, resources, equips] = await Promise.all([
       get('OnWaterRequest', 'OnWaterResponse'), get('AllItemRequest', 'AllItemResponse'),
       get('AllResourceRequest', 'AllResourceResponse'), get('EquipsRequest', 'EquipsResponse'),
     ]);
-    if (exactAutomationId(player?.playerId) !== snapshot.playerId || exactAutomationId(player?.worldId) !== snapshot.worldId) throw new Error('账号已变化，不能使用原账号锻造库存');
+    if (!enabled() || client.connected === false || client.connectionEpoch !== epoch
+      || exactAutomationId(player?.playerId) !== snapshot.playerId || exactAutomationId(player?.worldId) !== snapshot.worldId) throw new Error('账号或连接已变化，不能使用原锻造库存');
     if (![water.building, items.items, resources.list, equips.equip].every(Array.isArray)) throw new Error('工厂、材料、金币或装备数据不完整');
+    if (new Set(water.building.map(row => row.buildingId)).size !== water.building.length) throw new Error('建筑状态存在重复标识');
     const allowed = new Set(rows(config, 'BuildingUnlockCfg').filter(row => row.buildingType === '装备厂' && row.playerLevel <= player.level).map(row => row.buildingId));
     snapshot.buildings = water.building.filter(row => allowed.has(row.buildingId) && row.level > 0);
+    for (const building of snapshot.buildings) {
+      const making = building.equipMaking;
+      if (making && (!integer(making.makeId, 1) || !integer(making.finishTime, 1))) throw new Error('当前锻造批次信息不完整');
+    }
     for (const item of items.items) {
       if (typeof item.itemId !== 'string') throw new Error('材料标识缺失');
       const n = quantity(item.num), sum = (snapshot.stock.get(item.itemId) ?? 0) + n;
@@ -79,20 +97,18 @@ function observedProduct(d, snapshot) {
 }
 const completedProduct = (record, snapshot) => record?.confirmed ? observedProduct(record.details, snapshot) : null;
 
-// Explicit recovery for a confirmed start whose product was handled outside
-// this tool. It is intentionally never automatic: clearing a record without
-// user confirmation could permit a genuinely unknown MakeEquipRequest to be
-// sent a second time. The caller must first show the idle, freshly-read state.
+// Compatibility entry point for the manual recovery button. Normal rounds
+// also retire confirmed starts once a fresh factory read shows an idle queue.
 export function releaseStaleEquipmentForge(snapshot, ledger, buildingId) {
   if (!snapshot || snapshot.reason) throw new Error(snapshot?.reason || '锻造状态未确认，不能解除记录');
   if (typeof buildingId !== 'string' || !/^([1-9]\d*)装备厂$/.test(buildingId)) throw new Error('工厂标识无法识别');
   const building = snapshot.buildings.find(row => row.buildingId === buildingId);
   if (!building) throw new Error('装备工厂尚未建成或未解锁');
   if (building.equipMaking) throw new Error('工厂仍有锻造批次，不能解除记录');
-  const key = keyOf(snapshot.worldId, buildingId), record = ledger.keyRecords()[key];
+  const keys = ledger.keyRecords(), key = keyOf(snapshot, buildingId, keys), record = keys[key];
   if (!record) return { status: 'absent', key };
   if (record.details?.kind !== 'forgeStart' || !record.confirmed) throw new Error('该记录尚未确认，不能手动解除');
-  if (ledger.hasKey(claimKeyOf(snapshot.worldId, buildingId))) throw new Error('领取结果仍待确认，不能解除开工记录');
+  if (ledger.hasKey(claimKeyOf(snapshot, buildingId, keys))) throw new Error('领取结果仍待确认，不能解除开工记录');
   if (completedProduct(record, snapshot)) throw new Error('已观察到新装备，请刷新后由系统自动核销');
   ledger.releaseCompletedKey(key);
   return { status: 'released', key, details: record.details };
@@ -104,7 +120,7 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
   if (!p) return plan;
   const balances = new Map(snapshot.stock);
   for (const [key, record] of Object.entries(keys)) {
-    if (!key.startsWith('forge:') || record.confirmed) continue;
+    if (!key.startsWith('forge:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot) || record.confirmed) continue;
     if (!Array.isArray(record.details?.costs)) { plan.notes.push('存在不完整的未决锻造预算，暂不下单'); return plan; }
     for (const cost of record.details.costs) {
       if (!cost?.id || !integer(cost.num)) { plan.notes.push('未决锻造消耗记录异常'); return plan; }
@@ -118,8 +134,8 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
   if (snapshot.reason) plan.notes.push(snapshot.reason);
   for (const id of p.buildingIds) {
     const building = snapshot.buildings.find(row => row.buildingId === id), making = building?.equipMaking;
-    const record = keys[keyOf(snapshot.worldId, id)];
-    const claim = keys[claimKeyOf(snapshot.worldId, id)];
+    const record = keys[keyOf(snapshot, id, keys)];
+    const claim = keys[claimKeyOf(snapshot, id, keys)];
     const view = { buildingId: id, state: !building ? '未建成或未解锁' : making?.finishTime > snapshot.now ? '锻造中' : making ? '待领取' : '空闲',
       makeId: making?.makeId ?? null, finishTime: making?.finishTime ?? null, nativeAuto: building?.auto === true, recoverable: false, reason: '' };
     plan.factories.push(view);
@@ -131,19 +147,16 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
     if (making) {
       if (!integer(making.makeId, 1) || !integer(making.finishTime, 1)) reason = '当前锻造批次信息不完整';
       else if (making.finishTime >= snapshot.now) reason = '等待服务器确认制作到期';
-      else if (record && (!record.confirmed || record.details?.makeId !== making.makeId || record.details?.finishTime !== making.finishTime)) reason = '当前锻造批次与待确认记录不一致';
+      else if (record && !record.confirmed) reason = '上次下单结果待确认，暂不接管当前批次';
       if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
       plan.actions.push({ kind: 'forgeClaim', request: 'PickMadeEquipRequest', body: { buildingId: id },
-        buildingId: id, uniqueKey: claimKeyOf(snapshot.worldId, id), parentKey: keyOf(snapshot.worldId, id),
+        buildingId: id, uniqueKey: claimKeyOf(snapshot, id, keys), parentKey: keyOf(snapshot, id, keys),
         makeId: making.makeId, finishTime: making.finishTime, equipId: making.equipId || '',
         star: Object.hasOwn(making, 'star') && integer(making.star) ? making.star : null,
         costs: [], label: id + '领取已完成装备' });
       view.reason = '制作已完成，可领取'; continue;
     }
-    if (record && !completedProduct(record, snapshot)) {
-      reason = record.confirmed ? '等待确认上一件装备产出入库' : '上次下单结果待确认，暂不重复';
-      view.recoverable = record.confirmed && !claim;
-    }
+    if (record && !record.confirmed) reason = '上次下单结果待确认，暂不重复';
     if (!reason && count >= p.dailyLimit) reason = '已达今日锻造次数上限';
     if (reason) { view.reason = reason; plan.notes.push(id + '：' + reason); continue; }
     if (!p.enabled || snapshot.reason) continue;
@@ -166,7 +179,7 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
       if (goldSpent + gold[1] > p.dailyGoldLimit) { failures.push('会超过今日锻造金币预算'); continue; }
       const costs = [{ id: 'GOLD', num: gold[1] }, ...(normal ? [{ id: material[0], num: normal }] : []), ...(shortage ? [{ id: universal, num: shortage }] : [])];
       const action = { kind: 'forgeStart', request: 'MakeEquipRequest', body: { buildingId: id, makeId: recipe.makeId, universal: shortage > 0 },
-        uniqueKey: keyOf(snapshot.worldId, id), buildingId: id, recipeId: recipe.makeId, costs, gold: gold[1],
+        uniqueKey: keyOf(snapshot, id, keys), buildingId: id, recipeId: recipe.makeId, costs, gold: gold[1],
         beforeFinishTime: making?.finishTime ?? 0, label: id + '锻造' + recipe.type + '（' + displayMaterial(config, material[0]) + '）' };
       plan.actions.push(action); view.reason = '可安排所选配方';
       for (const cost of costs) balances.set(cost.id, (balances.get(cost.id) ?? 0) - cost.num);
@@ -177,36 +190,43 @@ export function planEquipmentForge(snapshot, config, settings, { usage = { count
   return plan;
 }
 
-function reconcile(snapshot, ledger, onStep) {
-  if (snapshot.reason) return;
+function reconcile(snapshot, ledger, onStep, enabled = () => true) {
+  if (snapshot.reason || !enabled()) return;
   // 领取记录先核对。明确看到工厂批次结束且出现新UID，才释放领取与制作的记录。
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
-    if (!key.startsWith('forgeClaim:' + snapshot.worldId + ':') || record.details?.kind !== 'forgeClaim') continue;
+    if (!enabled()) return;
+    if (!key.startsWith('forgeClaim:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot) || record.details?.kind !== 'forgeClaim') continue;
     const product = observedProduct(record.details, snapshot);
     if (!product) continue;
-    const parent = keyOf(snapshot.worldId, record.details.buildingId);
+    const parent = keyOf(snapshot, record.details.buildingId, ledger.keyRecords());
     if (ledger.hasKey(parent)) { ledger.resolveKey(parent, true); ledger.releaseCompletedKey(parent); }
     ledger.resolveKey(key, true); ledger.releaseCompletedKey(key);
     onStep?.({ step: { kind: 'forgeComplete', label: record.details.buildingId + '锻造产出已领取入库' }, ok: true, status: 'completed', note: product.equipId + ' · ' + product.star + '星' });
   }
   for (const [key, record] of Object.entries(ledger.keyRecords())) {
-    if (!key.startsWith('forge:' + snapshot.worldId + ':')) continue;
+    if (!enabled()) return;
+    if (!key.startsWith('forge:' + snapshot.worldId + ':') || !ownsRecord(record, snapshot)) continue;
     let data = record.details;
     if (data?.kind !== 'forgeStart' || !integer(data.makeId, 1) || !integer(data.beforeFinishTime) || !Array.isArray(data.beforeUids)) continue;
     const building = snapshot.buildings.find(row => row.buildingId === data.buildingId), making = building?.equipMaking;
-    if (making?.makeId === data.makeId && making.finishTime > data.beforeFinishTime && making.finishTime >= data.sentAt
-      && (!record.confirmed || !data.equipId || !integer(data.star))) {
-      data = { ...data, finishTime: making.finishTime };
+    // A confirmed start has already spent its budget. Manual speed-ups and new
+    // batches can change every queue field, so follow the current factory state.
+    if (making && (record.confirmed || making.makeId === data.makeId
+      && making.finishTime > data.beforeFinishTime && making.finishTime >= data.sentAt)) {
+      data = { ...data, makeId: making.makeId, finishTime: making.finishTime };
+      delete data.equipId;
+      delete data.star;
       if (typeof making.equipId === 'string' && making.equipId) data.equipId = making.equipId;
-      if (integer(making.star)) data.star = making.star;
-      else if (!integer(data.star)) delete data.star;
+      if (Object.hasOwn(making, 'star') && integer(making.star)) data.star = making.star;
       ledger.updateKeyDetails(key, data);
       if (!record.confirmed) ledger.resolveKey(key, true);
     }
     const product = completedProduct(ledger.keyRecords()[key], snapshot);
-    if (product && !ledger.hasKey(claimKeyOf(snapshot.worldId, data.buildingId))) {
+    const completed = building && !making && ledger.keyRecords()[key]?.confirmed;
+    if ((product || completed) && !ledger.hasKey(claimKeyOf(snapshot, data.buildingId, ledger.keyRecords()))) {
       ledger.releaseCompletedKey(key);
-      onStep?.({ step: { kind: 'forgeComplete', label: data.buildingId + '锻造产出已入库' }, ok: true, status: 'completed', note: product.equipId + ' · ' + product.star + '星' });
+      onStep?.({ step: { kind: 'forgeComplete', label: data.buildingId + '已完成批次核对' }, ok: true, status: 'completed',
+        note: product ? product.equipId + ' · ' + product.star + '星' : '服务器工厂已空闲，按当前库存继续安排，保留已确认消耗' });
     }
   }
 }
@@ -215,38 +235,47 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
   if (!forgeEnabled(getSettings?.()) || !enabled() || active.has(client)) return { actions: [], results: [], notes: [] };
   if (!ledger?.updateKeyDetails || !ledger?.releaseCompletedKey) throw new Error('缺少持久锻造任务记录');
   active.add(client);
+  const epoch = client.connectionEpoch, playerId = exactAutomationId(player?.playerId), worldId = exactAutomationId(player?.worldId);
+  const current = () => enabled() && client.connected !== false && client.connectionEpoch === epoch
+    && exactAutomationId(player?.playerId) === playerId && exactAutomationId(player?.worldId) === worldId;
   const results = [], report = entry => { results.push(entry); onStep?.(entry); };
   try {
-    const read = () => readEquipmentForge(client, protocol, config, player, { enabled });
-    const snapshot = await read(); reconcile(snapshot, ledger, report);
+    const read = () => readEquipmentForge(client, protocol, config, player, { enabled: current });
+    const snapshot = await read(); reconcile(snapshot, ledger, report, current);
     const plan = planEquipmentForge(snapshot, config, getSettings(), { usage: ledger.snapshot(), keys: ledger.keyRecords() });
     const balances = new Map(snapshot.stock);
     for (const proposed of plan.actions) {
-      if (!enabled() || !forgeEnabled(getSettings()) || !client.connected) break;
+      if (!current() || !forgeEnabled(getSettings())) break;
       const settings = getSettings(), fresh = await read(), actualStock = new Map(fresh.stock);
       for (const [id, amount] of balances) fresh.stock.set(id, Math.min(fresh.stock.get(id) ?? 0, amount));
       const reviewed = planEquipmentForge(fresh, config, settings, { usage: ledger.snapshot(), keys: ledger.keyRecords() });
       const step = reviewed.actions.find(action => action.uniqueKey === proposed.uniqueKey && action.kind === proposed.kind &&
         (action.kind !== 'forgeClaim' || (action.makeId === proposed.makeId && action.finishTime === proposed.finishTime)) &&
         JSON.stringify(action.body) === JSON.stringify(proposed.body) && JSON.stringify(action.costs) === JSON.stringify(proposed.costs));
-      if (!step || settings !== getSettings() || !enabled() || exactAutomationId(player.playerId) !== fresh.playerId || exactAutomationId(player.worldId) !== fresh.worldId) continue;
+      if (!step || settings !== getSettings() || !current()) continue;
       if ((rejected.get(client)?.get(step.uniqueKey) ?? 0) > Date.now()) continue;
       if (step.kind === 'forgeClaim') {
         if (!protocol.PickMadeEquipRequest || !protocol.PickMadeEquipResponse) throw new Error('当前协议缺少装备领取能力');
         const details = { kind: 'forgeClaim', buildingId: step.buildingId, makeId: step.makeId, finishTime: step.finishTime,
+          playerId: fresh.playerId, worldId: fresh.worldId,
           equipId: step.equipId, star: step.star, beforeUids: fresh.equipment.map(row => row.uid), sentAt: fresh.now };
         const ticket = ledger.reserve({}, {}, {}, { uniqueKey: step.uniqueKey, details });
-        if (!enabled() || settings !== getSettings() || !client.connected) { ledger.cancel(ticket); break; }
-        let entry, after;
+        if (!current() || settings !== getSettings()) { ledger.cancel(ticket); break; }
+        let entry, after, writePending = true;
         try {
           const reply = await client.request('PickMadeEquipRequest', step.body, 'PickMadeEquipResponse', 15000);
+          writePending = false;
+          if (!current()) throw new Error('领取期间连接已变化，等待后续核对');
           if (typeof reply?.equipId === 'string' && reply.equipId) ledger.updateKeyDetails(step.uniqueKey, { ...details, equipId: reply.equipId, star: null });
-          after = await read(); reconcile(after, ledger);
+          after = await read(); reconcile(after, ledger, undefined, current);
           const confirmed = !ledger.hasKey(step.uniqueKey);
           entry = { step, ok: confirmed, sent: true, status: confirmed ? 'confirmed' : 'unknown',
             note: confirmed ? '服务器已确认装备领取入库' : '领取请求已发送，工厂或新装备尚未确认；停止重复领取和下单' };
         } catch (error) {
-          if (error.prompt && error.request === 'PickMadeEquipRequest') {
+          if (writePending && error.notSent === true) {
+            ledger.cancel(ticket);
+            entry = { step, ok: false, skipped: true, status: 'cancelled', error: error.message };
+          } else if (writePending && error.prompt && error.request === 'PickMadeEquipRequest') {
             ledger.cancel(ticket);
             const failures = rejected.get(client) ?? new Map(); rejected.set(client, failures); failures.set(step.uniqueKey, Date.now() + 300000);
             entry = { step, ok: false, status: 'rejected', error: error.message };
@@ -254,21 +283,20 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
         }
         report(entry);
         if (entry.status === 'unknown') break;
-        if (entry.status === 'confirmed' && after && enabled() && settings === getSettings()) {
-          const cleanup=await cleanupAfterClaim(client,config,settings,ledger,'forge',()=>enabled()&&client.connected&&settings===getSettings());
-          if(cleanup)report({...cleanup,step:{kind:'forgeDecompose',label:cleanup.label}});
+        if (entry.status === 'confirmed' && after && current() && settings === getSettings()) {
           const next = planEquipmentForge(after, config, settings, { usage: ledger.snapshot(), keys: ledger.keyRecords() }).actions.find(row => row.kind === 'forgeStart' && row.buildingId === step.buildingId);
           if (next) plan.actions.push(next);
         }
         continue;
       }
       const details = { kind: 'forgeStart', buildingId: step.buildingId, makeId: step.recipeId, costs: step.costs,
+        playerId: fresh.playerId, worldId: fresh.worldId,
         beforeFinishTime: step.beforeFinishTime, beforeUids: fresh.equipment.map(row => row.uid), sentAt: fresh.now };
       const ticket = ledger.reserve({ forgeStarts: 1, forgeGold: step.gold }, { forgeStarts: settings.forge.dailyLimit, forgeGold: settings.forge.dailyGoldLimit }, {}, { uniqueKey: step.uniqueKey, details });
-      if (!enabled() || settings !== getSettings() || !client.connected) { ledger.cancel(ticket); break; }
+      if (!current() || settings !== getSettings()) { ledger.cancel(ticket); break; }
       let goldReservation, materialReservation;
       const { buildingId, makeId, beforeFinishTime, sentAt } = details;
-      const operation = { async verify(current) {
+      const operation = { forgeBuildingId: buildingId, async verify(current) {
         const water = await current.request('OnWaterRequest', {}, 'OnWaterResponse');
         if (!Array.isArray(water?.building)) return false;
         const matches = water.building.filter(row => row.buildingId === buildingId);
@@ -281,18 +309,19 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
         materialReservation = beginOrderMaterialSpend(player, step.costs.filter(cost => cost.id !== 'GOLD').map(cost => ({ id: cost.id, have: actualStock.get(cost.id) ?? 0, need: cost.num })), step.label, { operation });
         goldReservation = reserveGold(player, fresh.gold, step.gold, 'MakeEquipRequest', { operation });
       } catch (error) { cancelOrderMaterialSpend(materialReservation); cancelUnsentGold(goldReservation); ledger.cancel(ticket); report({ step, ok: false, skipped: true, error: error.message }); continue; }
-      if (!enabled() || settings !== getSettings() || !client.connected) { cancelOrderMaterialSpend(materialReservation); cancelUnsentGold(goldReservation); ledger.cancel(ticket); break; }
+      if (!current() || settings !== getSettings()) { cancelOrderMaterialSpend(materialReservation); cancelUnsentGold(goldReservation); ledger.cancel(ticket); break; }
       let entry;
       try {
         await client.sendWatch('MakeEquipRequest', step.body, { window: 600 });
-        const after = await read(); reconcile(after, ledger, report);
+        if (!current()) throw new Error('下单期间连接已变化，等待后续核对');
+        const after = await read(); reconcile(after, ledger, report, current);
         const record = ledger.keyRecords()[step.uniqueKey];
         const confirmed = !record || record.confirmed;
         if (confirmed && !after.reason) {
           confirmGoldOperation(goldReservation);
           confirmOrderMaterialOperation(materialReservation);
-          await refreshGoldSpend(client, player, { enabled });
-          await refreshOrderMaterialSpends(client, player, { enabled });
+          await refreshGoldSpend(client, player, { enabled: current });
+          await refreshOrderMaterialSpends(client, player, { enabled: current });
         }
         entry = { step, ok: confirmed, sent: true, status: confirmed ? 'confirmed' : 'unknown',
           note: confirmed ? '服务器已确认新的锻造任务' : '下单结果待确认，保留材料/金币预算并停止重复下单' };
@@ -313,6 +342,14 @@ export async function runEquipmentForge(client, protocol, config, player, { getS
       report(entry);
       if (entry.status !== 'rejected') for (const cost of step.costs) balances.set(cost.id, (balances.get(cost.id) ?? 0) - cost.num);
       if (entry.status === 'unknown') break;
+    }
+    const unsettled = Object.entries(ledger.keyRecords()).some(([key, record]) => ownsRecord(record, snapshot)
+      && (key.startsWith('forgeClaim:' + worldId + ':') || key.startsWith('forge:' + worldId + ':') && !record.confirmed));
+    if (!snapshot.reason && !unsettled) {
+      const settings = getSettings();
+      const cleanup = await cleanupAfterClaim(client, config, settings, ledger, 'forge',
+        () => current() && forgeEnabled(getSettings()) && settings === getSettings());
+      if (cleanup) report({ ...cleanup, step: { kind: 'forgeDecompose', label: cleanup.label } });
     }
     return { ...plan, results };
   } finally { active.delete(client); }

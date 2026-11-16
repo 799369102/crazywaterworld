@@ -20,6 +20,7 @@ import { atomicJson, readJson, withFileLock } from './json-store.mjs';
  * @property {(counters: Counters, limits?: Counters, minimums?: Counters, options?: {uniqueKey?: string | null, details?: Record<string, unknown> | null}) => LedgerTicket} reserve
  * @property {(uniqueKey: string, details: Record<string, unknown>) => void} updateKeyDetails
  * @property {(uniqueKey: string) => void} releaseCompletedKey
+ * @property {(records: Record<string, KeyRecord>) => {released: number, archived: string[]}} archiveManualForge
  * @property {(ticket: LedgerTicket | null | undefined) => void} confirm
  * @property {(ticket: {id: string, day?: string} | null | undefined) => void} cancel
  */
@@ -144,10 +145,49 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
         atomicJson(file, store);
       });
     },
+    archiveManualForge(records) {
+      return withFileLock(file, () => {
+        if (!plain(records)) throw new Error('锻造交接记录不合法');
+        const { store, entry } = read();
+        const archived = [];
+        let released = 0;
+        for (const [uniqueKey, expected] of Object.entries(records)) {
+          if (!/^forge(?:Claim)?:\d+:[1-9]\d*(?::[1-9]\d*)?$/.test(uniqueKey) || !plain(expected)
+            || JSON.stringify(entry.keys[uniqueKey]) !== JSON.stringify(expected)) {
+            throw new Error('同步期间锻造记录已变化，请重新同步');
+          }
+          const record = entry.keys[uniqueKey];
+          const reservation = entry.pending[record.id];
+          if (record.confirmed ? Boolean(reservation) : !reservation || reservation.uniqueKey !== uniqueKey) {
+            throw new Error('锻造记录与用量预留不一致，保留原记录');
+          }
+          if (!record.confirmed && Object.hasOwn(entry.keys, 'forgeHistory:' + record.id)) {
+            throw new Error('锻造历史记录已存在，请重新同步');
+          }
+        }
+        // A manual handoff establishes a fresh inventory baseline. Preserve
+        // unknown expenditure without keeping its old factory lock active.
+        for (const uniqueKey of Object.keys(records)) {
+          const record = entry.keys[uniqueKey];
+          if (record.confirmed) released++;
+          else {
+            const archiveKey = 'forgeHistory:' + record.id;
+            entry.keys[archiveKey] = { ...record, details: { ...record.details,
+              archivedFrom: uniqueKey, disposition: 'manual-handoff-sync', archivedAt: now() } };
+            entry.pending[record.id].uniqueKey = archiveKey;
+            archived.push(archiveKey);
+          }
+          delete entry.keys[uniqueKey];
+        }
+        if (released || archived.length) atomicJson(file, store);
+        return { released, archived };
+      });
+    },
     confirm(ticket) {
       if (!ticket) return;
       return withFileLock(file, () => {
         const { store, entry } = read();
+        if (entry.keys['forgeHistory:' + ticket.id]?.details?.disposition === 'manual-handoff-sync') return;
         if (!Object.hasOwn(entry.pending, ticket.id)) {
           const record = Object.values(entry.keys).find(value => value.id === ticket.id);
           if (record) { record.confirmed = true; atomicJson(file, store); }
@@ -164,6 +204,7 @@ export function createUsageLedger(accountId, { file = usageFile(), now = Date.no
       if (!ticket) return;
       return withFileLock(file, () => {
         const { store, entry } = read();
+        if (entry.keys['forgeHistory:' + ticket.id]?.details?.disposition === 'manual-handoff-sync') return;
         if (!Object.hasOwn(entry.pending, ticket.id)) {
           const uniqueKey = Object.keys(entry.keys).find(value => entry.keys[value].id === ticket.id);
           // A delayed rejection cannot undo a confirmation committed elsewhere.

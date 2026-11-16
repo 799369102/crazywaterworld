@@ -122,6 +122,26 @@ export function pendingOrderMaterialSpends(player) {
   return [...(materialSpends.get(accountKey(player)) ?? [])].filter(handle => handle.operation);
 }
 
+export function captureManualForgeMaterialState(player, { goldOperation = null } = {}) {
+  const account = accountKey(player), all = [...(materialSpends.get(account) ?? [])];
+  const handles = all.filter(handle => handle.operation && !handle.manualSyncBlocked
+    && (/^[1-9]\d*装备厂$/.test(handle.operation.forgeBuildingId ?? '')
+      || goldOperation && handle.operation === goldOperation
+      || /^[1-9]\d*装备厂锻造/.test(handle.label ?? '')));
+  return { account, all, handles };
+}
+
+export function assertManualForgeMaterialState(player, snapshot) {
+  const current = [...(materialSpends.get(accountKey(player)) ?? [])];
+  if (snapshot.account !== accountKey(player) || current.length !== snapshot.all.length
+    || current.some(handle => !snapshot.all.includes(handle))) throw new Error('同步期间材料记录已变化，请重新同步');
+}
+
+export function retireManualForgeMaterialState(player, snapshot) {
+  assertManualForgeMaterialState(player, snapshot);
+  for (const handle of snapshot.handles) removeMaterialSpend(handle);
+}
+
 // Freeze the candidate handles BEFORE querying business state and then inventory.
 // Neither an unrelated debit nor an older read can settle a newer operation.
 export async function readOrderMaterialState(client, player, { enabled = () => true } = {}) {

@@ -25,11 +25,13 @@ let sequence = 0, passed = 0;
 const water = () => ({ building: [
   { buildingId: '1厨房', level: 1, factory: { factoryQ: [], finishedProducts: [] } },
   { buildingId: '1农田', level: 1, farm: {} },
+  { buildingId: '1装备厂', level: 1, auto: false },
 ] });
 Object.defineProperty(GameClient.prototype, 'connected', { get() { return live.has(this); } });
 GameClient.prototype.connect = async function (login) {
   this.fixture = states.get(login.fixtureId);
   this.fixture.logins++; this.fixture.clients.push(this); this.stopping = false;
+  this.connectionEpoch++;
   this.fixture.events.push('login'); live.add(this);
   return { result: 0, playerInfo: this.fixture.player };
 };
@@ -60,6 +62,14 @@ GameClient.prototype.request = async function (name) {
     if (state.inventoryError) throw new Error('库存读取失败');
     return { items: [{ itemId: '生鱼片', num: 9 }, { itemId: '小麦种子', num: 9 }] };
   }
+  if (name === 'EquipsRequest') {
+    if (state.equipmentError) throw new Error('装备库存读取失败');
+    return { equip: [] };
+  }
+  if (name === 'AllResourceRequest') {
+    if (state.resourcesError) throw new Error('资源库存读取失败');
+    return { list: [{ res: 3, amount: 100000 }] };
+  }
   if (name === 'EmailBoxRequest') return { email: [] };
   return {};
 };
@@ -82,8 +92,8 @@ async function fixture() {
   store.accounts.push({ id, url: 'ws://invalid.invalid', login: { fixtureId: id }, automation: { enabled: false,
     tasks: Object.fromEntries(automationTasks.map(task => [task.key, task.key === 'mail'])) } });
   store.activeId = id; saveStore(store);
-  const app = createConsole({ port: 0, recoveryDelayMs: () => 25 }); apps.add(app);
-  const root = await app.listen();
+  let app = createConsole({ port: 0, recoveryDelayMs: () => 25 }); apps.add(app);
+  let root = await app.listen();
   const response = async (route, body = null) => {
     const result = await fetch(root + '/api/' + route + '?account=' + id, { ...(body === null ? {} : { method: 'POST', body: JSON.stringify(body) }), signal: AbortSignal.timeout(6000) });
     return { status: result.status, data: await result.json() };
@@ -102,12 +112,52 @@ async function fixture() {
     beginOrderMaterialSpend(player, [{ id: '小麦种子', have: 10, need: 1 }], '手动操作前播种', { farm: { args: [{ buildingId: '1农田', productId: '小麦' }] } });
     return pending();
   };
+  const makeForge = ({ confirmed = false } = {}) => {
+    const ledger = createUsageLedger(id);
+    const key = 'forge:' + player.worldId + ':1';
+    const now = Math.floor(Date.now() / 1000);
+    const ticket = ledger.reserve({ forgeStarts: 1, forgeGold: 2000 }, {}, {}, {
+      uniqueKey: key,
+      details: {
+        kind: 'forgeStart', buildingId: '1装备厂', makeId: 1001,
+        playerId: String(player.playerId), worldId: String(player.worldId),
+        beforeFinishTime: 0, beforeUids: [], sentAt: now - 60, finishTime: now - 1,
+        costs: [{ id: 'GOLD', num: 2000 }, { id: '蓝武器材料', num: 40 }],
+      },
+    });
+    if (confirmed) ledger.confirm(ticket);
+    return { ledger, key, ticket, record: ledger.keyRecords()[key], budget: ledger.snapshot().counters };
+  };
   const close = async () => {
     state.readGate?.resolve();
     const job = session().loop.job;
     await app.close(); await job; apps.delete(app);
   };
-  return { id, state, app, api, response, session, saved, pending, makePending, close };
+  const restart = async () => {
+    await close();
+    app = createConsole({ port: 0, recoveryDelayMs: () => 25 }); apps.add(app);
+    root = await app.listen();
+    await api('accounts');
+  };
+  return { id, state, get app() { return app; }, api, response, session, saved, pending, makePending, makeForge, close, restart };
+}
+function assertForgeSynchronized(forge) {
+  assert.equal(forge.ledger.hasKey(forge.key), false, '当前工厂应释放旧阻塞记录');
+  assert.deepEqual(forge.ledger.snapshot().counters, forge.budget, '同步保留原锻造用量');
+  const history = forge.ledger.keyRecords()['forgeHistory:' + forge.ticket.id];
+  if (forge.record.confirmed) {
+    assert.equal(history, undefined);
+    assert.equal(forge.ledger.confirmedCounters().forgeGold, 2000);
+    assert.equal(forge.ledger.pendingCounters().forgeGold ?? 0, 0);
+  } else {
+    assert.equal(history.id, forge.record.id);
+    assert.equal(history.confirmed, false);
+    assert.equal(history.details.archivedFrom, forge.key);
+    assert.equal(history.details.disposition, 'manual-handoff-sync');
+    assert.equal(forge.ledger.pendingCounters().forgeGold, 2000);
+    assert.equal(forge.ledger.pendingCounters().forgeStarts, 1);
+    assert.equal(forge.ledger.confirmedCounters().forgeGold ?? 0, 0);
+  }
 }
 const test = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 saveStore({ activeId: null, accounts: [] });
@@ -180,6 +230,89 @@ try {
     } finally { await f.close(); }
   });
 
+  await test('暂停恢复托管通过新登录同步锻造，未知结果归档且已确认记录释放并保留预算', async () => {
+    for (const confirmed of [false, true]) {
+      const f = await fixture();
+      try {
+        await f.api('connect', {});
+        const oldClient = f.session().client;
+        const forge = f.makeForge({ confirmed });
+        await f.api('accounts/pause', { paused: true });
+        assert.equal(f.saved().productionSyncRequired, true);
+        await f.api('accounts/pause', { paused: false });
+        await f.api('connect', {});
+
+        assert.equal(f.state.logins, 2);
+        assert.notEqual(f.session().client, oldClient);
+        assert.equal(oldClient.connected, false);
+        assert.equal(f.saved().productionSyncRequired, false);
+        assert.equal(f.session().productionSyncRequired, false);
+        assert.equal(f.session().loop.running, false);
+        assert(f.state.requests.includes('EquipsRequest'));
+        assert(f.state.requests.includes('AllResourceRequest'));
+        assertForgeSynchronized(forge);
+        assert.deepEqual(f.state.sends, ['LoginFinishRequest', 'LoginFinishRequest']);
+      } finally { await f.close(); }
+    }
+  });
+
+  await test('装备或金币读取失败保留锻造记录与同步标记，页面读取自动重新登录重试', async () => {
+    for (const errorField of ['equipmentError', 'resourcesError']) {
+      const f = await fixture();
+      try {
+        const forge = f.makeForge();
+        const records = forge.ledger.keyRecords();
+        f.state[errorField] = true;
+        await f.api('accounts/pause', { paused: true });
+        await f.api('accounts/pause', { paused: false });
+        const response = await f.response('connect', {});
+        assert.equal(response.status, 400);
+        assert.deepEqual(forge.ledger.keyRecords(), records);
+        assert.deepEqual(forge.ledger.snapshot().counters, forge.budget);
+        assert.equal(forge.ledger.pendingCounters().forgeGold, 2000);
+        assert.equal(f.saved().productionSyncRequired, true);
+        assert.equal(f.session().productionSyncRequired, true);
+        assert.equal(f.session().client.connected, false);
+        assert.equal(f.session().syncingProduction, null);
+        assert.deepEqual(f.state.sends, ['LoginFinishRequest']);
+
+        f.state[errorField] = false;
+        await f.api('overview');
+        assert.equal(f.state.logins, 2);
+        assert.equal(f.saved().productionSyncRequired, false);
+        assert.equal(f.session().client.connected, true);
+        assertForgeSynchronized(forge);
+        assert.deepEqual(f.state.sends, ['LoginFinishRequest', 'LoginFinishRequest']);
+      } finally { await f.close(); }
+    }
+  });
+
+  await test('待同步锻造标记持久保存，控制台重建后连接自动恢复且预算仍保留', async () => {
+    for (const confirmed of [false, true]) {
+      const f = await fixture();
+      try {
+        await f.api('connect', {});
+        const forge = f.makeForge({ confirmed });
+        await f.api('accounts/pause', { paused: true });
+        await f.api('accounts/pause', { paused: false });
+        const previousSession = f.session();
+        assert.equal(f.saved().productionSyncRequired, true);
+        await f.restart();
+        assert.notEqual(f.session(), previousSession);
+        assert.equal(f.session().productionSyncRequired, true);
+        assert.equal(f.saved().productionSyncRequired, true);
+        assert.equal(createUsageLedger(f.id).hasKey(forge.key), true);
+
+        await f.api('connect', {});
+        assert.equal(f.state.logins, 2);
+        assert.equal(f.saved().productionSyncRequired, false);
+        assert.equal(f.session().syncingProduction, null);
+        assertForgeSynchronized(forge);
+        assert.deepEqual(f.state.sends, ['LoginFinishRequest', 'LoginFinishRequest']);
+      } finally { await f.close(); }
+    }
+  });
+
   await test('顶号后明确连接已通过认证，仅同步读失败时允许页面重试且始终保留写屏障', async () => {
     const f = await fixture();
     try {
@@ -202,11 +335,33 @@ try {
     } finally { await f.close(); }
   });
 
+  await test('游戏顶号后明确恢复连接自动同步锻造，旧未知用量保持待确认', async () => {
+    const f = await fixture();
+    try {
+      await f.api('connect', {});
+      const forge = f.makeForge(), client = f.session().client;
+      client.closeReason = 'kicked'; live.delete(client);
+      client.emit('fatal', { reason: 'SCChannelExpired' }); client.emit('close', { reason: 'kicked' });
+      assert.equal(f.session().loginBlocked, true);
+      assert.equal(f.saved().productionSyncRequired, true);
+      assert.equal(forge.ledger.hasKey(forge.key), true);
+
+      await f.api('connect', {});
+      assert.equal(f.state.logins, 2);
+      assert.equal(f.session().loginBlocked, false);
+      assert.equal(f.saved().productionSyncRequired, false);
+      assertForgeSynchronized(forge);
+      assert.deepEqual(f.state.sends, ['LoginFinishRequest', 'LoginFinishRequest']);
+    } finally { await f.close(); }
+  });
+
   await test('等待旧操作或读取新状态时再次暂停及断开均取消同步，旧记录保持原样', async () => {
     for (const phase of ['drain', 'read']) for (const cancel of ['accounts/pause', 'disconnect']) {
       const f = await fixture(), gate = deferred();
       try {
         const records = f.makePending();
+        const forge = f.makeForge();
+        const forgeRecords = forge.ledger.keyRecords();
         if (phase === 'drain') f.session().queueTail = gate.promise;
         else f.state.readGate = gate;
         await f.api('accounts/pause', { paused: true });
@@ -218,6 +373,8 @@ try {
         const result = await pending;
         assert.equal(result.status, 400, phase + cancel);
         assert.deepEqual(f.pending(), records);
+        assert.deepEqual(forge.ledger.keyRecords(), forgeRecords);
+        assert.deepEqual(forge.ledger.snapshot().counters, forge.budget);
         assert.equal(f.session().paused, cancel === 'accounts/pause');
         assert.equal(f.saved().productionSyncRequired, true);
         assert.equal(f.saved().enabled, false);
@@ -231,12 +388,17 @@ try {
     const f = await fixture();
     try {
       const records = f.makePending();
+      const forge = f.makeForge();
+      const forgeRecords = forge.ledger.keyRecords();
       await f.api('loop/start', { confirm: true, rounds: 0, everySeconds: 3600 });
       await waitFor(() => f.session().loop.completed === 1, '首轮完成');
       const client = f.session().client;
       client.closeReason = 'network'; live.delete(client); client.emit('close', { reason: 'network' });
       await waitFor(() => f.state.logins === 2 && f.session().loop.completed === 2, '网络恢复');
       assert.deepEqual(f.pending(), records);
+      assert.deepEqual(forge.ledger.keyRecords(), forgeRecords, '普通网络恢复必须保留原工厂锻造锁');
+      assert.deepEqual(forge.ledger.snapshot().counters, forge.budget);
+      assert.equal(forge.ledger.pendingCounters().forgeGold, 2000);
       assert.equal(f.state.requests.includes('OnWaterRequest'), false, '仅开启邮件不应读取基地同步状态');
       assert.equal(f.session().syncingProduction, null);
       await f.api('loop/stop', { confirm: true });
