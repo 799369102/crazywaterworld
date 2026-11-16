@@ -1,6 +1,6 @@
 # 疯狂水世界 · 航行控制台
 
-![Node.js 20.11+](https://img.shields.io/badge/Node.js-20.11%2B-417E38) ![Windows](https://img.shields.io/badge/Windows-本地控制台-0078D4) [![ISC License](https://img.shields.io/badge/license-ISC-blue)](LICENSE)
+![Node.js 20.11+](https://img.shields.io/badge/Node.js-20.11%2B-417E38) ![Windows](https://img.shields.io/badge/Windows-本地控制台-0078D4) [![仅供学习交流](https://img.shields.io/badge/license-Study%20Only-orange)](LICENSE)
 
 在本机管理《疯狂水世界》账号，直连游戏 WebSocket，安排领奖、基地经营、英雄养成和舰队任务。每个账号独立保存开关、详细配置和用量记录，运行日志会说明实际完成的操作、收益及跳过原因。
 
@@ -92,4 +92,4 @@ npm start
 - 登录流程、凭证来源和使用限制。[微信登录](docs/wechat-login.md) · [手机号登录](docs/phone-login.md)
 - 活动下线范围、时间依据及恢复方式。[活动配置规则](docs/activity-availability.md)
 
-项目采用 ISC 许可证。第三方组件保留各自的版权声明。[许可证](LICENSE)
+项目采用自定义的学习交流使用许可，仅允许非商业性的学习、技术研究、教学和交流用途。商业使用须取得相应权利人的书面授权。第三方组件和既有授权内容按各自适用的许可执行，具体范围见许可正文。[许可证](LICENSE)

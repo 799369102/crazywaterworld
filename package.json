@@ -34,7 +34,7 @@
     "protobuf",
     "websocket"
   ],
-  "license": "ISC",
+  "license": "SEE LICENSE IN LICENSE",
   "private": false,
   "engines": {
     "node": ">=20.11"
