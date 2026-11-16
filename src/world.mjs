@@ -1392,7 +1392,7 @@ export async function runWorld(client, protocol, plan, {
       } catch (error) {
         // A later read/settlement failure cannot prove the completed write was unsent.
         const notSent = !dispatched || (writePending && error.notSent === true);
-        if (prepared && (notSent || error.prompt && error.request === actual.request)) await cancelAction?.(actual, ticket, { notSent, error });
+        if (prepared) await cancelAction?.(actual, ticket, { notSent, error });
         if (['StartFactoryProduceRequest','SetFactoryAutoProduceRequest'].includes(step.request)) rememberFactoryFailure(step, error);
         if(step.request==='SetFactoryAutoProduceRequest'&&(notSent||error.prompt&&error.request===step.request))nativeTargetChecks.get(client)?.delete(step.body.buildingId);
         if (recipe && error.code !== 'AUTOMATION_SKIP') failedRecipes.add(recipe);

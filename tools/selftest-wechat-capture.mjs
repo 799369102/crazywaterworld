@@ -22,9 +22,15 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
   const h = {
     events, runtime, mode, trusted, certExists, active: { ...original }, sharedBackup: null,
     options: null, timers: new Map(), listener: deferred(), stopper: deferred(),
+    journalRecord: null,
   };
   let nextTimer = 0;
   h.controller = createCaptureController({
+    journal: {
+      read() { return h.journalRecord && structuredClone(h.journalRecord); },
+      write(record) { h.journalRecord = structuredClone(record); },
+      clear() { h.journalRecord = null; },
+    },
     acquireLock: async () => {
       if (h.mode === 'busy') throw new Error('fixture lock busy');
       h.locked = true;
@@ -44,7 +50,9 @@ function harness({ mode = '', trusted = false, certExists = trusted, original = 
       initCa() {
         events.push('ca:init');
         if (h.mode === 'init-failure') throw new Error('fixture initialization failure');
+        const created = !h.certExists;
         h.certExists = true;
+        return { created };
       },
       prepareLeaf(host) {
         assert.equal(host, HOST);

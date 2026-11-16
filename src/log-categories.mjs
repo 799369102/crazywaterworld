@@ -8,6 +8,7 @@ export const LOG_GROUPS = {
   '日常与活动':['heroes','daily','activity','merchant','trials','stages']
 };
 export function classifyLog(message, extra = {}) {
+  if (Object.hasOwn(LOG_CATEGORIES, extra?.category)) return extra.category;
   if (String(message).startsWith('联盟互助')) return 'alliance';
   const text = String(extra?.request ?? '') + ' ' + String(message);
   if (/海商王|走商|商会币|商船从港口|Trade(?:Move|Buy|Sell)/.test(text)) return 'merchant';

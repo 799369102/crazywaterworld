@@ -2,8 +2,9 @@
 import { EventEmitter } from 'node:events';
 import { loadProtocol } from '../../src/proto.mjs';
 import { exactAutomationId } from '../../src/automation-policy.mjs';
-const protocol=loadProtocol(),table=data=>({data});
-export function guildMutualFixture(shared=null) {
+let actualProtocol;
+const table=data=>({data});
+export function guildMutualFixture(shared=null, { protocol = actualProtocol ??= loadProtocol() } = {}) {
   const now=Math.floor(Date.now()/1000),player={playerId:'9007199254740993',guildId:'9007199254741001',worldId:'2002001',level:37,nickname:'互助验证者'};
   const friend='9007199254740995',other='9007199254740997';
   const state=shared??{stock:{橡胶圈:1,木材:20},peerStock:0,askUsed:0,own:[],requests:Array.from({length:20},(_,i)=>({reqId:String(9007199254750000n+BigInt(i)),reqItemId:'橡胶圈',asker:{playerId:friend,nickname:'同名盟友'},askTime:now-30+i,endTime:now+3600})),

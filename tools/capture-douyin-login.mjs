@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { createCaptureJournal, createCaptureRecovery } from '../src/capture-recovery.mjs';
 
 import { acquireCaptureLock } from './capture-lock.mjs';
 import { pointsToCapture, prepareCaptureProxy } from './proxy-settings.mjs';
@@ -118,6 +120,8 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   let outcome;
   let stage = '加载采集组件';
   let cleanupFailed = false;
+  let journal, record;
+  const persist = () => { if (record) { record.phase = stage; journal.write(record); } };
   const installAbort = new AbortController();
   const finished = new Promise((resolve) => {
     outcome = (value) => {
@@ -150,10 +154,24 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     releaseLock = await (dependencies.acquireLock ?? acquireCaptureLock)();
     if (done) return (await finished).code;
     stage = '检查遗留采集代理（如未恢复，请先运行 node tools/proxy-settings.mjs restore）';
+    const dataDir = path.resolve(dependencies.dataDir ?? runtime.env.CW_DATA_DIR ?? path.join(import.meta.dirname, '../data'));
+    journal = dependencies.journal ?? createCaptureJournal(runtime.env.CW_CAPTURE_STATE ?? path.join(dataDir, 'capture-session.json'));
+    const recovery = createCaptureRecovery({ journal, ca, proxySettings: settings, acquireLock: dependencies.acquireLock ?? acquireCaptureLock });
+    if (recovery.inspect().pending) {
+      stage = '恢复上次采集改动（请运行 node tools/start-console.mjs recover）';
+      throw new Error('unfinished capture');
+    }
     if (pointsToCapture(settings.readCurrent(), port)) throw new Error('stale capture proxy');
     stage = '准备本地测试 CA';
     const installedBefore = ca.isInstalled();
+    const initial = { version: 1, id: randomUUID(), port, startedAt: now().toISOString(), ready: false, keepCa: false,
+      ca: { installedBefore, installAttempted: false, created: false, fingerprint: null }, proxy: null };
+    journal.write(initial);
+    record = initial;
     const initialized = ca.initCa();
+    Object.assign(record.ca, { created: initialized.created, fingerprint: ca.caFingerprint?.() ?? null,
+      thumbprint: ca.caThumbprint?.() ?? null, file: ca.CA_CRT });
+    persist();
     if (installedBefore && initialized.created) {
       throw new Error('已有可信 CA 但缺少对应本地证书，请检查证书状态');
     }
@@ -167,6 +185,8 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
       installAbort.signal.throwIfAborted();
       // 安装可能在报错前已写入证书存储，所以先登记清理责任。
       removeCa = true;
+      record.ca.installAttempted = true;
+      persist();
       await ca.installCa({ signal: installAbort.signal });
       if (!ca.isInstalled()) throw new Error('CA verification');
     }
@@ -203,9 +223,13 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     await Promise.race([proxy.listen(), finished]);
     if (!done) {
       stage = '检查遗留采集代理（如未恢复，请先运行 node tools/proxy-settings.mjs restore）';
-      proxySettings = prepareCaptureProxy(settings, port);
+      proxySettings = prepareCaptureProxy(settings, port, {
+        onChange(snapshot) { record.proxy = snapshot; persist(); },
+      });
       stage = '备份并设置当前用户系统代理';
       proxySettings.enable();
+      record.ready = true;
+      persist();
       io.log('采集已就绪。现在打开 Windows 抖音中的《疯狂水世界》；已开着的游戏请退出后重新进入。');
       io.log('正在等待登录样本，Ctrl+C 可停止并还原设置。');
     }
@@ -244,21 +268,29 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     if (removeCa) {
       let removed = false;
       try {
-        if (ca.isInstalled()) ca.uninstallCa();
-        if (ca.isInstalled()) throw new Error('CA removal verification');
+        const thumbprint = record?.ca.thumbprint;
+        if (ca.isInstalled(thumbprint)) ca.uninstallCa(thumbprint);
+        if (ca.isInstalled(thumbprint)) throw new Error('CA removal verification');
+        record.ca.installAttempted = false;
+        record.ca.filesPending = record.ca.created && ca.caFingerprint?.() === record.ca.fingerprint;
+        persist();
         removed = true;
         io.log('本次安装的测试 CA 已移除。');
       } catch {
         cleanupFailed = true;
         io.error('本次测试 CA 移除失败，请运行 node tools/mitm-ca.mjs uninstall 并检查证书存储。');
       }
-      if (removed) {
+      if (removed && record.ca.filesPending) {
         try { ca.removeCaFiles?.(); io.log('本次生成的本地测试证书文件已清理。'); }
         catch {
           cleanupFailed = true;
           io.error('本地测试证书文件清理失败，请手动删除项目的 certificates 目录。');
         }
       }
+    }
+    if (record && !cleanupFailed) {
+      try { journal.clear(); }
+      catch { cleanupFailed = true; io.error('采集恢复记录清理失败，请运行 node tools/start-console.mjs recover。'); }
     }
     if (releaseLock) await releaseLock();
     for (const [event, handler] of handlers) runtime.removeListener(event, handler);

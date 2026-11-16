@@ -32,7 +32,13 @@ async function runCase({
   ]);
   if (existingSample) files.set(SAMPLE_PATH, 'existing sample');
   const initialFiles = new Map(files);
+  let journalRecord = null;
   const code = await main(args, {
+    journal: {
+      read() { return journalRecord && structuredClone(journalRecord); },
+      write(record) { journalRecord = structuredClone(record); },
+      clear() { journalRecord = null; },
+    },
     acquireLock: async () => {
       events.push('lock');
       if (mode === 'busy') throw new Error('busy');
@@ -54,6 +60,9 @@ async function runCase({
       },
     },
     ca: {
+      CA_CRT: 'fixture-ca.crt',
+      caFingerprint() { return 'fixture-fingerprint'; },
+      caThumbprint() { return 'a'.repeat(40); },
       isInstalled() { return trusted; },
       initCa() { events.push('init'); return { created: false }; },
       prepareLeaf(host) {
@@ -149,6 +158,8 @@ async function runCase({
     assert.deepEqual(savedProxy, previousBackup, 'must not overwrite the recovery backup from a previous capture');
   }
   if (events.includes('lock') && mode !== 'busy') assert.equal(events.at(-1), 'unlock');
+  if (mode === 'restore-error') assert(journalRecord?.proxy?.owned, 'retain recovery data when proxy cleanup fails');
+  else assert.equal(journalRecord, null, 'successful cleanup removes the capture journal');
   return { code, events, logs, writes, files };
 }
 

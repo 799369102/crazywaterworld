@@ -41,6 +41,7 @@ import { surveyTasks, runTasks } from './tasks.mjs';
 import { surveyDailies, runDailies } from './dailies.mjs';
 import { surveyWorld, planWorld, runWorldRound, displayBuilding } from './world.mjs';
 import { createFactorySchedule } from './factory-schedule.mjs';
+import { createLoopScheduler } from './loop-scheduler.mjs';
 import { createActionGuard, nativePreferenceEnabled, needsCargoDemand, exactAutomationId } from './automation-policy.mjs';
 import { surveyBaseAutomation, planBaseAutomation, runBaseAutomation, baseDemands } from './base-automation.mjs';
 import { hasBaseWork } from './automation-settings.mjs';
@@ -137,57 +138,50 @@ export async function runLoop(client, protocol, {
     && isActivityTaskAvailable('merchantTrade', client) && nativePreferenceEnabled(getSettings(), 'merchantTrade')
     && isEnabled('merchantTrade'));
   const merchantNow = () => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
-  let merchantPending = false, merchantRunAfter = 0;
+  let merchantRunAfter = 0;
   const merchantNext = () => merchantActive()
     ? Math.max(merchantRunAfter, merchantMonitor.nextCheckAt * 1000 - (client.serverClockOffsetMs || 0)) : Infinity;
-  let followWake=null,followPending=false,followVersion=0;
-  let factoryPending = false;
+  const scheduler = createLoopScheduler({ client, stop, schedule, sleep });
+  let followVersion = 0;
   const factorySchedule = createFactorySchedule(client, {
     getSettings, getConfig: () => config,
     isEnabled: key => !stop.aborted && client.connected !== false && nativePreferenceEnabled(getSettings(), key) && (!isEnabled || isEnabled(key)),
-    onWake: () => { factoryPending = true; followWake?.(); },
+    onWake: scheduler.wake,
   });
-  let maintenanceAt=0,maintenancePending=false,maintenanceVersion=0;
-  let siliconPending = false, siliconVersion = 0, dispatchSettingsPending = false;
-  const unsubscribeSilicon = watchSiliconMining(client).subscribe(() => {
+  scheduler.addCleanup(() => factorySchedule.dispose());
+  let maintenanceAt=0,maintenanceVersion=0;
+  let siliconVersion = 0, dispatchSettingsPending = false;
+  scheduler.addCleanup(watchSiliconMining(client).subscribe(() => {
     if (stop.aborted || !getSettings()?.silicon?.enabled) return;
-    siliconAt = 0; siliconPending = true; siliconVersion++; followWake?.();
-  });
-  const settingsWake = () => { siliconAt = 0; extendedAt = 0; siliconVersion++; siliconPending = true; dispatchSettingsPending = true;
-    rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); followWake?.(); };
+    siliconAt = 0; siliconVersion++; scheduler.wake();
+  }));
+  const settingsWake = () => { siliconAt = 0; extendedAt = 0; siliconVersion++; dispatchSettingsPending = true;
+    rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); scheduler.wake(); };
   const extendedPush = ({ name }) => {
     if (/^SCGuildShip|^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
-      extendedAt = 0; siliconPending = true; followWake?.();
+      extendedAt = 0; scheduler.wake();
     }
   };
-  client.on?.('automationSettingsChanged', settingsWake); client.on?.('message', extendedPush);
+  scheduler.listen(client, 'automationSettingsChanged', settingsWake);
+  scheduler.listen(client, 'message', extendedPush);
   watchGuildShipPushes(client, rewards);
-  const unsubscribeFollow=travel.subscribe(fleet=>{
+  scheduler.addCleanup(travel.subscribe(fleet=>{
     const preferences=getSettings()?.treasure;
     if(stop.aborted||!client.connected||!treasureAutomationEnabled(getSettings())||!matchesFollowDeparture(fleet,preferences,exactAutomationId(player?.playerId),travel.current()))return;
-    treasureAt=0;followPending=true;followVersion++;followWake?.();
-  });
-  const unsubscribeMaintenance=watchFleetMaintenance(client).subscribe(()=>{
+    treasureAt=0;followVersion++;scheduler.wake();
+  }));
+  scheduler.addCleanup(watchFleetMaintenance(client).subscribe(()=>{
     if(stop.aborted||!client.connected||!fleetMaintenanceEnabled(getSettings()))return;
-    maintenanceAt=0;maintenancePending=true;maintenanceVersion++;followWake?.();
-  });
-  const unsubscribeMerchant = merchantMonitor.subscribe(() => {
+    maintenanceAt=0;maintenanceVersion++;scheduler.wake();
+  }));
+  scheduler.addCleanup(merchantMonitor.subscribe(() => {
     if (!merchantActive()) return;
-    merchantPending = true;
-    followWake?.();
-  });
-  // 出发推送只唤醒现有调度，不在消息回调中并发发协议或绕过舰队优先级。
-  async function waitWithFollow(ms,signal){
-    if(followPending||maintenancePending||merchantPending||siliconPending||factoryPending){followPending=false;maintenancePending=false;merchantPending=false;siliconPending=false;factoryPending=false;return true;}
-    const controller=new AbortController(),abort=()=>controller.abort(signal?.reason);
-    if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
-    let wake;const changed=new Promise(resolve=>{wake=()=>resolve(true);followWake=wake;});
-    try{return await Promise.race([Promise.resolve(sleep(ms,controller.signal)).then(()=>false),changed]);}
-    finally{if(followWake===wake)followWake=null;controller.abort();signal?.removeEventListener('abort',abort);}
-  }
+    scheduler.wake();
+  }));
+  scheduler.addCleanup(() => watchFleetMaintenance(client).hold([]));
   try{
   for (let round = 1; round <= total; round += 1) {
-    if (stop.aborted || client.connected === false) break;
+    if (!scheduler.active()) break;
     // 配置对象和配套地图均为不可变版本快照；只在下一轮开始时采用新发布。
     if (refreshConfig) config = refreshConfig();
     const roundStartedMs = Date.now();
@@ -268,7 +262,6 @@ export async function runLoop(client, protocol, {
       if (stop.aborted || client.connected === false || checkpoint && !factorySchedule.hasChecked()) return;
       const factoryDue = factorySchedule.due();
       if (!factoryDue && !checkUpgrade) return;
-      if (factoryDue) factoryPending = false;
       try {
         const currentSettings = getSettings();
         const current = () => !stop.aborted && client.connected !== false && currentSettings === getSettings();
@@ -317,7 +310,6 @@ export async function runLoop(client, protocol, {
     }
     async function checkMerchant() {
       if (!merchantActive() || !merchantMonitor.due() || Date.now() < merchantRunAfter) return;
-      merchantPending = false;
       // 先推进下次检查，读取失败也不能在同一毫秒不断重新排队。
       merchantMonitor.defer(merchantNow() + merchantMonitorSeconds(getSettings()));
       const label = automationTasks.find(task => task.key === 'merchantTrade').label;
@@ -408,7 +400,7 @@ export async function runLoop(client, protocol, {
     async function checkMaintenance(){
       if(stop.aborted||!fleetMaintenanceEnabled(getSettings())){watchFleetMaintenance(client).hold([]);onMaintenance?.({enabled:false,rows:[],reason:'现有自动维修未开启'});return;}
       if(Date.now()<maintenanceAt)return;
-      const version=maintenanceVersion;maintenancePending=false;
+      const version=maintenanceVersion;
       try{await runFleetMaintenance(client,player,{getSettings,ledger:usageLedger,enabled:()=>!stop.aborted&&client.connected&&fleetMaintenanceEnabled(getSettings()),
         onView:onMaintenance,onStep:entry=>{summary.world.planned++;summary.world.results.push(entry);stepLog('world')({...entry,category:'战后维修',taskKey:'舰队战后维修'});}});}
       catch(error){onMaintenance?.({enabled:true,rows:[],reason:error.message});phaseFailure('world','战后维修',error);}
@@ -422,7 +414,7 @@ export async function runLoop(client, protocol, {
     }
     async function checkTreasure() {
       if (stop.aborted || !treasureAutomationEnabled(getSettings()) || Date.now() < treasureAt) return;
-      const checkedFollowVersion=followVersion;followPending=false;
+      const checkedFollowVersion=followVersion;
       if(getSettings()?.cityWar.reserveDuringWar)await checkCityWar();
       try {
         await runTreasureLoot(client, protocol, config, player, { getSettings, ledger: usageLedger,
@@ -509,7 +501,7 @@ export async function runLoop(client, protocol, {
       if (!entry.skipped) summary.tasks.planned++;
       logReward(entry, '领奖');
     } }));
-    await schedule(async () => {
+    await scheduler.run(async () => {
       if (stop.aborted) return;
       beginAdRound(client);
       await checkFactoryDue({ checkpoint: true });
@@ -1003,7 +995,7 @@ export async function runLoop(client, protocol, {
       await checkFactoryDue({ checkpoint: true });
     });
     mainRoundFinished = true;
-    if (stop.aborted) break;
+    if (!scheduler.active()) break;
 
     merchantRoundSeconds = Math.max(merchantRoundSeconds, Math.ceil((Date.now() - roundStartedMs) / 1000));
     history.push(summary);
@@ -1011,10 +1003,9 @@ export async function runLoop(client, protocol, {
     onRound?.(summary);
     if (round < total && !stop.aborted) {
       try {
-        const signal = typeof stop.addEventListener === 'function' ? stop : undefined;
         const nextRound = Date.now() + getEveryMs();
         let upgradeAt = Date.now() + 30_000;
-        while (!stop.aborted && client.connected !== false && Date.now() < nextRound) {
+        while (scheduler.active() && Date.now() < nextRound) {
           const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
           const wakeAt = Math.min(nextRound, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
@@ -1024,31 +1015,31 @@ export async function runLoop(client, protocol, {
             cityWarEnabled(getSettings()) ? cityWarAt : Infinity,
             forgeEnabled(getSettings()) ? forgeAt : Infinity,
             antiqueEnabled(getSettings()) ? antiqueAt : Infinity, afkAt);
-          const waitMs = Math.max(0, wakeAt - Date.now());
-          if (waitMs > 0) await waitWithFollow(waitMs, signal);
-          if (stop.aborted || client.connected === false || Date.now() >= nextRound) break;
+          if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
+          if (!scheduler.active() || Date.now() >= nextRound) break;
           // 推送或保存设置可能早于原定时间唤醒；必须重读当前到期时间与开关。
           const checkUpgrade = !!isEnabled && enabled('upgrade') && upgradeAt <= Date.now();
           if (factorySchedule.due() || checkUpgrade) {
-            await schedule(() => checkFactoryDue({ checkUpgrade }));
+            await scheduler.runDue('factory', () => Math.min(factorySchedule.nextAt(),
+              isEnabled && enabled('upgrade') ? upgradeAt : Infinity), () => checkFactoryDue({ checkUpgrade }));
             if (checkUpgrade) upgradeAt = Date.now() + 30_000;
           }
-          if (merchantNext() <= Date.now()) await schedule(checkMerchant);
-          if (extendedNext() <= Date.now()) await schedule(checkExtended);
-          const dispatchAt = Math.min(siliconNext(),
+          await scheduler.runDue('merchant', merchantNext, checkMerchant);
+          await scheduler.runDue('extended', extendedNext, checkExtended);
+          const dispatchNext = () => Math.min(siliconNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,
             cityWarEnabled(getSettings()) ? cityWarAt : Infinity,
             treasureAutomationEnabled(getSettings()) ? treasureAt : Infinity);
-          if (dispatchSettingsPending || dispatchAt <= Date.now()) {
+          await scheduler.runDue('dispatch', () => dispatchSettingsPending ? 0 : dispatchNext(), async () => {
             dispatchSettingsPending = false;
-            await schedule(checkDispatch);
-          }
-          if (forgeEnabled(getSettings()) && forgeAt <= Date.now()) await schedule(checkForge);
-          if (antiqueEnabled(getSettings()) && antiqueAt <= Date.now()) await schedule(checkAntique);
+            await checkDispatch();
+          });
+          await scheduler.runDue('forge', () => forgeEnabled(getSettings()) ? forgeAt : Infinity, checkForge);
+          await scheduler.runDue('antique', () => antiqueEnabled(getSettings()) ? antiqueAt : Infinity, checkAntique);
           if (afkAt <= Date.now() && enabled('afk')) {
             afkDeadline = undefined;
-            await schedule(async () => {
+            await scheduler.runDue('afk', () => enabled('afk') ? afkAt : Infinity, async () => {
               if (!enabled('afk')) return;
               await claimRewards(client, protocol, config, logReward, key => key === 'afk' && enabled(key), rememberDeadline, rewards, player, { settings: getSettings() });
               try { await claimAfkAdNow(); } catch (error) { phaseFailure('tasks', '闯关挂机广告收益', error); }
@@ -1060,7 +1051,9 @@ export async function runLoop(client, protocol, {
       catch (error) { if (!stop.aborted) throw error; }
     }
   }
-  }finally{factorySchedule.dispose();unsubscribeFollow();unsubscribeMaintenance();unsubscribeMerchant();unsubscribeSilicon();client.off?.('automationSettingsChanged',settingsWake);client.off?.('message',extendedPush);watchFleetMaintenance(client).hold([]);followWake=null;}
+  } finally {
+    scheduler.dispose();
+  }
 
   return { history, rejected };
 }

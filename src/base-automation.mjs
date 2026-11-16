@@ -469,7 +469,7 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
     } catch (error) {
       const notSent = !sent || (writePending && error.notSent === true);
       if(choiceTicket && (notSent || error.prompt&&error.request==='SelectChoiceRequest'))ledger.cancel(choiceTicket);
-      if (prepared && (notSent || error.prompt && error.request === step.request)) await guard.cancel(step, ticket, { notSent, error });
+      if (prepared) await guard.cancel(step, ticket, { notSent, error });
       entry = { step, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
     }
     results.push(entry); onStep?.(entry);

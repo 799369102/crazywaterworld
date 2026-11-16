@@ -68,6 +68,19 @@ test('空正文和无效时间不会使日志输出抛错', () => {
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-console-log-cli-'));
 const configFile = path.join(dir, 'config.json');
 fs.writeFileSync(configFile, '[]');
+// 空账号启动只需空协议命名空间，使用明确的测试包走真实加载入口。
+const protocolFile = path.join(dir, 'empty-protocol.js');
+fs.writeFileSync(protocolFile, `
+define('src/chunks/bundle.test.js', function () {
+  System.register([], function () {
+    return { execute() {
+      System.register('chunks:///_virtual/proto-bundle.js', ['helpers', 'protobuf'], function (publish) {
+        return { setters: [() => {}, () => {}], execute() { publish('protocol', {}); } };
+      });
+    } };
+  });
+});
+`);
 fs.writeFileSync(path.join(dir, 'accounts.json'), JSON.stringify({ version: 1, activeId: null, accounts: [] }));
 const repo = fileURLToPath(new URL('../', import.meta.url));
 let child;
@@ -80,6 +93,7 @@ try {
     env: {
       ...process.env,
       CW_DATA_DIR: dir, CW_CONFIG_PACK: configFile,
+      CW_PROTO_BUNDLE: protocolFile,
       CW_NO_BROWSER: '1', CW_QUIET_START: '1', CW_PORT: '0',
     },
   });

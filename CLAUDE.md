@@ -15,6 +15,8 @@ npm start                     # prestart 先构建界面，再启动；端口 17
 .\start-console.cmd status    # 只检查 MITM 证书状态，不启动控制台
 npm run build:ui              # 改 TSX 或 theme.css 后运行，提交 src/ui/dist 产物
 npm test                      # pretest 先构建，再依次执行下面三组，遇错即停
+npm run test:offline           # 构建、类型检查及无需本机协议的核心回归，CI使用此入口
+npm run typecheck              # 账本与文件事务的JSDoc静态检查
 npm run test:core             # 核心协议、日常、原有玩法、阵容与掉线处理
 npm run test:progression      # 装备、情报、订单、博物馆、海兽、预留与迁移接线
 npm run test:extra            # 详细配置、活动、调度、维修、城战/锻造、礼包与地图
@@ -28,7 +30,7 @@ npm run sync-resources        # 从游戏发布清单更新配置表和世界地
 npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 ```
 
-`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。没有 lint 和测试框架；测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，不会自动发现。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。
+`CW_PORT` 可改端口，`CW_NO_BROWSER=1` 禁止自动开浏览器。测试用 `node:assert/strict`，新文件需加入对应 `package.json` 脚本，核心离线专项同时登记到 `tools/selftest-offline.mjs`。单跑某个测试分组不会触发顶层 `pretest`，涉及界面标记时先构建。`test:offline` 会将协议路径指向缺失文件，依赖真实协议的测试应明确使用自有协议包进行验证。
 
 - `selftest-{fishing,fishing-upgrade,antique-recruit,activity-schedule,resident-orders,resident-http}.mjs` 由 `selftest-automation.mjs` 调用，单独执行不会跑测试。
 - `selftest-registry.mjs` 与 `selftest-describe.mjs` 不在 npm 测试脚本内；注册表测试会写测试键并自行清理。
@@ -65,7 +67,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 - 挂机使用外层运行 controller 和每连接独立 attemptController。普通网络、心跳连续超时和重传失败会中断旧轮次，待其退出后退避重连（3 秒起、最高 60 秒），保留进度、账本与预留。异地登录按账号的 `login.autoReconnect` 授权恢复，登录设置提供常规/深夜间隔、随机抖动及重试上限。未运行挂机的账号也按策略恢复连接并保持挂机停止状态。等待时间与已尝试次数持久保存以便重启接续，等待中保存配置立即重算下一次重试时间，页面读取遵守账号的重连等待。手动暂停、停止、断开或关闭自动重连取消重试，拒绝登录、协议错误及次数耗尽终止重试，手动暂停需明确恢复托管。重连后先自动同步工厂、农田和库存再接续原有任务，同步失败保留旧记录并暂缓写入。`GameClient.closeReason` 和登录错误 `recoverable` 决定分类。Webhook 仍未恢复。
 - CLI 的 `console-output.mjs` 在支持 VT 的 TTY 使用滚动区固定地址/提示，日志分批且有界，非 TTY 保留纯文本；关闭恢复滚动区。不要绕过此输出器打印普通控制台日志或全局替换 console；`CW_PIN_HEADER=0` 可关闭顶部固定。
 - `reward-schedule.mjs` 记录奖励下次检查时间，相关推送提前唤醒。推送只触发串行检查，不能另开并行派遣绕过预算。
-- `accounts.mjs`、`capture.mjs`、`tools/mitm-*.mjs` 管理账号与采集；采集会临时改系统代理和用户证书。
+- `accounts.mjs`、`capture.mjs`、`tools/mitm-*.mjs` 管理账号与采集。`src/platform/` 封装 Windows 代理、证书、客户端路径、浏览器和终端能力，`tools/start-console.mjs` 承担启动脚本逻辑。采集阶段与归属持久保存在 `data/capture-session.json`，恢复入口包括账号页按钮和 `start-console.cmd recover`。
 
 ### 控制台页面
 
@@ -92,7 +94,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 
 ### 用量与资源预留
 
-- `automation-settings.mjs` 保存 `automation-settings.json` 与 `automation-usage.json`，按账号管理。导出只含设置，兼容旧 `crazywaterword-automation` 格式，不能导出凭据或账本。
+- `automation-settings.mjs` 管理设置与显式版本迁移，`usage-ledger.mjs` 管理账本，原模块兼容导出账本接口。`json-store.mjs` 为完整读改写提供同步跨进程互斥和原子落盘。导出只含设置，兼容旧 `crazywaterword-automation` 格式，不能导出凭据或账本。
 - `createUsageLedger` 在发送前持久占用预算，确认后登记，明确未发送或拒绝才取消。日计数按北京时间换日，带 `uniqueKey` 的未知 pending 跨日保留；重启、导入或保存设置不能清零记录。未知结果不当成成功，也不能直接重试。
 - `automation-policy.mjs` 计算消费、保留量、次数限制与总预算。钻石总开关默认 false、总日预算默认 2000、保留阈值默认 0；日预算 0 禁止自动钻石。模块预算和总预算同时检查，加速器共用保留量。
 - 原主分支的 `order-reservations.mjs`、`gold-reservations.mjs`、`fleet-reservations.mjs` 继续协调材料、金币和舰队/汽油。已确认扣款可能早于库存同步，因此进程内记录按账号跨重连保留，进程重启后清空；与持久账本共同防止旧余额被重复使用。
@@ -114,7 +116,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 
 - 未安装 Long 库，int64 常为 `{ low, high, unsigned }`。普通数值用 `client.mjs` 的 `toNumber`；UID 等大整数需精确字符串或 `automation-policy.mjs` 的 ID 转换，不能先转不安全 Number。
 - 服务端时间使用 `Date.now() + client.serverClockOffsetMs`，每日按北京时间重置；合服后 `GameWorldInfo.worldId` 可能不同于角色 `worldId`。
-- 用假 client 驱动玩法，同时断言请求/响应存在于真实 `protocol`。为消费流程验证预算、并发、未知结果、重连/跨日防重及发送前关闭，不写只复述实现的测试。
+- 用假 client 驱动玩法，核心离线测试通过 `tools/fixtures/declared-protocol.mjs` 明确声明消息，真实协议回归验证消息与编解码兼容性。为消费流程验证预算、并发、未知结果、重连/跨日防重及发送前关闭，不写只复述实现的测试。
 - 变更通过适用分组后即可；界面相关先构建。完整迁移使用 `npm test` 验证三组，并用 `git diff --check` 检查格式，避免真实账号验证。
 
 ## 文档

@@ -252,7 +252,7 @@ export async function runHeroPlan(client, protocol, plan, { allowMutate = false,
         await afterAction?.(budgetStep, ticket, outcome.response ? entry : { ...entry, sent: true });
       } catch (error) {
         const notSent = !sent || (writePending && error.notSent === true);
-        if (prepared && (notSent || error.prompt && error.request === request)) await cancelAction?.(budgetStep, ticket, { notSent, error });
+        if (prepared) await cancelAction?.(budgetStep, ticket, { notSent, error });
         blocked.add(key);
         const entry = { step, targetLevel, ok: false, ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true } : {}), error: error.message };
         results.push(entry);

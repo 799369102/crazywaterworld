@@ -1582,12 +1582,19 @@ function renderCapture(state) {
   const previousQr=$('cap-box').querySelector('img'),previousLog=$('cap-box').querySelector('pre');
   const logY=previousLog?.scrollTop??0,logX=previousLog?.scrollLeft??0;
   const box = clear($('cap-box'));
-  const cleanupPending = state.phase === 'error';
+  const recovery = state.recovery;
+  const cleanupPending = state.phase === 'error' || recovery?.pending;
   $('cap-start').disabled = state.running || cleanupPending;
   $('cap-douyin').disabled = state.running || cleanupPending;
-  $('cap-stop').disabled = !state.running && !cleanupPending;
+  $('cap-stop').disabled = !state.running && state.phase !== 'error';
+  $('cap-recover').hidden = !recovery?.pending;
+  $('cap-recover').disabled = state.running || !recovery?.recoverable;
   hint.textContent = state.error ? '采集已停止，请查看运行日志' : (state.running ? '抓包中：' + (state.phase === 'waiting' ? '等待电脑游戏登录' : state.phase) : (state.accountId ? '凭证已保存，登录验证结果请查看日志' : ''));
   hint.className = state.error ? 'bad' : 'warn';
+  if (recovery?.pending) {
+    hint.textContent = recovery.error || recovery.message || '检测到上次采集残留，可恢复原代理和本次安装的证书';
+    hint.className = recovery.error ? 'bad' : 'warn';
+  }
 
   if (state.running) {
     const steps = el('ol', 'steps');
@@ -1650,6 +1657,15 @@ async function pollCapture() {
 
 $('cap-start').onclick = () => beginCapture('wechat');
 $('cap-douyin').onclick = () => beginCapture('douyin');
+$('cap-recover').onclick = async () => {
+  $('cap-recover').disabled = true;
+  try {
+    renderCapture(await call('/api/capture/recover', { method: 'POST', body: JSON.stringify({ confirm: true }) }));
+  } catch (error) {
+    reportError(error);
+    await pollCapture();
+  }
+};
 async function beginCapture(platform) {
   let state;
   try {

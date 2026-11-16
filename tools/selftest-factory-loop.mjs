@@ -1,10 +1,12 @@
-// 独立生产调度集成测试：真实 runLoop、真实协议、虚构客户端与虚拟时钟。
+// 独立生产调度集成测试：真实 runLoop、虚构客户端与虚拟时钟。
+// 默认验证真实协议编解码；--offline 显式使用消息白名单验证调度行为。
 // 必须在任何业务模块加载前隔离数据目录，不连接游戏或现有控制台。
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createDeclaredProtocol } from './fixtures/declared-protocol.mjs';
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-factory-loop-'));
 const originalDataDir = process.env.CW_DATA_DIR, originalNow = Date.now;
@@ -18,7 +20,13 @@ try {
   const { runLoop } = await import('../src/loop.mjs');
   const { loadProtocol } = await import('../src/proto.mjs');
   const { defaultSettings, createUsageLedger } = await import('../src/automation-settings.mjs');
-  const protocol = loadProtocol();
+  const protocol = process.argv.includes('--offline') ? createDeclaredProtocol([
+    'OnWaterRequest', 'OnWaterResponse', 'AllItemRequest', 'AllItemResponse',
+    'AllResourceRequest', 'AllResourceResponse', 'MyResFieldsRequest', 'MyResFieldsResponse',
+    'MyFleetsRequest', 'MyFleetsResponse', 'WeekInfoRequest', 'WeekInfoResponse',
+    'GuildInfoRequest', 'GuildInfoResponse', 'GainFactoryProduceRequest', 'GainFactoryProduceResponse',
+    'StartFactoryProduceRequest',
+  ]) : loadProtocol();
 
   function integration({ rounds = 2, mainEveryMs = 3600000, cli = false, offset = 0, finishAfterMs = 5000, fallbackSeconds = 30 } = {}) {
     const settings = defaultSettings();
@@ -52,7 +60,7 @@ try {
     let currentSettings = settings, active = false, scheduled = 0, readsInFlight = 0, writesInFlight = 0;
     let queue = Promise.resolve(), sleepHook, beforeRead, afterWrite, reportHook, roundHook;
     const codec = (name, value) => {
-      const type = protocol[name]; assert(type, '真实协议必须存在：' + name);
+      const type = protocol[name]; assert(type, '测试协议必须明确声明：' + name);
       return type.decode(type.encode(value).finish());
     };
     const finish = () => {
@@ -240,8 +248,9 @@ try {
       wall = base; const f = integration();
       f.sleepHook(() => {
         wall += 1000; f.finish();
-        if (disconnected) { f.client.connected = false; f.client.emit('disconnect'); }
-        f.abort(); f.client.emit('message', { name: 'SCUpdateWaterBuilding', body: { building: [f.state.building] } });
+        if (disconnected) { f.client.connected = false; f.client.emit('close'); }
+        else f.abort();
+        f.client.emit('message', { name: 'SCUpdateWaterBuilding', body: { building: [f.state.building] } });
       });
       await f.run(); assert.equal(writes(f).length, 0); await f.clean();
     }

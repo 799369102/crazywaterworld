@@ -10,7 +10,7 @@
 //   node tools/sync-art.mjs --fetch   # 缺的页面从 CDN 下载
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { wechatCacheDirectories } from '../src/platform/client-paths.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { parsePackage, ITEM_TYPE } from '../src/fgui.mjs';
 import { getConfig } from '../src/config.mjs';
@@ -63,10 +63,7 @@ export function decodeUuid(uuid) {
 
 // 微信给小游戏单独划了一块缓存目录，目录名是账号哈希，这里挨个找哪个里面有 cacheList。
 export function findCacheDir() {
-  const users = path.join(os.homedir(), 'AppData', 'Roaming', 'Tencent', 'xwechat', 'radium', 'users');
-  if (!fs.existsSync(users)) return null;
-  for (const user of fs.readdirSync(users)) {
-    const dir = path.join(users, user, 'applet', 'local', APPID, 'usr', 'gamecaches');
+  for (const dir of wechatCacheDirectories(APPID)) {
     if (fs.existsSync(path.join(dir, 'cacheList.json'))) return dir;
   }
   return null;

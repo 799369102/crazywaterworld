@@ -1,17 +1,19 @@
 // Current-user capture lifecycle. Creating/importing a controller changes no system settings.
-import * as defaultCa from '../tools/mitm-ca.mjs';
-import * as defaultSettings from '../tools/proxy-settings.mjs';
+import { platform as systemPlatform } from './platform/index.mjs';
 import { createProxy as defaultCreateProxy, DEFAULT_PROXY_PORT } from '../tools/mitm-proxy.mjs';
-import { pointsToCapture, prepareCaptureProxy } from '../tools/proxy-settings.mjs';
-import { acquireCaptureLock } from '../tools/capture-lock.mjs';
+import { pointsToCapture, prepareCaptureProxy } from './platform/proxy.mjs';
+import { createCaptureJournal, createCaptureRecovery } from './capture-recovery.mjs';
+import { randomUUID } from 'node:crypto';
+import { acquireCaptureLock } from './platform/capture-lock.mjs';
 import { DEFAULT_GATEWAY } from './client.mjs';
 
 export const DEFAULT_CAPTURE_TIMEOUT_MS = 5 * 60 * 1000;
 const GATEWAY = new URL(DEFAULT_GATEWAY);
 export function createCaptureController(dependencies = {}) {
   const acquireLock = dependencies.acquireLock ?? acquireCaptureLock;
-  const ca = dependencies.ca ?? defaultCa;
-  const settings = dependencies.proxySettings ?? defaultSettings;
+  const ca = dependencies.ca ?? systemPlatform.certificates;
+  const settings = dependencies.proxySettings ?? systemPlatform.proxy;
+  const journal = dependencies.journal ?? createCaptureJournal();
   const createProxy = dependencies.createProxy ?? defaultCreateProxy;
   const runtime = dependencies.process ?? process;
   const later = dependencies.setTimeout ?? setTimeout;
@@ -25,6 +27,20 @@ export function createCaptureController(dependencies = {}) {
   };
   let current = null;
   let latest = null;
+  const recovery = createCaptureRecovery({ journal, ca, proxySettings: settings, acquireLock, isRunning: () => !!current });
+
+  function persist(run, phase = state.phase) {
+    if (!run.record) return;
+    run.record.phase = phase;
+    run.record.ready = run.ready;
+    journal.write(run.record);
+  }
+
+  function clearRecord(run) {
+    if (!run.record) return true;
+    try { journal.clear(); run.record = null; return true; }
+    catch { cleanupError(run, '采集恢复记录清理失败，请重试停止。'); return false; }
+  }
 
   function note(line, run = latest) {
     if (run && run !== latest) return;
@@ -53,6 +69,7 @@ export function createCaptureController(dependencies = {}) {
       accountId: state.accountId, capturedAt: state.capturedAt, startedAt: state.startedAt,
       log: state.log.slice(-40).map((entry) => entry.line),
       ca: { cn: ca.CA_CN, crt: ca.CA_CRT, fingerprint, thumbprint },
+      recovery: recovery.inspect(),
     };
   }
 
@@ -83,16 +100,18 @@ export function createCaptureController(dependencies = {}) {
     }
     try {
       // A failed install may have stopped before writing anything to the trust store.
-      const present = ca.isInstalled();
-      if (present) ca.uninstallCa();
-      if (ca.isInstalled()) throw new Error('CA removal verification');
+      const thumbprint = run.record?.ca.thumbprint;
+      const present = ca.isInstalled(thumbprint);
+      if (present) ca.uninstallCa(thumbprint);
+      if (ca.isInstalled(thumbprint)) throw new Error('CA removal verification');
+      if (addedHere && run.record?.ca.created && ca.caFingerprint() === run.record.ca.fingerprint) {
+        ca.removeCaFiles?.();
+        note('本次生成的本地测试证书文件已清理。', run);
+      }
       run.caAdded = false;
+      if (run.record) { run.record.ca.installAttempted = false; persist(run); }
       if (latest === run) state.caAddedByCapture = false;
       note(present ? '本次安装的测试 CA 已移除。' : '本进程未查到测试 CA，未执行删除。', run);
-      if (addedHere) {
-        try { ca.removeCaFiles?.(); note('本次生成的本地测试证书文件已清理。', run); }
-        catch { cleanupError(run, '本次测试证书文件清理失败，请手动删除项目的 certificates 目录。'); }
-      }
     } catch {
       cleanupError(run, '本次测试 CA 移除失败，请重试停止或运行 node tools/mitm-ca.mjs uninstall。');
     }
@@ -122,7 +141,7 @@ export function createCaptureController(dependencies = {}) {
         cleanupError(run, '本地采集代理关闭失败，请重试停止。');
       }
       restoreCa(run);
-      const clean = !run.proxySettings && !run.caAdded && !run.proxy;
+      const clean = !run.proxySettings && !run.caAdded && !run.proxy && clearRecord(run);
       if (clean && run.releaseLock) await run.releaseLock();
       if (latest === run) {
         state.running = false;
@@ -151,9 +170,10 @@ export function createCaptureController(dependencies = {}) {
       // Node's exit event cannot await; registry and CA changes are synchronous.
       restoreProxy(run);
       if (!run.installPending) restoreCa(run);
+      if (!run.proxySettings && !run.caAdded && !run.installPending) clearRecord(run);
     };
     run.handlers.set('exit', onExit);
-    for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129]]) {
+    for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143], ['SIGHUP', 129], ['SIGBREAK', 149]]) {
       run.handlers.set(signal, () => {
         // Restore immediately even if closing a socket later fails or stalls.
         onExit();
@@ -171,7 +191,7 @@ export function createCaptureController(dependencies = {}) {
     const run = {
       onLog, keepCa, proxy: null, proxySettings: null, releaseLock: null, caAdded: false,
       cancelled: false, finished: false, ready: false, captured: false, timer: undefined,
-      handlers: new Map(), cleanupPromise: null,
+      handlers: new Map(), cleanupPromise: null, record: null,
       installAbort: new AbortController(),
       setupFinished: new Promise((resolve) => { finishSetup = resolve; }),
     };
@@ -189,11 +209,17 @@ export function createCaptureController(dependencies = {}) {
       if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 86400000) throw new Error('采集超时必须在 1–86400000 毫秒之间');
       run.releaseLock = await acquireLock();
       if (run.cancelled) throw new Error('启动已取消');
+      const leftover = recovery.inspect({ ignoreActive: true });
+      if (leftover.pending) throw new Error(leftover.error || '上次采集尚未清理，请先恢复上次采集改动');
       state.originalProxy = { ...settings.readCurrent() };
       if (pointsToCapture(state.originalProxy, port)) {
         throw new Error('系统代理已指向本机采集端口；请先恢复上次的代理设置，避免覆盖原始备份');
       }
       state.caInstalledBefore = ca.isInstalled();
+      const initialRecord = { version: 1, id: randomUUID(), startedAt: state.startedAt, phase: 'starting', port,
+        keepCa, ready: false, ca: { installedBefore: state.caInstalledBefore, installAttempted: false, fingerprint: null, created: false }, proxy: null };
+      journal.write(initialRecord);
+      run.record = initialRecord;
       installHooks(run);
       run.timer = later(() => {
         if (run.finished || run.cancelled) return;
@@ -232,13 +258,20 @@ export function createCaptureController(dependencies = {}) {
       });
       state.phase = 'ca';
       stage = '准备当前用户测试 CA';
-      ca.initCa();
+      const initialized = ca.initCa();
+      run.record.ca.created = initialized?.created === true;
+      run.record.ca.fingerprint = ca.caFingerprint();
+      run.record.ca.thumbprint = ca.caThumbprint?.() ?? null;
+      run.record.ca.file = ca.CA_CRT;
+      persist(run);
       ca.prepareLeaf(GATEWAY.hostname);
       if (!state.caInstalledBefore) {
         await ca.verifyRootView?.();
         if (run.cancelled) throw new Error('采集启动已取消');
         // certutil can install a certificate and subsequently fail; always own that rollback.
         run.caAdded = true;
+        run.record.ca.installAttempted = true;
+        persist(run);
         state.caAddedByCapture = true;
         run.installPending = true;
         try {
@@ -255,11 +288,14 @@ export function createCaptureController(dependencies = {}) {
       if (!run.cancelled) {
         stage = '设置当前用户系统代理';
         state.phase = 'proxy';
-        run.proxySettings = prepareCaptureProxy(settings, port);
+        run.proxySettings = prepareCaptureProxy(settings, port, {
+          onChange(snapshot) { run.record.proxy = snapshot; persist(run); },
+        });
         state.originalProxy = { ...run.proxySettings.original };
         run.proxySettings.enable();
         run.ready = true;
         state.phase = 'waiting';
+        persist(run);
         note('采集已就绪，请在电脑' + (platform === 'douyin' ? '抖音' : '微信') + '中重新打开《疯狂水世界》。', run);
       }
     } catch (error) {
@@ -273,11 +309,13 @@ export function createCaptureController(dependencies = {}) {
     return captureState();
   }
 
-  return { captureState, startCapture, stopCapture };
+  return { captureState, startCapture, stopCapture, inspectCaptureRecovery: recovery.inspect, recoverCapture: recovery.recover };
 }
 
 const controller = createCaptureController();
 export const captureState = controller.captureState;
 export const startCapture = controller.startCapture;
 export const stopCapture = controller.stopCapture;
+export const inspectCaptureRecovery = controller.inspectCaptureRecovery;
+export const recoverCapture = controller.recoverCapture;
 export { DEFAULT_PROXY_PORT };

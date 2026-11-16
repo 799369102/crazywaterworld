@@ -468,7 +468,7 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
         if (entry.task.id === 1010 && typeof DAILY_DRIVERS[1010].run === 'function') {
           const sweepResult = await DAILY_DRIVERS[1010].run({ client, survey, action, timeout, allowAction, config, performWrite });
           if (sweepResult?.skipped) {
-            if (!writeAttempted) await cancelAction?.(action, ticket, { notSent: true });
+            await cancelAction?.(action, ticket, { notSent: !writeAttempted, error: new Error(sweepResult.reason) });
             const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, note: action.note, skipped: true, reason: sweepResult.reason };
             results.push(outcome); onStep?.(outcome); continue;
           }
@@ -476,7 +476,7 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
         } else if (action.request === 'ArenaChallengeRequest' && typeof arenaDailyDriver.run === 'function') {
           const arenaResult = await arenaDailyDriver.run({ client, protocol, action, timeout, allowAction, performWrite });
           if (arenaResult?.skipped) {
-            if (!writeAttempted) await cancelAction?.(action, ticket, { notSent: true });
+            await cancelAction?.(action, ticket, { notSent: !writeAttempted, error: new Error(arenaResult.reason) });
             const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, note: action.note, skipped: true, reason: arenaResult.reason };
             results.push(outcome); onStep?.(outcome); continue;
           }
@@ -491,8 +491,8 @@ export async function runDailies(client, protocol, survey, { allowMutate = false
       } catch (error) {
         const notSent = !writeAttempted || (writeFailure === error && error.notSent === true);
         const rejected = writeFailure === error && error.prompt && error.request === action.request;
-        if (prepared && (notSent || rejected)) {
-          await cancelAction?.(action, ticket, { notSent, error });
+        if (prepared) {
+          await cancelAction?.(action, ticket, { notSent, error: notSent || rejected ? error : { message: error.message } });
         }
         const outcome = { id: entry.task.id, title: entry.task.title, request: action.request, way: action.body?.way, note: action.note, ok: false,
           ...(error.code === 'AUTOMATION_SKIP' ? { skipped: true, reason: error.message } : {}), error: error.message };

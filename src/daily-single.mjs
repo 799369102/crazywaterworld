@@ -76,35 +76,42 @@ export async function runDailySingle(client, protocol, { state, token, paid = fa
     if (state.attempted.has(current.fingerprint)) break;
     if (!enabled()) throw new Error('操作已暂停，已发送动作请刷新核对');
     const ticket = await guard.before({ kind: 'manualDaily', ...action });
-    if (!enabled()) { await guard.cancel(action, ticket, { notSent: true }); throw new Error('操作已暂停'); }
-    quote.used = true;
-    state.attempted.add(current.fingerprint);
-    const before = entry.task.progress;
+    let dispatched = false, writePending = false;
     try {
+      if (!enabled()) throw new Error('操作已暂停');
+      quote.used = true;
+      state.attempted.add(current.fingerprint);
+      const before = entry.task.progress;
+      dispatched = writePending = true;
       if (action.response && protocol[action.response]) await client.request(action.request, action.body, action.response, 15000);
       else await client.sendWatch(action.request, action.body, { window: 400 });
+      writePending = false;
       sent++;
-    } catch (error) {
-      if (error.notSent === true || error.prompt && error.request === action.request) {
-        await guard.cancel(action, ticket, { notSent: error.notSent === true, error });
-        state.attempted.delete(current.fingerprint);
+      let confirmed = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!enabled()) break;
+        await wait(350);
+        survey = await read();
+        entry = survey.tasks.find(row => row.task.id === quote.id);
+        if (survey.daily.dailyResetTime !== quote.reset || !entry) break;
+        confirmed = current.claim ? entry.task.rewardClaimed === true : entry.task.progress > before;
+        if (confirmed) break;
       }
+      if (!confirmed) {
+        const label = quote.title + '：请求已发送，结果待确认，请稍后刷新';
+        await guard.cancel(action, ticket, { error: new Error(label) });
+        return { ok: false, sent, claimed: false, label };
+      }
+      await guard.after(action, ticket, { ok: true });
+      state.attempted.delete(current.fingerprint);
+      if (current.claim) { claimed = true; break; }
+    } catch (error) {
+      const notSent = !dispatched || writePending && error.notSent === true;
+      const rejected = writePending && error.prompt && error.request === action.request;
+      await guard.cancel(action, ticket, { notSent, error: notSent || rejected ? error : { message: error.message } });
+      if (notSent || rejected) state.attempted.delete(current.fingerprint);
       throw error;
     }
-    let confirmed = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (!enabled()) break;
-      await wait(350);
-      survey = await read();
-      entry = survey.tasks.find(row => row.task.id === quote.id);
-      if (survey.daily.dailyResetTime !== quote.reset || !entry) break;
-      confirmed = current.claim ? entry.task.rewardClaimed === true : entry.task.progress > before;
-      if (confirmed) break;
-    }
-    if (!confirmed) return { ok: false, sent, claimed: false, label: quote.title + '：请求已发送，结果待确认，请稍后刷新' };
-    await guard.after(action, ticket, { ok: true });
-    state.attempted.delete(current.fingerprint);
-    if (current.claim) { claimed = true; break; }
   }
   return { ok: claimed, sent, claimed, label: quote.title + (claimed ? '：已完成并领取奖励' : '：已执行当前可做部分，请刷新查看剩余条件') };
 }

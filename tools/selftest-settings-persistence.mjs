@@ -35,7 +35,7 @@ saveAutomationSettings('other', settingsFromNative(tasks), { revision: 0 });
 const otherBefore = loadAutomationSettings('other');
 let app, root, passed = 0;
 const test = async (name, work) => { await work(); passed++; console.log('通过：' + name); };
-async function open() { app = createConsole({ port: 0 }); root = await app.listen(); }
+async function open() { app = createConsole({ port: 0, protocol: {} }); root = await app.listen(); }
 async function close() {
   const jobs = [...app.sessions.values()].map(session => session.loop.job).filter(Boolean);
   app.server.closeAllConnections();

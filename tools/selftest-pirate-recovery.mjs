@@ -154,7 +154,9 @@ export function testPirateRecovery() {
     assert.equal(recoverPirateHunts(new EventEmitter(), player, longLedger, accountId, longLog).length, 1);
     assert.equal(longLedger.keyRecords()[key].details.outcome, 'lost');
   } finally {
-    for (const name of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, name));
-    fs.rmdirSync(dir);
+    const cleanupRoot = fs.realpathSync(dir);
+    assert.equal(path.dirname(cleanupRoot), fs.realpathSync(os.tmpdir()));
+    assert.match(path.basename(cleanupRoot), /^cw-hunt-recover-[^\\/]+$/);
+    fs.rmSync(cleanupRoot, { recursive: true, force: true });
   }
 }

@@ -196,6 +196,7 @@ export function accountPage() {
       <Button id="cap-start" variant="default">从电脑微信添加</Button>
       <Button id="cap-douyin" variant="outline">从电脑抖音添加</Button>
       <Button id="cap-stop" variant="destructive">停止抓包</Button>
+      <Button id="cap-recover" variant="outline" hidden>恢复上次采集残留</Button>
       <span id="cap-hint" className="warn"></span>
     </div>
     <div id="cap-box"></div>

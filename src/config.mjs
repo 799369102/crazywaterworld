@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { wechatConfigCandidates } from './platform/client-paths.mjs';
 import { activeResources } from './resource-store.mjs';
 
 // 客户端的配置表不在游戏包里，而是运行时从 CDN 拉取的独立 bundle `config_cn`，
@@ -12,27 +12,13 @@ export const CONFIG_PACK_PATH = path.resolve(import.meta.dirname, '../work/cdn/c
 // 资源是服务端数字枚举，数字到字符串 id 的映射只存在于客户端的生成代码里。
 export const RESOURCE = { 1: 'EXP', 3: 'GOLD', 4: 'RUBY', 5: 'ARENA_POINT', 6: 'LEAGUE_POINT', 7: 'SNOWBALL_STAMINA' };
 
-function cachedPackCandidates() {
-  const users = path.join(os.homedir(), 'AppData', 'Roaming', 'Tencent', 'xwechat', 'radium', 'users');
-  if (!fs.existsSync(users)) return [];
-  const found = [];
-  for (const user of fs.readdirSync(users)) {
-    const dir = path.join(users, user, 'applet', 'local', APPID, 'usr', 'gamecaches', 'config_cn');
-    if (!fs.existsSync(dir)) continue;
-    for (const file of fs.readdirSync(dir)) {
-      if (file.endsWith('.json')) found.push(path.join(dir, file));
-    }
-  }
-  return found;
-}
-
 // 小文件是 bundle 描述；资源包更新后可能同样大甚至更小，不能用大小判断版本。
 // 同步副本仅作可离线保留的来源，不能永久遮蔽游戏刚下载的新缓存。
 export function findConfigPack() {
   if (process.env.CW_CONFIG_PACK && fs.existsSync(process.env.CW_CONFIG_PACK)) return process.env.CW_CONFIG_PACK;
   const resources = activeResources();
   if (resources) return resources.configFile;
-  const candidates = cachedPackCandidates().filter((file) => fs.statSync(file).size > 1_000_000);
+  const candidates = wechatConfigCandidates(APPID).filter((file) => fs.statSync(file).size > 1_000_000);
   if (fs.existsSync(CONFIG_PACK_PATH)) candidates.unshift(CONFIG_PACK_PATH);
   if (!candidates.length) return null;
   return candidates.map(file => ({ file, modified: fs.statSync(file).mtimeMs }))

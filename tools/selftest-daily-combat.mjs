@@ -156,9 +156,10 @@ for (const mode of ['stale', 'unknown']) {
   if (mode === 'stale') f.task.progress = f.task.targetProgress;
   else f.challenge = async () => { throw new Error('请求已发送，但回包未知'); };
   const results = await runDailies(f, protocol, survey, { allowMutate: true, claimRewards: false, config,
-    beforeAction: () => ticket, cancelAction: (step, reserved) => cancelled.push([step, reserved]),
+    beforeAction: () => ticket, cancelAction: (step, reserved, outcome) => cancelled.push([step, reserved, outcome]),
   });
-  assert.equal(cancelled.length, mode === 'stale' ? 1 : 0, '明确跳过释放预算，已发送未知结果保留预算');
+  assert.equal(cancelled.length, 1, '所有预留后的退出都结束日志生命周期');
+  assert.equal(cancelled[0][2].notSent, mode === 'stale', '明确跳过释放预算，已发送未知结果保留预算');
   assert.equal(f.writes.length, mode === 'unknown' ? 1 : 0);
   assert(!results.some(row => row.ok));
 }

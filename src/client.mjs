@@ -205,6 +205,7 @@ export class GameClient extends EventEmitter {
     const frame = this.codec.encode(name, seq, body || {});
     this.emit('frame', { dir: 'out', name, seq, bytes: frame, body });
     this.socket.send(frame);
+    try { this.emit('sent', { dir: 'out', name, seq }); } catch { /* 诊断观察者不能改变已发送请求的结果。 */ }
     return seq;
   }
 
@@ -213,6 +214,7 @@ export class GameClient extends EventEmitter {
     const frame = this.codec.encode(name, 0, body || {});
     this.emit('frame', { dir: 'out', name, seq: 0, bytes: frame, body });
     this.socket.send(frame);
+    try { this.emit('sent', { dir: 'out', name, seq: 0 }); } catch { /* 诊断观察者不能中断连接。 */ }
     return true;
   }
 

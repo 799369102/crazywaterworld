@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { extractTables } from './config.mjs';
+import { validateGameplayConfig } from './config-contracts.mjs';
 import { decodeUuid } from '../tools/sync-art.mjs';
 import { activeResources, resourceDirectory, resourceUpdatePolicy, RESOURCE_SERVER } from './resource-store.mjs';
 
@@ -24,6 +25,7 @@ function importUrl(bundle, index, id) {
 
 function validateConfig(tables) {
   if (Object.keys(tables).length < 100) throw new Error('远程配置包不完整：少于 100 张表');
+  validateGameplayConfig(tables);
   for (const key of ['ResourceCfg', 'ItemCfg', 'ModuleOpenCfg', 'WorldParamCfg', 'WorldScenarioCfg']) {
     if (!rows(tables, key).length) throw new Error('远程配置缺少 ' + key);
   }

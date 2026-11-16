@@ -102,6 +102,12 @@ function removeMaterialSpend(handle) {
   return true;
 }
 
+function settleMaterialSpend(handle) {
+  if (!removeMaterialSpend(handle)) return false;
+  try { handle.onReconciled?.(); } catch { /* Observers cannot interrupt settlement. */ }
+  return true;
+}
+
 // Only a definite rejection may release an unobserved debit. Success, timeout
 // and disconnect retain it until inventory or farm-state reconciliation.
 export function cancelOrderMaterialSpend(handle) {
@@ -143,7 +149,7 @@ export function settleOrderMaterialState(player, snapshot, stock) {
     if (typeof id !== 'string' || !id) throw new Error('库存道具编号异常');
     amount(count, '消费后库存');
   }
-  for (const handle of snapshot.handles) removeMaterialSpend(handle);
+  for (const handle of snapshot.handles) settleMaterialSpend(handle);
   return true;
 }
 
@@ -194,14 +200,14 @@ export function retireManualProductionMaterialState(player, snapshot) {
 // a complete inventory read. A stock decrease alone does not prove dispatch.
 export function settleMuseumMaterialSpend(player, handle) {
   if (!handle?.museum || handle.account !== accountKey(player)) return false;
-  return removeMaterialSpend(handle);
+  return settleMaterialSpend(handle);
 }
 
 // The caller must confirm the target plots, then read a complete inventory.
 // A matching balance alone cannot prove which unknown planting took effect.
 export function settleFarmMaterialSpend(player, handle) {
   if (!handle?.farm || handle.account !== accountKey(player)) return false;
-  return removeMaterialSpend(handle);
+  return settleMaterialSpend(handle);
 }
 
 export function confirmOrderMaterialSpends(player, stock, itemIds = null) {

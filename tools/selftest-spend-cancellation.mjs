@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-spend-cancellation-'));
 const priorData = process.env.CW_DATA_DIR;
@@ -29,11 +30,11 @@ function fixture(mode, route) {
   settings.museum.enabled = settings.museum.useGuide = true;
   settings.museum.dailyGuideLimit = 10;
   settings.factory.cooperateNative = true;
-  const state = { attempts: [], writes: [], readFailures: [], cancelled: [], afterCalls: 0,
+  const state = { attempts: [], writes: [], readFailures: [], cancelled: [], afterCalls: 0, operations: [],
     ship: { index: 1, status: route === 'cargo-watch' ? 1 : 0, arriveTime: now + 3600,
       orderItem: [{ filled: false, asset: asset('fish', 10) }] } };
   const reads = new Set(['AllItemRequest', 'AllResourceRequest', 'AllPetRequest', 'AllHeroRequest', 'OnWaterRequest', 'MuseumInfoRequest', 'CargoShipsRequest', 'WeekInfoRequest']);
-  const client = { connected: true,
+  const client = Object.assign(new EventEmitter(), { connected: true,
     async request(name, body = {}) {
       assert(protocol[name], '真实协议中存在 ' + name);
       protocol[name].encode(body).finish();
@@ -54,6 +55,7 @@ function fixture(mode, route) {
       }
       state.attempts.push(name);
       if (mode === 'write-unsent') throw notSent(name);
+      client.emit('sent', { dir: 'out', name, seq: state.attempts.length });
       if (mode === 'write-rejected') throw Object.assign(new Error('测试：明确拒绝'), { prompt: {}, request: name });
       if (mode === 'write-other-prompt') throw Object.assign(new Error('测试：其他请求拒绝'), { prompt: {}, request: 'AllItemRequest' });
       state.writes.push(name);
@@ -63,7 +65,8 @@ function fixture(mode, route) {
       return { reward: { asset: [asset('EXP', 1)] }, expedition: { endTime: now + 600 } };
     },
     async sendWatch(name, body) { return this.request(name, body); },
-  };
+  });
+  client.on('diagnostic', event => { if (event.event === 'operation') state.operations.push(event); });
   const ledger = createUsageLedger('offline', { file: path.join(directory, player.playerId + '.json') });
   const guard = createActionGuard(client, () => settings, ledger, { player });
   const callbacks = {
@@ -103,7 +106,7 @@ function fixture(mode, route) {
     return serviceCargo(client, config, { enabled: () => true, getSettings: () => settings, ledger,
       testSpeedUp: route === 'cargo-watch', log() {}, ...callbacks });
   };
-  return { player, state, ledger, run };
+  return { player, state, ledger, client, run };
 }
 
 try {
@@ -118,6 +121,8 @@ try {
         '仅明确未发送或该写请求被拒才释放预留');
       if (mode === 'write-unsent') assert.equal(f.state.writes.length, 0);
       if (route === 'base-response') assert.equal(f.ledger.snapshot().counters.museumGuides ?? 0, released ? 0 : 1);
+      assert.equal(f.state.operations.at(-1)?.phase, released ? 'cancelled' : 'unknown');
+      assert.equal(f.client.listenerCount('sent'), 0, '异常处理后移除操作日志监听器');
     });
   }
   for (const route of ['world-native', 'base-response', 'base-watch', 'cargo-response', 'cargo-watch']) {
@@ -127,7 +132,12 @@ try {
       assert.equal(f.state.writes.length, 1);
       assert(f.state.readFailures.length > 0, '必须触发写完成后的回读失败');
       assert.equal(pendingOrderMaterialSpends(f.player).length, 1);
-      assert.equal(f.state.cancelled.length, 0);
+      if (!route.startsWith('base-')) {
+        assert.equal(f.state.cancelled.length, 1);
+        assert.equal(f.state.cancelled[0].notSent, false);
+      }
+      assert(['unknown', 'confirmed'].includes(f.state.operations.at(-1)?.phase));
+      assert.equal(f.client.listenerCount('sent'), 0);
     });
   }
   for (const route of ['world-response', 'world-watch', 'hero-response', 'hero-watch', 'cargo-response', 'cargo-watch']) {
@@ -136,8 +146,11 @@ try {
       await f.run().catch(error => assert.match(error.message, /测试：/));
       assert.equal(f.state.writes.length, 1);
       assert.equal(f.state.afterCalls, 1);
-      assert.equal(f.state.cancelled.length, 0);
+      assert.equal(f.state.cancelled.length, 1);
+      assert.equal(f.state.cancelled[0].notSent, false);
       assert.equal(pendingOrderMaterialSpends(f.player).length, 1);
+      assert.equal(f.state.operations.at(-1)?.phase, 'unknown');
+      assert.equal(f.client.listenerCount('sent'), 0);
     });
   }
   console.log('消费取消边界专项 ' + passed + '/' + passed + ' 通过');

@@ -24,7 +24,7 @@ export async function serviceCargo(client, config, { enabled, log, testSpeedUp =
       return outcome;
     } catch (error) {
       const notSent = !dispatched || (writePending && error.notSent === true);
-      if (prepared && (notSent || error.prompt && error.request === action.request)) {
+      if (prepared) {
         await cancelAction?.(action, ticket, { notSent, error });
       }
       throw error;

@@ -232,6 +232,9 @@ try {
   for (const file of ['mitm-ca.mjs', 'import-user-root.cs']) {
     fs.copyFileSync(new URL('./' + file, import.meta.url), path.join(testTools, file));
   }
+  const testPlatform = path.join(tempDir, 'repo', 'src', 'platform');
+  fs.mkdirSync(testPlatform, { recursive: true });
+  fs.copyFileSync(new URL('../src/platform/certificates.mjs', import.meta.url), path.join(testPlatform, 'certificates.mjs'));
   const caModule = pathToFileURL(path.join(testTools, 'mitm-ca.mjs')).href;
   if (process.platform === 'win32') {
     const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');

@@ -1,16 +1,16 @@
 import { automationControlFields, automationControls, idleControlFields } from './automation-controls.mjs';
-import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
+import { atomicJson, readJson, withFileLock } from './json-store.mjs';
+import { accountKey, dataDirectory } from './usage-ledger.mjs';
+export { beijingDay, createUsageLedger, usageFile } from './usage-ledger.mjs';
 import { taskSettings } from './automation.mjs';
 import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, validateSiliconFleets } from './extended-settings.mjs';
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
 
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
-const dataDirectory = () => process.env.CW_DATA_DIR ? path.resolve(process.env.CW_DATA_DIR) : path.resolve(import.meta.dirname, '../data');
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
-export const usageFile = () => path.join(dataDirectory(), 'automation-usage.json');
 export const SETTINGS_FORMAT = 'crazywaterworld-automation';
+export const SETTINGS_SCHEMA_VERSION = 1;
 const LEGACY_SETTINGS_FORMAT = 'crazywaterword-automation';
 export const DEMAND_SOURCES = [
   ['cargo', '贸易港口 / 货船'], ['guildRecruit', '联盟募兵'], ['museum', '博物馆探宝'],
@@ -210,6 +210,7 @@ export function settingsUiRules() {
 }
 
 export function validateSettings(input, { partial = false, catalog = null } = {}) {
+  if (partial) input = migrateSettingsVersion(input, SETTINGS_SCHEMA_VERSION, { source: 'stored' });
   const errors = Object.create(null);
   const output = defaultSettings();
   if (!plain(input)) throw new SettingsError({ settings: '配置必须是 JSON 对象' });
@@ -255,7 +256,6 @@ export function validateSettings(input, { partial = false, catalog = null } = {}
       }
     }
   }
-  if (!Object.hasOwn(input, 'progression')) output.progression.mainline = input.schedule?.stageAuto === true;
   if (output.progression.trials && !output.progression.raidIds.length) errors['progression.raidIds'] = '请选择自动推关的试炼副本';
   if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请选择自动讨伐海盗的舰队';
   if(output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
@@ -350,27 +350,10 @@ export function settingsCatalog(config) {
   };
 }
 
-function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (error) { if (error.code === 'ENOENT') return fallback; throw new Error(`无法读取${path.basename(file)}，为保护已保存设置与额度，已停止本次操作`); }
-}
-
-function atomicJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 }); fs.renameSync(temporary, file); }
-  finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
-}
-
-function accountKey(accountId) {
-  if (typeof accountId !== 'string' || !accountId || accountId.length > 200 || ['__proto__', 'prototype', 'constructor'].includes(accountId)) throw new Error('账号标识不合法');
-  return accountId;
-}
-
 export function loadAutomationSettings(accountId, { file = settingsFile() } = {}) {
   const key = accountKey(accountId);
-  const store = readJson(file, { version: 1, accounts: {} });
-  if (store.version !== 1 || !plain(store.accounts)) throw new Error('设置文件格式不支持，未覆盖原文件');
+  const store = readJson(file, { version: SETTINGS_SCHEMA_VERSION, accounts: {} });
+  if (store.version !== SETTINGS_SCHEMA_VERSION || !plain(store.accounts)) throw new Error('设置文件格式不支持，未覆盖原文件');
   const entry = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
   return { settings: entry ? validateSettings(entry.settings, { partial: true }) : defaultSettings(), revision: entry?.revision ?? 0, savedAt: entry?.savedAt ?? null };
 }
@@ -378,171 +361,64 @@ export function loadAutomationSettings(accountId, { file = settingsFile() } = {}
 export function saveAutomationSettings(accountId, input, { revision, file = settingsFile(), catalog = null } = {}) {
   const settings = validateSettings(input, { catalog });
   const key = accountKey(accountId);
-  const store = readJson(file, { version: 1, accounts: {} });
-  if (store.version !== 1 || !plain(store.accounts)) throw new Error('设置文件格式不支持，未覆盖原文件');
-  const current = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
-  if (!Number.isSafeInteger(revision) || revision !== (current?.revision ?? 0)) throw new SettingsError({ revision: '设置已在其他页面更新，请重新载入后再保存' });
-  const entry = { revision: revision + 1, savedAt: new Date().toISOString(), settings };
-  Object.defineProperty(store.accounts, key, { value: entry, enumerable: true, configurable: true, writable: true });
-  atomicJson(file, store);
-  return copy(entry);
+  return withFileLock(file, () => {
+    const store = readJson(file, { version: SETTINGS_SCHEMA_VERSION, accounts: {} });
+    if (store.version !== SETTINGS_SCHEMA_VERSION || !plain(store.accounts)) throw new Error('设置文件格式不支持，未覆盖原文件');
+    const current = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
+    if (!Number.isSafeInteger(revision) || revision !== (current?.revision ?? 0)) throw new SettingsError({ revision: '设置已在其他页面更新，请重新载入后再保存' });
+    const entry = { revision: revision + 1, savedAt: new Date().toISOString(), settings };
+    Object.defineProperty(store.accounts, key, { value: entry, enumerable: true, configurable: true, writable: true });
+    atomicJson(file, store);
+    return copy(entry);
+  });
 }
 
-export function exportAutomationSettings(settings) { return { format: SETTINGS_FORMAT, version: 1, settings: validateSettings(settings) }; }
+export function exportAutomationSettings(settings) { return { format: SETTINGS_FORMAT, version: SETTINGS_SCHEMA_VERSION, settings: validateSettings(settings) }; }
 export function importAutomationSettings(document, options) {
-  if (!plain(document) || ![SETTINGS_FORMAT, LEGACY_SETTINGS_FORMAT].includes(document.format) || document.version !== 1 || Object.keys(document).some(k => !['format', 'version', 'settings'].includes(k))) throw new SettingsError({ import: '请选择本工具导出的配置文件（版本 1），文件不能包含账号或凭据' });
-  // 原版本1导出没有巨轮分组，只补新增默认值；既有分组仍严格校验。
-  const input = plain(document.settings) ? { ...document.settings } : document.settings;
-  if (plain(input) && !Object.hasOwn(input, 'progression')) input.progression = { ...DEFAULT_SETTINGS.progression, mainline: input.schedule?.stageAuto === true };
-  if (plain(input?.pirateHunt)) input.pirateHunt = { ...DEFAULT_SETTINGS.pirateHunt, ...input.pirateHunt };
-  if (plain(input)) for (const group of ['login', 'treasure', 'cityWar', 'forge', 'antique', 'trials', 'pirateHunt', 'radar','worldBoss','pirateSweep','eventActions','merchant','ads']) if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
-  if (plain(input?.login)) input.login = { ...DEFAULT_SETTINGS.login, ...input.login };
-  if (plain(input?.merchant)) input.merchant = { ...DEFAULT_SETTINGS.merchant, ...input.merchant };
-  if (plain(input)) for (const group of Object.keys(EXTENDED_DEFAULTS)) {
-    if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
-    else if (plain(input[group])) input[group] = { ...copy(DEFAULT_SETTINGS[group]), ...input[group] };
-  }
-  if (plain(input?.antique)) input.antique = { ...DEFAULT_SETTINGS.antique, ...input.antique };
-  if (plain(input?.treasure)) {
-    input.treasure = { ...input.treasure };
-    for (const key of ['onlyTenThousand', 'avoidPlayerIds', 'participationMode', 'repeatAttack', 'autoRepair', 'maxRepairCost', 'dailyRepairPetrolLimit', 'personalProgressLimit',
-      'fallbackEnabled', 'fallbackAfter', 'fallbackTargetRewards', 'fallbackQualities', 'fallbackMediumRewardPriority', 'fallbackSmallRewardPriority']) {
-      if (!Object.hasOwn(input.treasure, key)) input.treasure[key] = copy(DEFAULT_SETTINGS.treasure[key]);
-    }
-  }
-  if (plain(input?.cityWar) && !Object.hasOwn(input.cityWar, 'targetPriority')) input.cityWar = { ...input.cityWar, targetPriority: DEFAULT_SETTINGS.cityWar.targetPriority };
-  if (plain(input?.cityWar) && !Object.hasOwn(input.cityWar, 'nativeCommissionLimit')) input.cityWar = { ...input.cityWar, nativeCommissionLimit: DEFAULT_SETTINGS.cityWar.nativeCommissionLimit };
-  if (plain(input?.cityWar) && !Object.hasOwn(input.cityWar, 'defenceFleetIds')) input.cityWar = { ...input.cityWar, defenceFleetIds: [] };
-  if (plain(input?.schedule) && !Object.hasOwn(input.schedule, 'worldOnlineRewards')) input.schedule = { ...input.schedule, worldOnlineRewards: false };
-  if (plain(input?.schedule)) input.schedule = { ...taskSettings(), ...input.schedule };
-  if (plain(input?.events)) input.events = {otherOption:1,...input.events};
-  if (plain(input?.pet)) input.pet={release:false,releaseQualities:[],...input.pet};
-  if (plain(input?.forge)) input.forge={decompose:false,decomposeQualities:[],...input.forge};
-  if (plain(input?.gather)) input.gather = { enabled:true, fishBook:false, antiqueFloaters: false, ...input.gather };
-  for (const group of ['museum','radar']) if (plain(input?.[group])) input[group] = { runEnabled:true, ...input[group] };
-  if (plain(input?.factory) && !Object.hasOwn(input.factory, 'checkEverySeconds')) input.factory = { ...input.factory, checkEverySeconds: DEFAULT_SETTINGS.factory.checkEverySeconds };
-  return validateSettings(input, options);
+  if (!plain(document) || ![SETTINGS_FORMAT, LEGACY_SETTINGS_FORMAT].includes(document.format) || document.version !== SETTINGS_SCHEMA_VERSION || Object.keys(document).some(k => !['format', 'version', 'settings'].includes(k))) throw new SettingsError({ import: '请选择本工具导出的配置文件（版本 1），文件不能包含账号或凭据' });
+  return validateSettings(migrateSettingsVersion(document.settings, document.version), options);
 }
 
-export function beijingDay(now = Date.now()) { return new Date(now + 8 * 3600_000).toISOString().slice(0, 10); }
+// Version 1 grew by adding fields. Import permits only the historical additions
+// listed here; stored partial settings retain their original default-fill rules.
+export function migrateSettingsVersion(settings, version, { source = 'import' } = {}) {
+  if (version !== SETTINGS_SCHEMA_VERSION) throw new SettingsError({ version: '设置文件版本不支持' });
+  if (!['import', 'stored'].includes(source)) throw new TypeError('未知设置迁移来源');
+  if (!plain(settings)) return settings;
+  const input = { ...settings };
+  if (!Object.hasOwn(input, 'progression')) {
+    input.progression = { ...DEFAULT_SETTINGS.progression, mainline: input.schedule?.stageAuto === true };
+  }
+  if (source === 'stored') return input;
 
-// 用量在发送前占用；未收到确定结果时保留额度，避免网络超时或重启造成重复消费。
-export function createUsageLedger(accountId, { file = usageFile(), now = Date.now } = {}) {
-  const key = accountKey(accountId);
-  const read = () => {
-    const store = readJson(file, { version: 1, accounts: {} });
-    if (store.version !== 1 || !plain(store.accounts)) throw new Error('额度账本格式异常，已停止消费动作');
-    const day = beijingDay(now());
-    let entry = Object.hasOwn(store.accounts, key) ? store.accounts[key] : null;
-    if (entry && (!plain(entry.counters) || !plain(entry.pending) || !plain(entry.confirmed))) throw new Error('额度账本损坏，已停止消费动作');
-    if (entry?.keys != null && !plain(entry.keys)) throw new Error('派遣记录损坏，已停止消费动作');
-    if (!entry || entry.day !== day) {
-      // 每日统计换日，未决派遣不换日；保留汽油占用与待确认状态，且不计入新一天的出征次数。
-      const pending = {};
-      for (const [id, reservation] of Object.entries(entry?.pending ?? {})) {
-        if (reservation.uniqueKey) pending[id] = { ...reservation, day: reservation.day ?? entry.day };
-      }
-      entry = { day, counters: {}, pending, confirmed: {}, keys: entry?.keys ?? {} };
+  const addedGroups = ['login', 'treasure', 'cityWar', 'forge', 'antique', 'trials', 'pirateHunt',
+    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'merchant', 'ads', ...Object.keys(EXTENDED_DEFAULTS)];
+  for (const group of addedGroups) {
+    if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
+  }
+  for (const group of ['login', 'merchant', 'antique', 'pirateHunt', ...Object.keys(EXTENDED_DEFAULTS)]) {
+    if (plain(input[group])) input[group] = { ...copy(DEFAULT_SETTINGS[group]), ...input[group] };
+  }
+  const addedFields = {
+    treasure: ['onlyTenThousand', 'avoidPlayerIds', 'participationMode', 'repeatAttack', 'autoRepair',
+      'maxRepairCost', 'dailyRepairPetrolLimit', 'personalProgressLimit', 'fallbackEnabled', 'fallbackAfter',
+      'fallbackTargetRewards', 'fallbackQualities', 'fallbackMediumRewardPriority', 'fallbackSmallRewardPriority'],
+    cityWar: ['targetPriority', 'nativeCommissionLimit', 'defenceFleetIds'],
+    events: ['otherOption'],
+    pet: ['release', 'releaseQualities'],
+    forge: ['decompose', 'decomposeQualities'],
+    gather: ['enabled', 'fishBook', 'antiqueFloaters'],
+    museum: ['runEnabled'],
+    radar: ['runEnabled'],
+    factory: ['checkEverySeconds'],
+  };
+  for (const [group, fields] of Object.entries(addedFields)) {
+    if (!plain(input[group])) continue;
+    input[group] = { ...input[group] };
+    for (const field of fields) {
+      if (!Object.hasOwn(input[group], field)) input[group][field] = copy(DEFAULT_SETTINGS[group][field]);
     }
-    if (!plain(entry.counters) || !plain(entry.pending) || !plain(entry.confirmed) || (entry.keys != null && !plain(entry.keys))) throw new Error('额度账本损坏，已停止消费动作');
-    entry.keys ??= {};
-    Object.defineProperty(store.accounts, key, { value: entry, enumerable: true, writable: true, configurable: true });
-    return { store, entry };
-  };
-  return {
-    snapshot() { const { entry } = read(); return { day: entry.day, counters: { ...entry.counters }, uncertain: Object.keys(entry.pending).length }; },
-    confirmedCounters() { return { ...read().entry.confirmed }; },
-    hasKey(uniqueKey) { return Object.hasOwn(read().entry.keys, uniqueKey); },
-    keyRecords() { return copy(read().entry.keys); },
-    reservationTime(uniqueKey) {
-      const { entry } = read();
-      return entry.pending[entry.keys[uniqueKey]?.id]?.at ?? null;
-    },
-    pendingCounters() {
-      const totals = {};
-      for (const reservation of Object.values(read().entry.pending)) for (const [name, amount] of Object.entries(reservation.counters)) totals[name] = (totals[name] ?? 0) + amount;
-      return totals;
-    },
-    resolveKey(uniqueKey, confirmed, details) {
-      const { store, entry } = read();
-      if (!Object.hasOwn(entry.keys, uniqueKey)) return;
-      const record = entry.keys[uniqueKey];
-      if (details !== undefined) {
-        if (!plain(details)) throw new Error('任务记录内容不合法');
-        record.details = copy(details);
-      }
-      if (confirmed) {
-        const pending = entry.pending[record.id];
-        if (pending) {
-          if ((pending.day ?? entry.day) === entry.day) for (const [name, amount] of Object.entries(pending.counters)) entry.confirmed[name] = Number(entry.confirmed[name] ?? 0) + amount;
-          delete entry.pending[record.id];
-        }
-        record.confirmed = true;
-      } else record.expired = true;
-      atomicJson(file, store);
-    },
-    reserve(counters, limits = {}, minimums = {}, { uniqueKey = null, details = null } = {}) {
-      const { store, entry } = read();
-      if (uniqueKey !== null) {
-        if (typeof uniqueKey !== 'string' || !/^[A-Za-z0-9:_-]{1,160}$/.test(uniqueKey) || ['__proto__', 'constructor', 'prototype'].includes(uniqueKey)) throw new Error('派遣记录标识不合法');
-        if (Object.hasOwn(entry.keys, uniqueKey)) throw new Error('该目标已有派遣记录，已阻止重复发送');
-      }
-      if (details !== null && (!uniqueKey || !plain(details))) throw new Error('任务记录内容不合法');
-      for (const [name, amount] of Object.entries(counters)) {
-        if (!/^[A-Za-z][A-Za-z0-9_]{0,50}$/.test(name) || ['constructor', 'prototype', '__proto__'].includes(name) || !Number.isSafeInteger(amount) || amount < 0) throw new Error('消费计数不合法');
-        const used = Math.max(Number(entry.counters[name] ?? 0), Number(minimums[name] ?? 0));
-        if (!Number.isSafeInteger(used) || used < 0) throw new Error('历史消费计数不合法，已停止消费动作');
-        if (limits[name] != null && used + amount > limits[name]) throw new Error(`达到今日上限：${({ diamonds: '钻石', residentOrders: '居民订单', cargoLoads: '贸易港装货', museumGuides: '探险指南', goldPaidTimes: '付费点金次数', treasureDispatches: '巨轮出征次数' })[name] ?? name}`);
-      }
-      const id = crypto.randomUUID();
-      for (const [name, amount] of Object.entries(counters)) entry.counters[name] = Math.max(Number(entry.counters[name] ?? 0), Number(minimums[name] ?? 0)) + amount;
-      entry.pending[id] = { at: now(), day: entry.day, counters: copy(counters), ...(uniqueKey ? { uniqueKey } : {}) };
-      if (uniqueKey) entry.keys[uniqueKey] = { id, confirmed: false, ...(details ? { details: copy(details) } : {}) };
-      atomicJson(file, store);
-      return { id, day: entry.day };
-    },
-    updateKeyDetails(uniqueKey, details) {
-      if (!plain(details)) throw new Error('任务记录内容不合法');
-      const { store, entry } = read();
-      if (!Object.hasOwn(entry.keys, uniqueKey)) throw new Error('任务记录已不存在');
-      entry.keys[uniqueKey].details = copy(details);
-      atomicJson(file, store);
-    },
-    releaseCompletedKey(uniqueKey) {
-      const { store, entry } = read();
-      const record = Object.hasOwn(entry.keys, uniqueKey) ? entry.keys[uniqueKey] : null;
-      if (!record) return;
-      if (!record.confirmed || Object.hasOwn(entry.pending, record.id)) throw new Error('待确认任务不可释放');
-      delete entry.keys[uniqueKey];
-      atomicJson(file, store);
-    },
-    confirm(ticket) {
-      if (!ticket) return;
-      const { store, entry } = read();
-      if (!Object.hasOwn(entry.pending, ticket.id)) {
-        const record = Object.values(entry.keys).find(value => value.id === ticket.id);
-        if (record) { record.confirmed = true; atomicJson(file, store); }
-        return;
-      }
-      if ((entry.pending[ticket.id].day ?? ticket.day) === entry.day) for (const [name, amount] of Object.entries(entry.pending[ticket.id].counters)) entry.confirmed[name] = Number(entry.confirmed[name] ?? 0) + amount;
-      const uniqueKey = entry.pending[ticket.id].uniqueKey;
-      if (uniqueKey && entry.keys[uniqueKey]?.id === ticket.id) entry.keys[uniqueKey].confirmed = true;
-      delete entry.pending[ticket.id];
-      atomicJson(file, store);
-    },
-    cancel(ticket) {
-      if (!ticket) return;
-      const { store, entry } = read();
-      if (!Object.hasOwn(entry.pending, ticket.id)) {
-        const uniqueKey = Object.keys(entry.keys).find(value => entry.keys[value].id === ticket.id);
-        if (uniqueKey) { delete entry.keys[uniqueKey]; atomicJson(file, store); }
-        return;
-      }
-      if ((entry.pending[ticket.id].day ?? ticket.day) === entry.day) for (const [name, amount] of Object.entries(entry.pending[ticket.id].counters)) entry.counters[name] = Math.max(0, Number(entry.counters[name] ?? 0) - amount);
-      const uniqueKey = entry.pending[ticket.id].uniqueKey;
-      if (uniqueKey && entry.keys[uniqueKey]?.id === ticket.id) delete entry.keys[uniqueKey];
-      delete entry.pending[ticket.id];
-      atomicJson(file, store);
-    },
-  };
+  }
+  if (plain(input.schedule)) input.schedule = { ...taskSettings(), worldOnlineRewards: false, ...input.schedule };
+  return input;
 }

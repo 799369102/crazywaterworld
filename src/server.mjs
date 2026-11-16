@@ -1,4 +1,4 @@
-import { createTraceLog, traceJson } from './trace-log.mjs';
+import { createTraceLog, traceJson, redactLog } from './trace-log.mjs';
 import { createResourceUpdater } from './resource-updater.mjs';
 import {checkFleetSettlement,invalidateFleetReports} from './fleet-settlement.mjs';
 import { recoverPirateHunts } from './pirate-recovery.mjs';
@@ -34,7 +34,6 @@ import http from 'node:http';
 import { setTimeout as recoveryWait } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 import { GameClient, toNumber } from './client.mjs';
@@ -84,7 +83,7 @@ import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
 import { loadStore, saveStore, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, DATA_DIR } from './accounts.mjs';
-import { startCapture, stopCapture, captureState, DEFAULT_PROXY_PORT } from './capture.mjs';
+import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
 import { createPhoneLogin } from './phone-login.mjs';
 import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
 
@@ -122,10 +121,11 @@ const pageAsset = {
   etag: '"' + createHash('sha1').update(pageRaw).digest('hex').slice(0, 16) + '"',
 };
 
-export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null } = {}) {
+export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride,
+  captureController = { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture } } = {}) {
   // 保留测试/嵌入调用方注入延迟的能力；正常运行时由当前账号的登录设置决定。
   const injectedRecoveryDelay = typeof recoveryDelayMs === 'function' ? recoveryDelayMs : null;
-  const protocol = loadProtocol();
+  const protocol = protocolOverride ?? loadProtocol();
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const globalLog = [];
   const streams = new Set();
@@ -174,9 +174,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function emit(session, level, message, extra) {
     const display = describeLogError(message, extra);
-    const detail = [extra?.diagnostic, display.detail].filter(Boolean).join('\n');
-    const entry = { id: ++logId, t: Date.now(), level, category: classifyLog(display.message, extra), message: display.message, detail: detail || undefined, extra, account: session?.id ?? null };
-    trace(session, 'business', { level, category: entry.category, message, detail, extra });
+    const operationDetail = extra?.operationId ? [
+      '操作 ' + extra.operationId,
+      extra.dedupeKey ? '防重键 ' + extra.dedupeKey : '',
+      '阶段 ' + extra.phase + ' / ' + extra.result,
+    ].filter(Boolean).join('\n') : '';
+    const detail = [extra?.diagnostic, display.detail, operationDetail].filter(Boolean).join('\n');
+    const entry = redactLog({ id: ++logId, t: Date.now(), level, category: classifyLog(display.message, extra), message: display.message, detail: detail || undefined, extra, account: session?.id ?? null,
+      operationId: extra?.operationId, dedupeKey: extra?.dedupeKey, module: extra?.module, phase: extra?.phase, result: extra?.result });
+    trace(session, 'business', entry);
     const list = session ? session.log : globalLog;
     list.push(entry);
     logLimit(list);
@@ -472,7 +478,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         trace(session, `[${name}] seq=${seq} ${FULL_TRACE_MESSAGE.test(name) || data.length <= 400 ? data : data.slice(0, 400) + ' [正文已截断]'}`);
       } catch { /* 记录失败不影响回包处理。 */ }
     });
-    instance.on('diagnostic', data => trace(session, 'diagnostic', data));
+    instance.on('diagnostic', data => {
+      if (data.event === 'operation' || data.event === 'ad-path') {
+        const phases = { reserved: '已预留', sent: '已发送，等待确认', confirmed: '已确认', unknown: '结果待确认', cancelled: '已释放预留' };
+        const message = data.message ?? `${data.label || data.request} · ${phases[data.phase] ?? data.phase}`;
+        emit(session, data.phase === 'unknown' ? 'warn' : 'info', message, data);
+      } else trace(session, 'diagnostic', data);
+    });
     instance.on('pong', ({ latencyMs, offsetMs }) => trace(session, `pong ${latencyMs}ms offset=${offsetMs}ms`));
     instance.on('drop', ({ name, reason }) => emit(session, reason === 'duplicate' ? 'info' : 'warn',
       reason === 'duplicate' ? '已忽略服务器重复发送的消息' : '服务器消息序号不连续，已跳过这条消息',
@@ -1715,7 +1727,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
       // ---- 从电脑微信采集登录 ----
       if (route === 'GET /api/capture') {
-        json({ ...captureState(), qr: qrInfo() });
+        json({ ...captureController.captureState(), qr: qrInfo() });
         return;
       }
       if (route === 'GET /api/capture/qrcode') {
@@ -1731,23 +1743,30 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/capture/start') {
         const payload = jsonBody();
         needConfirm(payload);
-        if (captureState().running) throw new Error('已经在抓包了');
+        if (captureController.captureState().running) throw new Error('已经在抓包了');
         const platform = payload.platform ?? 'wechat';
         if (!['wechat', 'douyin'].includes(platform)) throw new Error('未知的采集渠道');
         emit(null, 'info', `开始抓包：本地 CA 与系统代理（127.0.0.1:${DEFAULT_PROXY_PORT}）都是当前用户范围，抓到即自动还原`);
-        await startCapture({
+        await captureController.startCapture({
           port: DEFAULT_PROXY_PORT,
           platform,
           onLog: (line) => emit(null, /失败|超时/.test(line) ? 'error' : 'info', line),
           onLogin: record => addCapturedAccount(record, platform),
         });
-        json({ ...captureState(), qr: qrInfo() });
+        json({ ...captureController.captureState(), qr: qrInfo() });
         return;
       }
       if (route === 'POST /api/capture/stop') {
         needConfirm(jsonBody());
-        await stopCapture('用户点了停止');
-        json({ ...captureState(), qr: qrInfo() });
+        await captureController.stopCapture('用户点了停止');
+        json({ ...captureController.captureState(), qr: qrInfo() });
+        return;
+      }
+      if (route === 'POST /api/capture/recover') {
+        needConfirm(jsonBody());
+        await captureController.recoverCapture();
+        emit(null, 'info', '上次采集残留已核对并恢复', { category: 'system' });
+        json({ ...captureController.captureState(), qr: qrInfo() });
         return;
       }
 
@@ -2813,6 +2832,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   return {
     server,
     listen: async () => {
+      const recovery = captureController.inspectCaptureRecovery();
+      if (recovery.pending) emit(null, 'warn', recovery.error || recovery.message || '检测到上次采集残留，请在账号页恢复', { category: 'system' });
       await resources?.start();
       return new Promise((resolve) => {
         server.listen(port, host, () => {
@@ -2853,35 +2874,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     emit,
     sessions,
-    captureState,
+    captureState: captureController.captureState,
   };
 }
 
 // Edge、Chrome 通常不在 PATH 里，按安装位置找；找不到就交给系统默认浏览器。
-export function findAppBrowser(env = process.env) {
-  const roots = [env.ProgramFiles, env['ProgramFiles(x86)'], env.LOCALAPPDATA].filter(Boolean);
-  const apps = [['Microsoft', 'Edge', 'Application', 'msedge.exe'], ['Google', 'Chrome', 'Application', 'chrome.exe']];
-  for (const app of apps) {
-    for (const root of roots) {
-      const file = path.join(root, ...app);
-      if (fs.existsSync(file)) return file;
-    }
-  }
-  return null;
-}
-
-export function openBrowser(url) {
-  const launch = (command, args, onFail) => {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-    child.on('error', onFail);
-    child.unref();
-  };
-  const systemDefault = () => launch('cmd', ['/c', 'start', '', url], () => {});
-  const app = findAppBrowser();
-  if (app) {
-    launch(app, ['--app=' + url], systemDefault);
-    return path.basename(app, '.exe');
-  }
-  systemDefault();
-  return 'cmd';
-}
+export { findAppBrowser, openBrowser } from './platform/browser.mjs';

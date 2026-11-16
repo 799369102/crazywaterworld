@@ -7,6 +7,8 @@ import { exactAutomationId, automationWireId } from './automation-policy.mjs';
 import { readGuildMembers, claimMyGuildAid } from './guild.mjs';
 import { displayMaterial } from './config.mjs';
 import { beijingDay } from './automation-settings.mjs';
+import { createPendingOperation } from './pending-operation.mjs';
+import { emitDiagnostic } from './trace-log.mjs';
 const nowOf = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
 const valid = n => Number.isSafeInteger(n) && n >= 0;
 const identity = player => ({ playerId: exactAutomationId(player?.playerId), guildId: exactAutomationId(player?.guildId), worldId: exactAutomationId(player?.worldId) });
@@ -122,6 +124,19 @@ export async function readMutualAid(client, config, player, options) {
 }
 
 function matching(record, state) { return record.details?.worldId === state.worldId && record.details?.playerId === state.playerId; }
+
+function confirmRecoveredOperation(client, ledger, uniqueKey, record, request) {
+  ledger.resolveKey(uniqueKey, true);
+  emitDiagnostic(client, 'operation', {
+    operationId: typeof record.id === 'string' && record.id ? record.id : null,
+    dedupeKey: uniqueKey,
+    module: 'guildMutual',
+    request,
+    phase: 'confirmed',
+    result: 'confirmed',
+  });
+}
+
 async function mutualStep(context, options, startIdentity, day, signal, exchange) {
   const {client,config,player,ledger,enabled} = context;
   const allowed = () => !signal?.aborted && enabled() && client.connected && same(startIdentity,identity(player));
@@ -132,28 +147,37 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
   let received = 0;
   for (const [key,record] of Object.entries(ledger.keyRecords())) {
     if (!record.confirmed && matching(record,state) && record.details.kind === 'guildAidGift' && record.details.acknowledged === true &&
-      record.details.guildId === state.guildId && !state.askIds.includes(record.details.reqId)) ledger.resolveKey(key,true);
-    if (!record.confirmed && matching(record,state) && record.details.kind === 'guildAidClaim' && !record.details.ids.some(id=>state.ready.includes(id))) ledger.resolveKey(key,true);
+      record.details.guildId === state.guildId && !state.askIds.includes(record.details.reqId))
+      confirmRecoveredOperation(client,ledger,key,record,'GuildAidHelpRequest');
+    if (!record.confirmed && matching(record,state) && record.details.kind === 'guildAidClaim' && !record.details.ids.some(id=>state.ready.includes(id)))
+      confirmRecoveredOperation(client,ledger,key,record,'GotMyGuildAidRequest');
     if (!record.confirmed && matching(record,state) && record.details.kind === 'guildAidAsk' && record.details.day===state.day && state.askUsed>=record.details.nextCount &&
-      state.ownRequests.some(row=>row.itemId===record.details.itemId && !record.details.beforeIds.includes(row.id))) ledger.resolveKey(key,true);
+      state.ownRequests.some(row=>row.itemId===record.details.itemId && !record.details.beforeIds.includes(row.id)))
+      confirmRecoveredOperation(client,ledger,key,record,'GuildAidAskRequest');
   }
   if (state.ready.length) {
     if (Object.values(ledger.keyRecords()).some(record=>!record.confirmed && matching(record,state) && record.details.kind==='guildAidClaim')) return {done:true,pending:true,reason:'上次领取结果待确认，暂不重复领取或赠送'};
-    let ticket = null, selectedMaterialCount = 0;
+    const operation = createPendingOperation(ledger, {
+      client, module: 'guildMutual', request: 'GotMyGuildAidRequest',
+      isNotSent: error => error.guildAidClaimNotSent === true,
+    });
+    let selectedMaterialCount = 0;
     try {
-      const result = await claimMyGuildAid(client,config,{player,enabled:allowed,beforeSend:(ids,records)=>{
+      const result = await operation.send(() => claimMyGuildAid(client,config,{player,enabled:allowed,beforeSend:(ids,records)=>{
         if (!allowed() || beijingDay(nowOf(client)*1000)!==day) throw new Error('领取前状态已变化');
         selectedMaterialCount=records.filter(row=>row.itemId===options.askItemId).length;
         const digest=createHash('sha256').update([...ids].sort().join(',')).digest('hex').slice(0,32);
-        ticket=ledger.reserve({}, {}, {}, {uniqueKey:`guildAidClaim:${state.worldId}:${state.playerId}:${digest}`,details:{kind:'guildAidClaim',worldId:state.worldId,playerId:state.playerId,ids}});
-      }});
+        operation.reserve({}, {}, {}, {uniqueKey:`guildAidClaim:${state.worldId}:${state.playerId}:${digest}`,details:{kind:'guildAidClaim',worldId:state.worldId,playerId:state.playerId,ids}});
+      }}));
       received=result.count ?? 0;
-      if (ticket && result.ok) {ledger.confirm(ticket);exchange.received+=selectedMaterialCount;}
-      if (!result.ok) return {done:true,pending:true,received,reason:result.label};
+      if (result.ok) {operation.confirm();exchange.received+=selectedMaterialCount;}
+      if (!result.ok) {
+        operation.fail(new Error(result.label));
+        return {done:true,pending:true,received,reason:result.label};
+      }
     } catch(error) {
-      const rejected=error.guildAidClaimNotSent===true || error.prompt && error.request==='GotMyGuildAidRequest';
-      if (ticket && rejected) ledger.cancel(ticket);
-      return {done:true,pending:!!ticket&&!rejected,received,reason:'领取未完成：'+error.message};
+      const { pending } = operation.fail(error);
+      return {done:true,pending,received,reason:'领取未完成：'+error.message};
     }
     if (!allowed()) return {done:true,received,reason:'账号已暂停，本次互助结束'};
     state=await readMutualAid(client,config,player,options);
@@ -167,16 +191,15 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
       if(!allowed() || state.day!==day || beijingDay(nowOf(client)*1000)!==day || ledger.snapshot().day!==day)return{done:true,received,reason:'发起求助前状态已变化'};
       const key=`guildAidAsk:${state.worldId}:${state.playerId}:${day}:${state.askUsed}`;
       if(ledger.hasKey(key))return{done:true,pending:true,received,reason:'同一次求助计数已有提交记录，等待刷新'};
-      const ticket=ledger.reserve({guildAidAsks:1},{guildAidAsks:limit},{},{uniqueKey:key,details:{kind:'guildAidAsk',worldId:state.worldId,playerId:state.playerId,day,itemId:options.askItemId,nextCount:state.askUsed+1,beforeIds:state.ownRequests.map(r=>r.id)}});
-      let askSent=false;
+      const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidAskRequest' });
+      operation.reserve({guildAidAsks:1},{guildAidAsks:limit},{},{uniqueKey:key,details:{kind:'guildAidAsk',worldId:state.worldId,playerId:state.playerId,day,itemId:options.askItemId,nextCount:state.askUsed+1,beforeIds:state.ownRequests.map(r=>r.id)}});
       try{
-        await client.sendWatch('GuildAidAskRequest',{reqItemId:options.askItemId,type:0},{window:400});
-        askSent=true;
+        await operation.send(() => client.sendWatch('GuildAidAskRequest',{reqItemId:options.askItemId,type:0},{window:400}));
         const after=await readMutualAid(client,config,player,options);
         if(after.day!==day || after.askUsed!==state.askUsed+1 || !after.ownRequests.some(r=>r.itemId===options.askItemId && (r.ready || r.endTime>after.now) && !state.ownRequests.some(old=>old.id===r.id)))throw new Error('计数或新求助记录尚未确认');
-        ledger.confirm(ticket);exchange.seen=true;
+        operation.confirm();exchange.seen=true;
         return{received,published:1,askUsed:after.askUsed,askLimit:state.askLimit,reason:`已发起${displayMaterial(config,options.askItemId)}求助，游戏今日${after.askUsed}/${state.askLimit}次`};
-      }catch(error){const rejected=(!askSent&&error.notSent===true)||error.prompt&&error.request==='GuildAidAskRequest';if(rejected)ledger.cancel(ticket);return{done:true,pending:!rejected,received,reason:'发起求助未完成：'+error.message};}
+      }catch(error){const {pending}=operation.fail(error);return{done:true,pending,received,reason:'发起求助未完成：'+error.message};}
     }
   }
   const used=ledger.snapshot().counters.guildAidGifts ?? 0;
@@ -195,12 +218,11 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
   if (!chosen) return {received,waiting:true,reason:(state.candidates.length?'可赠送的求助已有处理记录，等待列表刷新':state.reason)+'，'+options.checkEverySeconds+'秒后再检查'};
   if (!allowed() || state.day!==day || beijingDay(nowOf(client)*1000)!==day || ledger.snapshot().day!==day || chosen.endTime<=nowOf(client)) return {done:true,received,reason:'赠送前状态或日期已变化，本次结束'};
   const key=`guildAidGift:${state.worldId}:${state.playerId}:${chosen.id}`;
-  const ticket=ledger.reserve({guildAidGifts:1},{guildAidGifts:options.target},{},{uniqueKey:key,details:{kind:'guildAidGift',day,worldId:state.worldId,playerId:state.playerId,guildId:state.guildId,reqId:chosen.id,memberId:chosen.memberId,itemId:chosen.itemId}});
-  if (!allowed()) {ledger.cancel(ticket);return{done:true,received,reason:'已停止，未发送赠送'};}
-  let giftResponseReceived=false;
+  const operation = createPendingOperation(ledger, { client, module: 'guildMutual', request: 'GuildAidHelpRequest' });
+  operation.reserve({guildAidGifts:1},{guildAidGifts:options.target},{},{uniqueKey:key,details:{kind:'guildAidGift',day,worldId:state.worldId,playerId:state.playerId,guildId:state.guildId,reqId:chosen.id,memberId:chosen.memberId,itemId:chosen.itemId}});
+  if (!allowed()) {operation.cancel();return{done:true,received,reason:'已停止，未发送赠送'};}
   try {
-    const reply=await client.request('GuildAidHelpRequest',{reqId:[automationWireId(chosen.id)],type:0},'GotRewardResponse',8000);
-    giftResponseReceived=true;
+    const reply=await operation.send(() => client.request('GuildAidHelpRequest',{reqId:[automationWireId(chosen.id)],type:0},'GotRewardResponse',8000));
     if (!Array.isArray(reply?.reward?.asset) || !reply.reward.asset.some(row=>typeof row.id==='string' && quantity(row.num)>0)) throw new Error('服务端未返回可确认的互助奖励');
     // Keep the receipt across pause, disconnect and restart. A disappeared ask
     // alone cannot distinguish our lost request from another member's gift.
@@ -209,10 +231,11 @@ async function mutualStep(context, options, startIdentity, day, signal, exchange
     const after=await readMutualAid(client,config,player,options);
     if(!allowed() || !same(startIdentity,after))throw new Error('赠送后账号或联盟已变化');
     if(after.askIds.includes(chosen.id))throw new Error('求助完成状态尚未确认');
-    ledger.confirm(ticket);
+    operation.confirm();
     return {received,sent:1,reason:`已赠给${chosen.name}：${chosen.material} ×1`};
   } catch(error) {
-    if ((!giftResponseReceived&&error.notSent===true) || error.prompt && error.request==='GuildAidHelpRequest') {ledger.cancel(ticket);return{received,waiting:true,reason:(error.notSent===true?'本次赠送未发送：':'游戏拒绝本次赠送：')+error.message+'；稍后重新检查'};}
+    const { rejected } = operation.fail(error);
+    if (rejected) return{received,waiting:true,reason:(error.notSent===true?'本次赠送未发送：':'游戏拒绝本次赠送：')+error.message+'；稍后重新检查'};
     return {done:true,pending:true,received,reason:'赠送结果未知，已保留1次额度并停止：'+error.message};
   }
 }

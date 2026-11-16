@@ -234,7 +234,8 @@ export async function runFactoryProductionBatch(client, protocol, steps, {
     if (batch) batch.sealed = true;
     if (prepared && !batch?.attempted.length) await actionGuard.cancel(batchStep, ticket, { notSent: true });
     if (batch?.attempted.length && prepared) {
-      try { await actionGuard.after(batchStep, ticket, { ok: false, sent: true, status: 'unknown' }); } catch { /* Preserve shared pending evidence. */ }
+      try { await actionGuard.after(batchStep, ticket, { ok: false, sent: true, status: 'unknown' }); }
+      catch (settlementError) { await actionGuard.cancel(batchStep, ticket, { error: settlementError }); }
     }
     for (const step of steps) if (!results.some(entry => entry.step === step)) results.push({ ...skipped(step, error.message), failureError: error });
   } finally { if (acquired) busy.delete(lock); }

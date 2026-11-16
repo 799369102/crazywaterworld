@@ -23,7 +23,12 @@ function fixture() {
   const pack = () => {
     const data = { ResourceCfg: [{ id: 'GOLD', show_name: '金币' }], ItemCfg: [{ id: '汽油' }],
       ModuleOpenCfg: [{ moduleId: '世界', playerLevel: 16 }], WorldParamCfg: [{ paramName: '攻城战消耗耐久', paramValue: 100 }],
-      WorldScenarioCfg: [{ id: 1 }, { id: 2 }], MarkerCfg: [{ revision: f.revision }] };
+      WorldScenarioCfg: [{ id: 1 }, { id: 2 }], MarkerCfg: [{ revision: f.revision }],
+      BuildingProduceCfg: [{ buildType: '工厂', itemId: '产品', unlockLevel: 1, produceTime: 60, costItem: [['木材', 1]] }],
+      FarmlandPlantCfg: [{ id: '小麦', time: 60, produceNum: 5, material: ['种子', 1] }],
+      MuseumExpeditionStageCfg: [{ stageId: 1, exploreTime: 60 }],
+      MuseumExploreTimeFactorCfg: [{ factor: 1, playerLevel: 1 }],
+      MuseumExpeditionTeamCfg: [{ teamCount: 1, playerLevel: 1 }] };
     for (const id of [1, 2]) {
       data[id + '_CityCfg'] = [{ id: 1, guildIndex: 7 }, { id: 2, guildIndex: 8 }];
       data[id + '_AttackCityConsumeCfg'] = [{ dist: 1, cost: f.revision * 0.4 }];
@@ -124,6 +129,24 @@ try {
       assert.equal(activeResources({ root: f.root }).generation, before); await f.updater.stop();
     }
   });
+  await check('关键消费字段缺失、类型错误或负数时阻止切换，修复后重试启用', async () => {
+    for (const corrupt of [
+      rows => { delete rows.find(row => row[1] === 'BuildingProduceCfg')[2].data[0].produceTime; },
+      rows => { rows.find(row => row[1] === 'FarmlandPlantCfg')[2].data[0].material[1] = -1; },
+      rows => { rows.find(row => row[1] === 'MuseumExploreTimeFactorCfg')[2].data[0].factor = '3'; },
+      rows => { rows.splice(rows.findIndex(row => row[1] === 'MuseumExpeditionStageCfg'), 1); },
+    ]) {
+      const f = fixture(); await f.updater.check();
+      const before = activeResources({ root: f.root }).generation;
+      f.revision = f.release = 2;
+      f.hook = (url, value) => { if (url.includes('config_cn/import/')) corrupt(value); };
+      assert.equal((await f.updater.check()).status, 'error');
+      assert.equal(activeResources({ root: f.root }).generation, before);
+      f.hook = null;
+      assert.equal((await f.updater.check()).status, 'updated');
+      await f.updater.stop();
+    }
+  });
   await check('同一检查合并并发请求，停止后不发布迟到的下载', async () => {
     const f = fixture(); let release;
     const gate = new Promise(resolve => { release = resolve; });
@@ -165,7 +188,7 @@ try {
   await check('控制台启动、状态接口和关闭接入更新器，无需游戏账号', async () => {
     const f = fixture(); process.env.CW_RESOURCE_DIR = f.root;
     const { createConsole } = await import('../src/server.mjs');
-    const app = createConsole({ port: 0, resourceUpdater: f.updater });
+    const app = createConsole({ port: 0, resourceUpdater: f.updater, protocol: {} });
     try {
       const url = await app.listen(); const response = await fetch(url + '/api/resources'); const view = await response.json();
       assert.equal(response.status, 200); assert.equal(view.enabled, true); assert.equal(view.intervalMinutes, 30);

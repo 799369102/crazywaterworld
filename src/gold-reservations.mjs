@@ -66,6 +66,7 @@ export function settleGoldSpendState(player, snapshot, value) {
   balanceNumber(value);
   if (!snapshot || goldAccountKey(player) !== snapshot.key || pending.get(snapshot.key) !== snapshot.ticket) return false;
   pending.delete(snapshot.key);
+  try { snapshot.ticket.onReconciled?.(); } catch { /* Observers cannot interrupt settlement. */ }
   return true;
 }
 

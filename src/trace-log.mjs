@@ -1,16 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const secretKey = /(?:password|passwd|pwd|token|secret|sign|signature|sessionkey|authorization|cookie|openid|unionid|phone|mobile|credentials|login)$/i;
+const secretKey = /(?:password|passwd|pwd|token|secret|sign|signature|sessionkey|authorization|cookie|openid|unionid|phone|mobile|credentials|login|loginframehex)$/i;
 
-function redactText(value) {
+export function redactText(value) {
   return value
     .replace(/\b(Bearer\s+)[^\s"'<>]+/gi, '$1[已脱敏]')
-    .replace(/\b((?:access[_-]?|refresh[_-]?)?token|password|passwd|pwd|secret|sign|signature|session[_-]?key|authorization|cookie|open[_-]?id|union[_-]?id|phone|mobile)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s&,;]+)/gi, '$1=[已脱敏]')
+    .replace(/(["']?)\b((?:access[_-]?|refresh[_-]?)?token|password|passwd|pwd|secret|sign|signature|session[_-]?key|authorization|cookie|open[_-]?id|union[_-]?id|phone|mobile|loginFrameHex)\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;]+)/gi, '$1$2$1=[已脱敏]')
     .replace(/(https?:\/\/|wss?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已脱敏]@');
 }
 
-// 保留可重放的协议字段，登录凭据和错误文本中的凭据统一在落盘前脱敏。
+// 所有日志出口共用同一序列化规则，兼容 Error、大整数和循环引用。
 export function traceJson(value) {
   const ancestors = [];
   return JSON.stringify(value, function (key, item) {
@@ -25,6 +25,11 @@ export function traceJson(value) {
     }
     return item;
   });
+}
+
+export function redactLog(value) {
+  const serialized = traceJson(value);
+  return serialized === undefined ? undefined : JSON.parse(serialized);
 }
 
 export function emitDiagnostic(client, event, data) {

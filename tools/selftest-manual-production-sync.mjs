@@ -74,6 +74,10 @@ async function fixture() {
 try {
   await test('人工收走成品并改种后新会话同步，旧结果未知而新计划可按当前材料生产', async () => {
     const f = await fixture();
+    assert.equal(f.factoryHandle.operation.onConfirmed, undefined, '日志观察者保持原预算回调语义');
+    assert.equal(typeof f.factoryHandle.onReconciled, 'function');
+    let reconciled = 0; f.farmHandle.onReconciled = () => { reconciled++; };
+    const oldOperationId = f.state.diagnostics.find(row => row.event === 'operation').operationId;
     assert.equal(await f.factoryHandle.operation.verify(f.reconnect), false);
     await refreshOrderMaterialSpends(f.reconnect, f.player);
     f.intact(); // Ordinary reconnect does not silently retire historical requests.
@@ -81,6 +85,8 @@ try {
     assert.equal(f.state.writes.length, writes, '同步本身只读游戏');
     assert.deepEqual(result.factories, ['1材料厂']); assert.deepEqual(result.farms, ['1农田']);
     assert.deepEqual(result.released, { factoryBatches: 1, materialReservations: 2 });
+    assert.equal(reconciled, 0, '人工交接保持历史操作结果未知');
+    assert.equal(f.state.diagnostics.filter(row => row.operationId === oldOperationId && row.phase === 'confirmed').length, 0);
     assert.equal(f.factoryHandle.operation.confirmed, false, '交接不能宣称旧操作成功');
     assert.equal(captureManualFactoryProductionState(f.player).batches.length, 0);
     assert.equal(pendingFarmMaterialSpends(f.player).length, 0);

@@ -46,20 +46,22 @@ export async function upgradeFishingOnce(client, config, { playerLevel, reserveG
     costs: promote ? [] : [{ id: 'GOLD', num: current.cost[1] }], label: '钓具强化与升级' };
   if (dryRun) return { planned: true, action: { ...action, label: promote ? '钓具升至 ' + next.level + ' 级' : '钓具强化一次' } };
   const ticket = await beforeAction?.(action);
-  if (!enabled()) { await cancelAction?.(action, ticket, { notSent: true }); return skip('已暂停'); }
-  let reply;
-  try { reply = await client.request(action.request, action.body, action.response); }
-  catch (error) {
-    if (error.notSent === true || error.prompt && error.request === action.request) {
-      await cancelAction?.(action, ticket, { notSent: error.notSent === true, error });
+  let dispatched = false, writePending = false;
+  try {
+    if (!enabled()) { await cancelAction?.(action, ticket, { notSent: true }); return skip('已暂停'); }
+    dispatched = writePending = true;
+    const reply = await client.request(action.request, action.body, action.response);
+    writePending = false;
+    const after = reply?.levelInfo;
+    if (promote && after?.level === next.level) { await afterAction?.(action, ticket, { ok: true, body: reply }); return { label: '钓具已从 ' + level + ' 级升至 ' + after.level + ' 级', ok: true }; }
+    if (!promote && after?.level === level && Number.isSafeInteger(after.enhance) && after.enhance > progress) {
+      await afterAction?.(action, ticket, { ok: true, body: reply });
+      return { label: '钓具 ' + level + ' 级强化进度 ' + progress + ' → ' + after.enhance + '/' + current.enhance + '（消耗 ' + current.cost[1] + ' 金币）', ok: true };
     }
+    throw new Error('服务端未确认钓具' + (promote ? '升级' : '强化进度增加'));
+  } catch (error) {
+    const notSent = !dispatched || writePending && error.notSent === true;
+    await cancelAction?.(action, ticket, { notSent, error });
     throw error;
   }
-  const after = reply?.levelInfo;
-  if (promote && after?.level === next.level) { await afterAction?.(action, ticket, { ok: true, body: reply }); return { label: '钓具已从 ' + level + ' 级升至 ' + after.level + ' 级', ok: true }; }
-  if (!promote && after?.level === level && Number.isSafeInteger(after.enhance) && after.enhance > progress) {
-    await afterAction?.(action, ticket, { ok: true, body: reply });
-    return { label: '钓具 ' + level + ' 级强化进度 ' + progress + ' → ' + after.enhance + '/' + current.enhance + '（消耗 ' + current.cost[1] + ' 金币）', ok: true };
-  }
-  throw new Error('服务端未确认钓具' + (promote ? '升级' : '强化进度增加'));
 }

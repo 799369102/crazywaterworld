@@ -1,3 +1,4 @@
+import { shutdownSignals } from './platform/terminal.mjs';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import { parseArgs } from 'node:util';
@@ -1023,9 +1024,7 @@ async function main() {
     catch (error) { output.write('关闭控制台失败：' + error.message); }
     finally { await output.close(); process.exit(signal === 'SIGINT' ? 130 : 0); }
   };
-  process.once('SIGINT', () => { void shutdown('SIGINT'); });
-  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
-  if (process.platform === 'win32') process.once('SIGBREAK', () => { void shutdown('SIGBREAK'); });
+  for (const signal of shutdownSignals()) process.once(signal, () => { void shutdown(signal); });
   const browser = process.env.CW_NO_BROWSER ? null : openBrowser(url);
   if (!process.env.CW_QUIET_START) {
     if (browser) output.write('已打开浏览器：' + browser);

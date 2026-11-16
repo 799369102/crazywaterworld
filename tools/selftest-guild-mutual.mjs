@@ -106,6 +106,92 @@ try{
   f.state.onRead=null;f.state.stock.橡胶圈=8;const g=guildMutualFixture(f.state);l=createUsageLedger('qa',{file});
   const recovered=await run(g,l,{target:1});assert.equal(recovered.pending,undefined);assert.equal(recovered.sent,0);assert.equal(l.snapshot().uncertain,0);assert.equal(g.state.writes.filter(r=>r.name==='GuildAidHelpRequest').length,1);
  });
+ await check('赠送、领取与发布断线后重建核销，确认日志关联原操作且不重发或新增监听器', async () => {
+  for (const kind of ['gift', 'claim', 'ask']) {
+   const f = guildMutualFixture();
+   const file = path.join(dir, 'operation-recovery-' + kind + '.json');
+   const events = [];
+   const request = {gift: 'GuildAidHelpRequest', claim: 'GotMyGuildAidRequest', ask: 'GuildAidAskRequest'}[kind];
+   const options = kind === 'ask'
+    ? {target: 0, askEnabled: true, askItemId: '橡胶圈', askTarget: 1}
+    : {target: kind === 'gift' ? 1 : 0};
+   const disconnect = () => {
+    f.client.connected = false;
+    f.client.emit('close');
+   };
+   f.client.on('diagnostic', event => events.push(event));
+   if (kind === 'gift') {
+    f.state.onRead = name => {
+     if (name === 'AllItemRequest' && f.state.writes.length) {
+      disconnect();
+      throw Error('赠送回执后断线');
+     }
+    };
+   } else {
+    if (kind === 'claim') f.state.own = [{
+     reqId: '9007199254799902', reqItemId: '木材', endTime: Math.floor(Date.now() / 1000) + 100,
+     helper: {playerId: f.friend, nickname: '同名盟友'},
+    }];
+    const send = f.client.sendWatch;
+    f.client.sendWatch = async (name, ...args) => {
+     const result = await send(name, ...args);
+     if (name === request) {
+      disconnect();
+      throw Error('请求提交后断线');
+     }
+     return result;
+    };
+   }
+   const firstLedger = createUsageLedger('qa', {file});
+   assert.equal((await run(f, firstLedger, options)).pending, true);
+   const [[uniqueKey, record]] = Object.entries(firstLedger.keyRecords());
+   const operationEvents = events.filter(event => event.event === 'operation' && event.request === request);
+   assert.deepEqual(operationEvents.map(event => event.phase), ['reserved', 'unknown']);
+   assert(operationEvents.every(event => event.operationId === record.id && event.dedupeKey === uniqueKey));
+   for (const event of ['sent', 'close', 'state']) assert.equal(f.client.listenerCount(event), 0);
+   f.state.onRead = null;
+   const rebuilt = guildMutualFixture(f.state);
+   const recoveredLedger = createUsageLedger('qa', {file});
+   const recoveryEvents = [];
+   rebuilt.client.on('diagnostic', event => recoveryEvents.push(event));
+   assert.equal((await run(rebuilt, recoveredLedger, options)).pending, undefined);
+   assert.equal(recoveredLedger.keyRecords()[uniqueKey].confirmed, true);
+   assert.equal(recoveredLedger.snapshot().uncertain, 0);
+   assert.deepEqual(recoveryEvents, [{
+    event: 'operation', operationId: record.id, dedupeKey: uniqueKey,
+    module: 'guildMutual', request, phase: 'confirmed', result: 'confirmed',
+   }]);
+   await run(rebuilt, recoveredLedger, options);
+   assert.equal(recoveryEvents.length, 1);
+   assert.equal(f.state.writes.filter(row => row.name === request).length, 1);
+   for (const event of ['sent', 'close', 'state']) assert.equal(rebuilt.client.listenerCount(event), 0);
+  }
+ });
+ await check('旧互助记录缺少操作ID时按原键记录核销，保留防重且不虚构操作ID', async () => {
+  const f = guildMutualFixture();
+  const file = path.join(dir, 'operation-recovery-legacy.json');
+  const l = createUsageLedger('qa', {file});
+  const uniqueKey = `guildAidGift:${f.player.worldId}:${f.player.playerId}:9007199254749999`;
+  const events = [];
+  fs.writeFileSync(file, JSON.stringify({version: 1, accounts: {qa: {
+   day: l.snapshot().day, counters: {guildAidGifts: 1}, pending: {}, confirmed: {},
+   keys: {[uniqueKey]: {confirmed: false, details: {
+    kind: 'guildAidGift', worldId: f.player.worldId, playerId: f.player.playerId,
+    guildId: f.player.guildId, reqId: '9007199254749999', acknowledged: true,
+   }}},
+  }}}));
+  f.client.on('diagnostic', event => events.push(event));
+  await run(f, l, {target: 1});
+  assert.equal(l.keyRecords()[uniqueKey].confirmed, true);
+  assert.deepEqual(events, [{
+   event: 'operation', operationId: null, dedupeKey: uniqueKey,
+   module: 'guildMutual', request: 'GuildAidHelpRequest', phase: 'confirmed', result: 'confirmed',
+  }]);
+  await run(f, l, {target: 1});
+  assert.equal(events.length, 1);
+  assert.equal(f.state.writes.length, 0);
+  for (const event of ['sent', 'close', 'state']) assert.equal(f.client.listenerCount(event), 0);
+ });
  await check('回执后无关材料库存异常也不能作为完整同步，修复读数后恢复',async()=>{
   const f=guildMutualFixture(),l=ledger();f.state.onGift=()=>{f.state.stock.木材=-1;};
   assert.equal((await run(f,l,{target:1})).pending,true);assert.equal(l.snapshot().uncertain,1);

@@ -1,5 +1,6 @@
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
+import { emitDiagnostic } from './trace-log.mjs';
 
 // V74 domestic mini-game builds: use the SDK's app/channel pair as well as the
 // live AdvChannelCfg switch. Unknown or overseas packages must not use this path.
@@ -86,6 +87,9 @@ export const isAdNotFinished = error => !!error?.prompt?.args?.includes?.('adv n
 
 // 返回 false 表示等待被取消，调用方不能再发送领奖请求。
 export async function prepareAd(client, access, { type, id }, allowed) {
+  emitDiagnostic(client, 'ad-path', { module: 'ads', category: 'daily', request: 'WatchAdvRequest', type, id,
+    adMode: access.waitMs > 0 ? 'waiting' : 'privileged', waitMs: access.waitMs,
+    message: access.waitMs > 0 ? '广告领奖 · 无权益等待领取' : '广告领奖 · 有权益立即领取' });
   await client.request('WatchAdvRequest', { type, id }, 'OkResponse');
   const deadline = Date.now() + access.waitMs;
   while (Date.now() < deadline) {

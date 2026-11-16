@@ -1,6 +1,8 @@
 import os from 'node:os';
 import { stripVTControlCharacters } from 'node:util';
 import { formatConsoleLog } from './console-log.mjs';
+import { supportsPinnedHeader } from './platform/terminal.mjs';
+export { supportsPinnedHeader } from './platform/terminal.mjs';
 
 export const CONSOLE_GUIDANCE = '关闭网页后挂机会继续，运行日志显示在此窗口。请保持此窗口打开；Ctrl+C 或关闭此窗口会结束后台进程。';
 const ESC = '\u001b[';
@@ -37,19 +39,6 @@ function wrap(text, columns) {
     rows.push(row);
   }
   return rows;
-}
-
-// Node/libuv enables VT output on modern Windows consoles. DECSTBM needs the
-// Windows 10 VT host; old consoles and redirected streams stay plain text.
-// https://learn.microsoft.com/windows/console/console-virtual-terminal-sequences
-export function supportsPinnedHeader(stream, { env = process.env, platform = process.platform, release = os.release() } = {}) {
-  if (!stream?.isTTY || env.CW_PIN_HEADER === '0' || env.TERM === 'dumb') return false;
-  if (platform === 'win32') {
-    if (env.WT_SESSION || env.TERM_PROGRAM || /^(xterm|screen|tmux|cygwin)/.test(env.TERM ?? '')) return true;
-    const [major, , build] = release.split('.').map(Number);
-    return major > 10 || major === 10 && build >= 10586;
-  }
-  return /^(xterm|screen|tmux|rxvt|vt100|ansi|linux)/.test(env.TERM ?? '') || !!env.TERM_PROGRAM;
 }
 
 export function createConsoleOutput({ stdout = process.stdout, env = process.env, platform = process.platform, release = os.release() } = {}) {

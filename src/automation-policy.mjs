@@ -5,6 +5,7 @@ import { beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterial
 import { assertFarmPlantingReady, farmInventory, farmPlantArgs, readFarmMaterialState, settleFarmMaterialState } from './farm-planting.mjs';
 import { museumMaterialDetails, readMuseumMaterialState, settleMuseumMaterialState } from './museum-materials.mjs';
 import { captureSpendOperation } from './spend-evidence.mjs';
+import { createOperationLog } from './operation-log.mjs';
 
 export class AutomationSkip extends Error {
   constructor(message) { super(message); this.code = 'AUTOMATION_SKIP'; }
@@ -169,7 +170,11 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
   const reservations = new Map();
   // Even actions without daily counters need a distinct generation. Identical
   // request bodies may be retried after an earlier unknown action is settled.
-  const forget = record => reservations.delete(record.token);
+  const forget = record => { record.log.close(); reservations.delete(record.token); };
+  const reportOutcome = (record, outcome) => {
+    const confirmed = outcome?.ok && !('sent' in outcome);
+    record.log.phase(confirmed ? 'confirmed' : 'unknown', confirmed ? 'confirmed' : 'pending', { reason: outcome?.reason });
+  };
   return {
     async before(step, { waterSnapshot } = {}) {
       let settings = getSettings?.();
@@ -291,7 +296,17 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       }
       for (const [id, balance] of nextBalances) remaining.set(id, balance);
       const token = ticket ?? Object.freeze({});
-      reservations.set(token, { token, ticket, gold, materials, operation, account, request: step.request, costs, factoryBatch: step.factoryBatch });
+      const log = createOperationLog(client, { request: step.request, label: step.label, module: step.kind || step.scope || 'automation', dedupeKey: step.uniqueKey ?? null });
+      if (operation?.onConfirmed) {
+        const onConfirmed = operation.onConfirmed;
+        operation.onConfirmed = () => { onConfirmed(); log.phase('confirmed', 'confirmed'); };
+      }
+      // Reconciliation observers report late receipts without changing the
+      // budget callback used to classify manual production handoffs.
+      const onReconciled = () => { log.phase('confirmed', 'confirmed'); log.close(); };
+      if (materials) materials.onReconciled = onReconciled;
+      if (gold) gold.onReconciled = onReconciled;
+      reservations.set(token, { token, ticket, gold, materials, operation, account, request: step.request, costs, factoryBatch: step.factoryBatch, log });
       return token;
     },
     async after(step, ticket, outcome) {
@@ -321,6 +336,7 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
           if (record.materials) settleOrderMaterialState(player, { account: record.materials.account, handles: [record.materials] }, stock);
           outcome.ok = true; outcome.status = 'confirmed'; delete outcome.sent;
         } else { outcome.ok = false; outcome.status = 'unknown'; }
+        reportOutcome(record, outcome);
         forget(record);
         return;
       }
@@ -376,15 +392,17 @@ export function createActionGuard(client, getSettings, ledger, { enabled = () =>
       if (record.ticket && outcome?.ok && !('sent' in outcome)) ledger.confirm(record.ticket);
       // Shared records outlive this guard and retain their business probe if a
       // receipt or complete inventory is unavailable until a later connection.
+      reportOutcome(record, outcome);
       forget(record);
     },
     async cancel(step, ticket, { notSent = false, error } = {}) {
       const record = reservations.get(ticket);
       if (!record) return;
-      if (record.operation?.confirmed) { forget(record); return; }
+      if (record.operation?.confirmed) { record.log.phase('confirmed', 'confirmed'); forget(record); return; }
       if (notSent) { cancelUnsentGold(record.gold); cancelOrderMaterialSpend(record.materials); }
       else if (error?.prompt && error.request === record.request) { rejectGold(record.gold, error); cancelOrderMaterialSpend(record.materials); }
-      else return;
+      else { record.log.phase('unknown', 'pending', { reason: error?.message }); record.log.close(); return; }
+      record.log.phase('cancelled', notSent ? 'not-sent' : 'rejected');
       forget(record);
       if (record.ticket) ledger.cancel(record.ticket);
       for (const [id, amount] of record.costs) if (remaining.has(id)) remaining.set(id, remaining.get(id) + amount);

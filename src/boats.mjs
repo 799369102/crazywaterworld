@@ -28,24 +28,26 @@ async function enhance(client, boat, info, cfg, next, buildingCount, enabled, op
     costs: promote ? [] : [{ id: 'GOLD', num: cfg.cost[1] }], label: boat.name + '养成' };
   if (options.dryRun) return { action: { ...action, label: boat.name + (promote ? '升级至 ' + next.level + ' 级' : '强化一次') } };
   const ticket = await options.beforeAction?.(action);
-  if (!enabled(boat.enhance)) { await options.cancelAction?.(action, ticket, { notSent: true }); return { reason: '已暂停' }; }
-  let reply;
-  try { reply = await client.request(action.request, action.body, action.response); }
-  catch (error) {
-    if (error.notSent === true || error.prompt && error.request === action.request) {
-      await options.cancelAction?.(action, ticket, { notSent: error.notSent === true, error });
+  let dispatched = false, writePending = false;
+  try {
+    if (!enabled(boat.enhance)) { await options.cancelAction?.(action, ticket, { notSent: true }); return { reason: '已暂停' }; }
+    dispatched = writePending = true;
+    const reply = await client.request(action.request, action.body, action.response);
+    writePending = false;
+    const after = normalize(reply.levelInfo);
+    if (!(after?.level > info.level || (after?.level === info.level && after.enhance > (info.enhance ?? 0)))) {
+      throw new Error('未确认强化进度增加');
     }
+    // The following gather in this round must use the confirmed new level, even
+    // if bookkeeping after the successful upgrade needs a later reconciliation.
+    Object.assign(info, after, { enhance: after.enhance ?? 0 });
+    await options.afterAction?.(action, ticket, { ok: true, body: reply });
+    return '已' + (promote ? '升级' : '强化') + '，等级 ' + after.level + '，强化 ' + (after.enhance ?? 0);
+  } catch (error) {
+    const notSent = !dispatched || writePending && error.notSent === true;
+    await options.cancelAction?.(action, ticket, { notSent, error });
     throw error;
   }
-  const after = normalize(reply.levelInfo);
-  if (!(after?.level > info.level || (after?.level === info.level && after.enhance > (info.enhance ?? 0)))) {
-    throw new Error('未确认强化进度增加');
-  }
-  // The following gather in this round must use the confirmed new level, even
-  // if bookkeeping after the successful upgrade needs a later reconciliation.
-  Object.assign(info, after, { enhance: after.enhance ?? 0 });
-  await options.afterAction?.(action, ticket, { ok: true, body: reply });
-  return '已' + (promote ? '升级' : '强化') + '，等级 ' + after.level + '，强化 ' + (after.enhance ?? 0);
 }
 
 async function gather(client, config, boat, cfg, enabled, options = {}) {

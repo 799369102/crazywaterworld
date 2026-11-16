@@ -6,7 +6,7 @@ import { serviceCargo } from '../src/cargo.mjs';
 import { runBaseAutomation } from '../src/base-automation.mjs';
 import { createActionGuard } from '../src/automation-policy.mjs';
 import { createUsageLedger, defaultSettings } from '../src/automation-settings.mjs';
-import { beginOrderMaterialSpend, cancelOrderMaterialSpend, readOrderReservedStock } from '../src/order-reservations.mjs';
+import { beginOrderMaterialSpend, cancelOrderMaterialSpend, pendingOrderMaterialSpends, readOrderReservedStock } from '../src/order-reservations.mjs';
 import { SPEED_UP_ITEM } from '../src/world.mjs';
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -151,7 +151,9 @@ export async function testMaterialMigration() {
       await assert.rejects(uncertain.cargo());
       assert.equal(uncertain.ledger.snapshot().counters.cargoLoads, 1);
       assert.equal(uncertain.ledger.snapshot().uncertain, 1);
-      assert.equal(uncertain.cancelled.length, 0);
+      assert.equal(uncertain.cancelled.length, 1, '未知请求也必须结束日志生命周期');
+      assert.equal(uncertain.cancelled[0].details.notSent, false, '未知收尾不能证明原写未发送');
+      assert.equal(pendingOrderMaterialSpends(uncertain.player).length, 1, '未知收尾继续保留材料占用');
       if (failure === 'lost') {
         uncertain.stale = false;
         assert.equal((await uncertain.read()).available.get('fish'), 15, 'matching filled slots followed by complete inventory recover a lost reply');

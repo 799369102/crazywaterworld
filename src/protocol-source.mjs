@@ -1,32 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { wechatPackageCandidates } from './platform/client-paths.mjs';
 import { decrypt, inspectArchive } from '../tools/wxapkg.mjs';
 
 export const PROTO_BUNDLE = path.resolve(import.meta.dirname, '../work/extracted/_src_chunks_/src/chunks/game.js');
 const APPID = 'wx2ea52a972ea18e5e';
-
-function directories(root) {
-  try {
-    return fs.readdirSync(root, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name);
-  } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return [];
-    throw error;
-  }
-}
-
-function cachedPackages() {
-  if (!process.env.APPDATA) return [];
-  const users = path.join(process.env.APPDATA, 'Tencent/xwechat/radium/users');
-  const candidates = [];
-  for (const user of directories(users)) {
-    const root = path.join(users, user, 'applet/packages', APPID);
-    for (const version of directories(root).filter(name => /^\d+$/.test(name))) {
-      const file = path.join(root, version, '_src_chunks_.wxapkg');
-      if (fs.existsSync(file)) candidates.push({ version: Number(version), file });
-    }
-  }
-  return candidates.sort((a, b) => b.version - a.version).map(entry => entry.file);
-}
 
 function readBundle(file) {
   const input = fs.readFileSync(file);
@@ -42,7 +20,7 @@ export function readProtocolSource(bundlePath) {
   if (explicit) return readBundle(explicit);
   let cacheError;
   try {
-    for (const file of cachedPackages()) {
+    for (const file of wechatPackageCandidates(APPID)) {
       try { return readBundle(file); }
       catch (error) { cacheError ??= error; }
     }

@@ -239,8 +239,10 @@ try {
   });
 } finally {
   if (priorData === undefined) delete process.env.CW_DATA_DIR; else process.env.CW_DATA_DIR = priorData;
-  for (const file of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, file));
-  fs.rmdirSync(directory);
+  const cleanupRoot = fs.realpathSync(directory);
+  assert.equal(path.dirname(cleanupRoot), fs.realpathSync(os.tmpdir()));
+  assert.match(path.basename(cleanupRoot), /^cw-pirate-settlement-[^\\/]+$/);
+  fs.rmSync(cleanupRoot, { recursive: true, force: true });
 }
 const passed = results.filter(r => r.ok).length;
 console.log(`首杀结算恢复：${passed}/${results.length} 通过`);
