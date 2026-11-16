@@ -21,6 +21,8 @@ export const operationLabels = {
   '/api/accounts/phone-login': '手机号登录', '/api/accounts/phone-login/send-code': '发送短信验证码',
   '/api/accounts/phone-login/save': '保存手机号账号',
   '/api/accounts/phone-login/cancel': '取消手机号登录',
+  '/api/accounts/phone-login/status': '检查 APP 登录设备', '/api/accounts/phone-login/device': '导入 APP 设备档案',
+  '/api/accounts/phone-login/roles': '重新读取 APP 区服角色',
   '/api/accounts/pause': '切换账号托管状态',
   '/api/connect': '连接游戏', '/api/disconnect': '断开连接',
   '/api/capture': '读取采集状态', '/api/capture/start': '开始采集账号', '/api/capture/stop': '停止采集',

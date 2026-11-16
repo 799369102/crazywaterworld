@@ -82,9 +82,9 @@ import { reconcileManualProduction } from './manual-production-sync.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
-import { loadStore, saveStore, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, DATA_DIR } from './accounts.mjs';
+import { loadStore, saveStore, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, rememberSeen, DATA_DIR } from './accounts.mjs';
 import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
-import { createPhoneLogin } from './phone-login.mjs';
+import { createPhoneLogin, loadDeviceProfile, saveDeviceProfile, DEVICE_PROFILE_PATH } from './phone-login.mjs';
 import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
 
 const LOG_LIMIT = 400;
@@ -132,10 +132,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   const sessions = new Map();
   let closing = false;
   const resources = resourceUpdater || (resourceUpdates ? createResourceUpdater({ onEvent: ({ level, message }) => emit(null, level, message) }) : null);
-  // 手机号登录分两步：先认证并换游戏凭证，用户核对 openId 后再保存。
+  // 先认证并查询已有区服角色，用户选择具体角色后再保存凭证。
   // 密码只用于当次请求；待保存凭证和待选账号只放在内存，十分钟后清理。
   const pendingPhoneLogins = new Map();
+  const phonePreviewClients = new Set();
   const smsSendAt = new Map();
+  const smsPending = new Set();
   let phoneLoginBusy = false;
   const PHONE_PENDING_MS = 10 * 60 * 1000;
   const maskPhone = (value) => {
@@ -145,6 +147,124 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function prunePhonePending() {
     const cutoff = Date.now() - PHONE_PENDING_MS;
     for (const [id, entry] of pendingPhoneLogins) if (entry.createdAt < cutoff) pendingPhoneLogins.delete(id);
+  }
+  function phoneLoginStatus() {
+    const device = loadDeviceProfile();
+    const devicePath = path.resolve(process.env.CW_EWAN_DEVICE || DEVICE_PROFILE_PATH);
+    return {
+      deviceReady: Boolean(device),
+      devicePath,
+      deviceModel: device?.model ?? null,
+      deviceSource: device?.source ?? null,
+      deviceError: !device && fs.existsSync(devicePath) ? '设备档案无法读取或格式无效，请修复文件或重新导入。' : null,
+    };
+  }
+
+  async function readPhoneWorlds(credential) {
+    if (closing) throw new Error('控制台已关闭');
+    const session = sessions.get(credential.login.eworldParams.openId);
+    if (session?.connecting) await session.connecting.catch(() => {});
+    const activeClient = session?.client;
+    if (activeClient?.connected && !session.paused) {
+      const generation = session.generation;
+      return readJob(session, () => {
+        if (closing || session.client !== activeClient || !activeClient.connected || session.generation !== generation || session.paused) {
+          throw new Error('账号连接已变化，请重新读取角色列表');
+        }
+        return listWorlds(activeClient);
+      });
+    }
+    const client = new GameClient({ url: credential.url, protocol });
+    phonePreviewClients.add(client);
+    try {
+      // 只登录最近区服并查询列表，选择阶段不逐个进入其他区服。
+      await client.connect({ ...credential.login, worldId: 0 });
+      if (closing) throw new Error('控制台已关闭');
+      return await listWorlds(client);
+    } finally {
+      client.stop();
+      phonePreviewClients.delete(client);
+    }
+  }
+
+  async function readPhoneRoles(entry) {
+    try {
+      const worlds = await readPhoneWorlds(entry.credential);
+      const previous = new Map(entry.choices.map(choice => [choice.worldId, choice.id]));
+      const seen = new Set();
+      entry.choices = worlds.recentWorlds.filter(world => {
+        if (!uidText(world.role?.id) || !Number.isSafeInteger(world.worldId) || world.worldId <= 0 || seen.has(world.worldId)) return false;
+        seen.add(world.worldId);
+        return true;
+      }).map(world => ({ ...world, id: previous.get(world.worldId) || randomUUID() }));
+      entry.roleError = null;
+    } catch (error) {
+      entry.roleError = describeLogError(error.message || '角色列表读取失败，请重试').message;
+    }
+  }
+
+  function phonePreview(pending) {
+    const store = loadStore();
+    const choices = [];
+    const failures = [...pending.authenticationFailures];
+    const emptyAccounts = [];
+    for (const entry of pending.entries) {
+      const accountId = entry.credential.login.eworldParams.openId;
+      const existing = store.accounts.find(account => account.id === accountId);
+      if (entry.roleError) failures.push({ userName: entry.userName, error: entry.roleError, retryable: true });
+      else if (!entry.choices.length) emptyAccounts.push({ userName: entry.userName });
+      for (const choice of entry.choices) {
+        choices.push({
+          id: choice.id, accountId, userName: entry.userName,
+          nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
+          worldId: choice.worldId, worldName: choice.worldName,
+          roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
+          matched: Boolean(existing), existingTitle: existing ? describeAccount(existing).title : null,
+        });
+      }
+    }
+    return { ok: true, id: pending.id, phone: maskPhone(pending.phone), choices, failures, emptyAccounts,
+      linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
+  }
+
+  function savePhoneRole(pending, entry, choice) {
+    const openId = entry.credential.login.eworldParams.openId;
+    const session = sessions.get(openId);
+    const roleWorldId = choice.role.worldId || choice.worldId;
+    const previous = loadStore().accounts.find(account => account.id === openId);
+    const currentRoleId = uidText(session?.player?.playerId ?? session?.player?.id);
+    const selectedRoleId = uidText(choice.role.id);
+    const sameRole = currentRoleId && selectedRoleId ? currentRoleId === selectedRoleId
+      : toNumber(session?.player?.worldId) === roleWorldId
+        && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
+    if (session && !sameRole) {
+      requireProductionSync(session);
+      session.generation++;
+      stopLoop(session, '已选择其他角色，停止旧角色任务');
+      saveAutomation(session.id, { enabled: false });
+      session.stages.stop('已切换角色');
+      session.mutualAid.stop('已切换角色');
+      for (const task of session.trials.values()) task.stop('已切换角色');
+      session.client?.stop();
+      session.worldClient?.stop();
+      session.connecting = session.client = session.player = null;
+    }
+    const store = loadStore();
+    const existing = store.accounts.find(account => account.id === openId);
+    const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
+    const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || entry.userName;
+    const { account, created } = upsertAccount(store, credential, { label });
+    rememberSeen(account, { ...choice.role, worldId: roleWorldId });
+    setActive(store, account.id);
+    saveStore(store);
+    pendingPhoneLogins.delete(pending.id);
+    emit(null, 'info', `${created ? 'APP 登录已新增' : 'APP 登录已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
+    return {
+      ok: true,
+      account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) },
+      selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
+        roleWorldId, roleWorldName: choice.role.worldName || choice.worldName },
+    };
   }
   let logId = 0;
   trace(null, 'runtime', { startedAt: RUN_VERSION, node: process.version });
@@ -1590,10 +1710,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
 
       // ---- 手机号登录 ----
+      if (route === 'GET /api/accounts/phone-login/status') {
+        json(phoneLoginStatus());
+        return;
+      }
+      if (route === 'POST /api/accounts/phone-login/device') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        saveDeviceProfile(payload.profile);
+        json(phoneLoginStatus());
+        return;
+      }
       if (route === 'POST /api/accounts/phone-login') {
         const payload = jsonBody();
         needConfirm(payload);
-        if (phoneLoginBusy) throw new Error('已有手机号登录正在进行，请稍候');
+        if (phoneLoginBusy) throw new Error('已有 APP 登录正在进行，请稍候');
         phoneLoginBusy = true;
         try {
           prunePhonePending();
@@ -1603,28 +1734,59 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (!phone) throw new Error('请输入手机号或账号');
           if (!password && !code) throw new Error('请输入密码或短信验证码');
           const client = createPhoneLogin();
-          const result = password
-            ? await client.loginWithPassword(phone, password)
-            : await client.loginWithSms(phone, code);
-          const game = await client.gameLogin(result);
-          const credential = client.credential(game, { account: phone });
-          const openId = credential.login.eworldParams.openId;
-          const store = loadStore();
-          const existing = store.accounts.find((account) => account.id === openId);
-          const id = randomUUID();
-          pendingPhoneLogins.set(id, { credential, phone, createdAt: Date.now() });
-          json({
-            ok: true,
-            id,
-            openId,
-            uid: game.uid,
-            ucCode: 'ewan',
-            matched: Boolean(existing),
-            existingTitle: existing ? describeAccount(existing).title : null,
-            userName: result.ewan?.userName ?? null,
-            phone: maskPhone(phone),
-          });
+          const pending = { id: randomUUID(), phone, entries: [], authenticationFailures: [], linkedAccountCount: 1 };
+          async function addAccount(result) {
+            if (closing) throw new Error('控制台已关闭');
+            const game = await client.gameLogin(result);
+            const credential = client.credential(game, { account: phone });
+            const openId = credential.login.eworldParams.openId;
+            if (pending.entries.some(entry => entry.credential.login.eworldParams.openId === openId)) return;
+            const entry = { credential, userName: result.ewan?.userName || result.selectedAccount?.userName || maskPhone(phone), choices: [], roleError: null };
+            pending.entries.push(entry);
+            await readPhoneRoles(entry);
+          }
+          if (password) {
+            await addAccount(await client.loginWithPassword(phone, password));
+          } else {
+            const verified = await client.verifySmsAccounts(phone, code);
+            pending.linkedAccountCount = verified.accounts.length;
+            for (const selected of verified.accounts) {
+              if (closing) throw new Error('控制台已关闭');
+              try {
+                await addAccount(await client.loginSmsAccount(verified, selected));
+              } catch (error) {
+                pending.authenticationFailures.push({ userName: selected?.userName || selected?.username || '关联 APP 账号',
+                  error: error.message || '该账号认证失败，请重新登录', retryable: false });
+              }
+            }
+          }
+          if (closing) throw new Error('控制台已关闭');
+          pending.createdAt = Date.now();
+          pendingPhoneLogins.set(pending.id, pending);
+          json(phonePreview(pending));
         } finally {
+          phoneLoginBusy = false;
+        }
+        return;
+      }
+      if (route === 'POST /api/accounts/phone-login/roles') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (phoneLoginBusy) throw new Error('已有 APP 登录正在进行，请稍候');
+        prunePhonePending();
+        const pending = pendingPhoneLogins.get(String(payload.id ?? ''));
+        if (!pending) throw new Error('登录结果已过期，请重新登录');
+        if (pending.busy) throw new Error('正在处理此登录结果，请稍候');
+        pending.busy = true;
+        phoneLoginBusy = true;
+        try {
+          for (const entry of pending.entries) if (entry.roleError) await readPhoneRoles(entry);
+          if (pendingPhoneLogins.get(pending.id) !== pending || Date.now() - pending.createdAt >= PHONE_PENDING_MS) {
+            throw new Error('登录结果已过期，请重新登录');
+          }
+          json(phonePreview(pending));
+        } finally {
+          pending.busy = false;
           phoneLoginBusy = false;
         }
         return;
@@ -1634,12 +1796,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         const phone = String(payload.phone ?? '').trim();
         if (!/^1[3-9]\d{9}$/.test(phone)) throw new Error('手机号格式不正确');
+        if (smsPending.has(phone)) throw new Error('正在发送验证码，请稍候');
         const last = smsSendAt.get(phone) ?? 0;
         if (Date.now() - last < 60000) throw new Error('验证码已发送，请 60 秒后再试');
-        const client = createPhoneLogin();
-        const result = await client.requestSmsCode(phone);
-        smsSendAt.set(phone, Date.now());
-        json({ ok: true, validatecode: result?.validatecode ?? '', cooldown: 60 });
+        smsPending.add(phone);
+        try {
+          const client = createPhoneLogin();
+          const result = await client.requestSmsCode(phone);
+          smsSendAt.set(phone, Date.now());
+          json({ ok: true, validatecode: result?.validatecode ?? '', cooldown: 60 });
+        } finally {
+          smsPending.delete(phone);
+        }
         return;
       }
       if (route === 'POST /api/accounts/phone-login/save') {
@@ -1648,17 +1816,26 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         prunePhonePending();
         const pending = pendingPhoneLogins.get(String(payload.id ?? ''));
         if (!pending) throw new Error('登录结果已过期，请重新登录');
-        const store = loadStore();
-        const openId = pending.credential.login.eworldParams.openId;
-        const existing = store.accounts.find((account) => account.id === openId);
-        const { account, created } = upsertAccount(store, pending.credential, {
-          label: existing?.label ?? (/^1\d{10}$/.test(pending.phone) ? `手机 ${maskPhone(pending.phone)}` : pending.phone),
-        });
-        setActive(store, account.id);
-        saveStore(store);
-        pendingPhoneLogins.delete(String(payload.id));
-        emit(null, 'info', `${created ? '手机号登录已新增' : '手机号登录已更新'}账号 ${describeAccount(account).title}`);
-        json({ ok: true, account: describeAccount(account, { active: true }) });
+        if (pending.busy) throw new Error('正在处理此登录结果，请稍候');
+        const available = pending.entries.flatMap(entry => entry.choices.map(choice => ({ entry, choice })));
+        const selected = payload.choiceId
+          ? available.find(item => item.choice.id === String(payload.choiceId))
+          : available.length === 1 ? available[0] : null;
+        if (!selected) throw new Error('请选择列表中的区服和角色后再保存');
+        pending.busy = true;
+        try {
+          const session = sessions.get(selected.entry.credential.login.eworldParams.openId);
+          const save = () => {
+            if (closing) throw new Error('控制台已关闭');
+            if (pendingPhoneLogins.get(pending.id) !== pending || Date.now() - pending.createdAt >= PHONE_PENDING_MS) {
+              throw new Error('登录结果已过期，请重新登录');
+            }
+            return savePhoneRole(pending, selected.entry, selected.choice);
+          };
+          json(session && !session.paused ? await enqueue(session, save) : save());
+        } finally {
+          pending.busy = false;
+        }
         return;
       }
       if (route === 'POST /api/accounts/phone-login/cancel') {
@@ -2859,6 +3036,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     close: async () => {
       closing = true;
+      for (const client of phonePreviewClients) client.stop();
+      phonePreviewClients.clear();
+      pendingPhoneLogins.clear();
       await resources?.stop();
       for (const stream of streams) stream.destroy();
       streams.clear();

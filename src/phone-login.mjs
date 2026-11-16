@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './accounts.mjs';
+import { atomicJson, withFileLock } from './json-store.mjs';
 
 // 手机号/账号密码登录实际走益世界 ewan 账号 SDK：
 //   http://loginsdk.ewan.cn/login      账号密码
@@ -9,80 +10,138 @@ import { DATA_DIR } from './accounts.mjs';
 // 请求体是 URL 编码表单，再做 AES-128-ECB/PKCS7，密钥来自 SDK 字符串。
 // 响应同样是 AES 密文，解密后是 JSON。
 export const PHONE_LOGIN = {
+  initUrl: 'https://duoinitsdk.ewan.cn/weplay',
   loginUrl: 'http://loginsdk.ewan.cn/login',
   accountUrl: 'http://duoaccountsdk.ewan.cn/account',
   gateway: 'wss://dhyaoj-gate.khlgamen.com:443/ws',
   businessBase: 'https://api.gzxianc.com',
   business: {
-    appId: '14021105',
-    packetId: '50001889',
+    appId: '14021102',
+    packetId: '50001883',
     channelId: '17001784',
-    signKey: '6d16b907a941e3Fa',
-    bai: 14021105,
+    signKey: '38F569705009ac46',
+    bai: 14021102,
     bci: 17001784,
     sst: 1,
-    appVersion: '1.11.6',
-    clientVersion: '1.11.6.480',
-    packageName: 'com.gx.sw.qd.mi',
+    appVersion: '1.9.5',
+    clientVersion: '1.9.4.434',
+    packageName: 'com.gx.sw.qa.fkssj003.esj',
     appName: '疯狂水世界',
+    sdkVersion: '100800',
   },
   aesKey: 'cwQ52wanEJkW56Xc',
-  appId: '56000005',
-  superAppId: '14021105',
+  appId: '56000002',
+  superAppId: '14021102',
   channel: '17001784',
-  packetId: '261390',
-  appVersion: '1.11.6',
-  appVersionCode: '356',
-  clientVersion: '1.11.6.480',
-  packageName: 'com.gx.sw.qd.mi',
+  packetId: '259237',
+  appVersion: '1.9.5',
+  appVersionCode: '444',
+  clientVersion: '1.9.4.434',
+  packageName: 'com.gx.sw.qa.fkssj003.esj',
   appName: '疯狂水世界',
-  deviceModel: 'Xiaomi M2102K1AC',
-  sdkVersion: '6633',
+  deviceModel: 'vivo V2284A',
+  sdkVersion: '6620',
   pluginVersion: '354',
   gatewayPlatform: '1',
+  gatewayClientVersion: '1.12.11',
 };
 
 export const DEVICE_PROFILE_PATH = path.join(DATA_DIR, 'ewan-device.json');
 
-// ewan 账号登录会把 di/oi/devicecode 当作设备身份；换一组新值会返回
-// “用户名或密码错误”。优先复用 APP 抓到的设备档案，没有时再随机生成。
+// SDK 把 Android ID 和 OAID 分别用当前 API 的 AES 密钥加密，得到 di / oi。
+// 登录接口使用 PHONE_LOGIN.aesKey。模拟 Android ID 必须持久化并跨请求复用。
 export function loadDeviceProfile(file = process.env.CW_EWAN_DEVICE || DEVICE_PROFILE_PATH) {
   try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (!/^[0-9a-f]{64}$/i.test(raw?.di ?? '')) return null;
-    const di = raw.di.toLowerCase();
-    const oi = /^[0-9a-f]{32}$/i.test(raw?.oi ?? '') ? raw.oi.toLowerCase() : di.slice(32);
-    return {
-      di,
-      oi,
-      deviceCode: String(raw.deviceCode ?? '').toLowerCase(),
-      businessDid: String(raw.businessDid ?? raw.business_did ?? ''),
-      businessDeviceCode: String(raw.businessDeviceCode ?? raw.business_devicecode ?? ''),
-      model: raw.model || PHONE_LOGIN.deviceModel,
-      sysVersion: raw.sysVersion || '12',
-      traceId: raw.traceId || null,
-    };
+    return normalizeDeviceProfile(JSON.parse(fs.readFileSync(file, 'utf8')));
   } catch {
     return null;
   }
 }
 
-export function saveDeviceProfile(profile, file = process.env.CW_EWAN_DEVICE || DEVICE_PROFILE_PATH) {
-  if (!/^[0-9a-f]{64}$/i.test(profile?.di ?? '')) throw new Error('设备档案 di 必须是 64 位十六进制');
+function normalizeDeviceProfile(profile) {
+  if (typeof profile?.di !== 'string' || !/^[0-9a-f]{64}$/i.test(profile.di)) {
+    throw new Error('设备档案 di 必须是 64 位十六进制');
+  }
   const di = profile.di.toLowerCase();
-  const data = {
+  const oi = profile.oi ?? encryptForm('');
+  if (typeof oi !== 'string' || !/^(?:[0-9a-f]{32})+$/i.test(oi)) {
+    throw new Error('设备档案 oi 必须是长度为 32 倍数的十六进制密文，也可以省略以使用空 OAID');
+  }
+  if (typeof profile.deviceCode !== 'string' || !/^[0-9a-f]{16}$/i.test(profile.deviceCode)) {
+    throw new Error('设备档案 deviceCode 必须是 16 位十六进制');
+  }
+  return {
     di,
-    oi: /^[0-9a-f]{32}$/i.test(profile.oi ?? '') ? profile.oi.toLowerCase() : di.slice(32),
-    deviceCode: String(profile.deviceCode ?? '').toLowerCase(),
-    businessDid: String(profile.businessDid ?? ''),
-    businessDeviceCode: String(profile.businessDeviceCode ?? ''),
-    model: profile.model || PHONE_LOGIN.deviceModel,
-    sysVersion: profile.sysVersion || '12',
-    traceId: profile.traceId || null,
+    oi: oi.toLowerCase(),
+    deviceCode: profile.deviceCode.toLowerCase(),
+    businessDid: String(profile.businessDid ?? profile.business_did ?? ''),
+    businessDeviceCode: String(profile.businessDeviceCode ?? profile.business_devicecode ?? ''),
+    model: String(profile.model || PHONE_LOGIN.deviceModel),
+    sysVersion: String(profile.sysVersion || '12'),
+    traceId: profile.traceId ? String(profile.traceId) : null,
+    source: profile.source === 'generated' ? 'generated' : 'imported',
   };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
-  return data;
+}
+
+function completeDeviceProfile(profile, randomBytes = crypto.randomBytes) {
+  return {
+    ...profile,
+    businessDid: profile.businessDid || randomBytes(16).toString('hex').toUpperCase(),
+    businessDeviceCode: profile.businessDeviceCode || profile.deviceCode,
+  };
+}
+
+function generateDeviceProfile(randomBytes) {
+  const deviceCode = randomBytes(8).toString('hex');
+  return completeDeviceProfile(normalizeDeviceProfile({
+    di: encryptForm(deviceCode),
+    deviceCode,
+    source: 'generated',
+  }), randomBytes);
+}
+
+export function ensureDeviceProfile({
+  file = process.env.CW_EWAN_DEVICE || DEVICE_PROFILE_PATH,
+  randomBytes = crypto.randomBytes,
+} = {}) {
+  return withFileLock(file, () => {
+    let stored;
+    try {
+      stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw new Error('设备档案无法读取，请修复文件或在登录页重新导入', { cause: error });
+      }
+      const generated = generateDeviceProfile(randomBytes);
+      atomicJson(file, generated);
+      return generated;
+    }
+    let profile;
+    try {
+      profile = completeDeviceProfile(normalizeDeviceProfile(stored), randomBytes);
+    } catch (error) {
+      throw new Error('设备档案格式无效，请修复文件或在登录页重新导入', { cause: error });
+    }
+    if (profile.source === 'generated') {
+      // 修复旧版本随机填充的密文，同时沿用已经保存的 Android ID 和业务身份。
+      profile.di = encryptForm(profile.deviceCode);
+      profile.oi = encryptForm('');
+    }
+    if (!stored.businessDid || !stored.businessDeviceCode || stored.source !== profile.source
+      || stored.di !== profile.di || stored.oi !== profile.oi) {
+      atomicJson(file, profile);
+    }
+    return profile;
+  });
+}
+
+export function saveDeviceProfile(profile, file = process.env.CW_EWAN_DEVICE || DEVICE_PROFILE_PATH) {
+  const normalized = normalizeDeviceProfile(profile);
+  return withFileLock(file, () => {
+    const data = completeDeviceProfile({ ...normalized, source: 'imported' });
+    atomicJson(file, data);
+    return data;
+  });
 }
 
 export class PhoneLoginError extends Error {
@@ -105,7 +164,7 @@ function sortedQuery(values) {
 
 function businessSign(initKey, clientKey, body, query, header) {
   const bodyText = body === '{}' ? '' : body;
-  return md5(`wltyx$${initKey}${clientKey}@${bodyText}$${sortedQuery(query)}##${sortedQuery(header)}`);
+  return md5(`lyxpj^${sortedQuery(header)}@@${sortedQuery(query)}@${bodyText}&${clientKey}${initKey}`);
 }
 
 function assertBusinessOk(payload, fallback) {
@@ -155,21 +214,30 @@ export function createPhoneLogin({
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('当前 Node.js 没有可用的 fetch');
 
-  const profile = suppliedDevice ?? loadDeviceProfile();
-  const di = profile?.di || randomBytes(32).toString('hex');
+  const profile = suppliedDevice ?? ensureDeviceProfile({ randomBytes });
+  const deviceCode = profile.deviceCode || randomBytes(8).toString('hex');
+  const di = profile.di || encryptForm(deviceCode, PHONE_LOGIN.aesKey);
   const device = {
     di,
-    oi: profile?.oi || di.slice(32),
-    deviceCode: profile?.deviceCode || randomBytes(8).toString('hex'),
-    traceId: profile?.traceId || Buffer.from(encodeURIComponent(JSON.stringify({ click_id: '' })), 'utf8').toString('base64'),
-    model: profile?.model || PHONE_LOGIN.deviceModel,
-    sysVersion: profile?.sysVersion || '12',
-    businessDid: profile?.businessDid || randomBytes(16).toString('hex').toUpperCase(),
-    businessDeviceCode: profile?.businessDeviceCode || profile?.deviceCode || randomBytes(8).toString('hex'),
+    oi: profile.oi || encryptForm('', PHONE_LOGIN.aesKey),
+    deviceCode,
+    model: profile.model || PHONE_LOGIN.deviceModel,
+    sysVersion: profile.sysVersion || '12',
+    businessDid: profile.businessDid || randomBytes(16).toString('hex').toUpperCase(),
+    businessDeviceCode: profile.businessDeviceCode || deviceCode,
   };
   device.clientSignKey = md5(device.businessDid + now());
   device.initId = '';
   device.channel = null;
+  const sdk = {
+    key: PHONE_LOGIN.aesKey,
+    loginUrl: PHONE_LOGIN.loginUrl,
+    accountUrl: PHONE_LOGIN.accountUrl,
+    di: device.di,
+    oi: device.oi,
+  };
+  let businessInitPromise = null;
+  let sdkInitPromise = null;
 
   function baseFields() {
     return {
@@ -206,23 +274,23 @@ export function createPhoneLogin({
       superappid: PHONE_LOGIN.superAppId,
       sysversion: device.sysVersion,
       targetsdkversion: '30',
-      traceId: device.traceId,
-      tt_channel_id: PHONE_LOGIN.packetId,
-      tt_channel_sdk_v: '1.1.0',
       userpoint: '0',
     };
   }
 
   function form(fields) {
-    return Object.entries(fields).map(([key, value]) => `${key}=${encodeURIComponent(value ?? '')}`).join('&');
+    return new URLSearchParams(Object.entries(fields).map(([key, value]) => [key, value ?? ''])).toString();
   }
 
-  async function request(url, fields) {
+  async function request(url, fields, { key = sdk.key, headers = {} } = {}) {
     const body = form(fields);
+    const signal = AbortSignal.timeout(15000);
     let response;
+    let text;
     try {
       response = await fetchImpl(url, {
         method: 'POST',
+        signal,
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           Charset: 'UTF-8',
@@ -230,25 +298,32 @@ export function createPhoneLogin({
           ai: PHONE_LOGIN.appId,
           pi: PHONE_LOGIN.packetId,
           cv: PHONE_LOGIN.sdkVersion,
-          di: device.di,
-          oi: device.oi,
+          di: sdk.di,
+          oi: sdk.oi,
           pf: '1',
           rdt: '',
+          ...headers,
         },
-        body: encryptForm(body),
+        body: encryptForm(body, key),
       });
+      text = await response.text();
     } catch (error) {
+      if (signal.aborted || error.name === 'TimeoutError') {
+        throw new PhoneLoginError('登录服务响应超时，请稍后重试', { cause: error });
+      }
       throw new PhoneLoginError(`登录服务连接失败：${error.message}`, { cause: error });
     }
-    const text = await response.text();
     let payload;
     try {
-      payload = JSON.parse(decryptBody(text));
+      payload = JSON.parse(decryptBody(text, key));
     } catch (error) {
       throw new PhoneLoginError(`登录响应无法解密（HTTP ${response.status}）`, { cause: error });
     }
     if (payload?.status !== 200 || payload?.error) {
-      const message = payload?.errorMsg || payload?.msg || `登录失败（status=${payload?.status ?? '?'}）`;
+      let message = payload?.errorMsg || payload?.msg || `登录失败（status=${payload?.status ?? '?'}）`;
+      if (fields.protocol === '100003') {
+        message += '。请核对账号信息，并确认游戏 APP 中可以正常登录。';
+      }
       throw new PhoneLoginError(message, { code: payload?.error ?? null, status: payload?.status ?? null });
     }
     return payload;
@@ -275,7 +350,8 @@ export function createPhoneLogin({
 
   async function loginWithPassword(account, password) {
     if (!account || !password) throw new PhoneLoginError('手机号/账号和密码都不能为空');
-    const payload = await request(PHONE_LOGIN.loginUrl, {
+    await ensureSdkInitialized();
+    const payload = await request(sdk.loginUrl, {
       ...baseFields(),
       protocol: '100003',
       username: String(account),
@@ -296,7 +372,8 @@ export function createPhoneLogin({
   async function requestSmsCode(phone) {
     const number = String(phone ?? '').trim();
     if (!/^1[3-9]\d{9}$/.test(number)) throw new PhoneLoginError('手机号格式不正确');
-    const payload = await request(PHONE_LOGIN.accountUrl, {
+    await ensureSdkInitialized();
+    const payload = await request(sdk.accountUrl, {
       ...baseFields(),
       protocol: '100015',
       phone: number,
@@ -308,14 +385,15 @@ export function createPhoneLogin({
     return payload;
   }
 
-  async function loginWithSms(phone, code) {
+  async function verifySmsAccounts(phone, code) {
     const number = String(phone ?? '').trim();
     const vcode = String(code ?? '').trim();
     if (!/^1[3-9]\d{9}$/.test(number)) throw new PhoneLoginError('手机号格式不正确');
     if (!/^\d{4,8}$/.test(vcode)) throw new PhoneLoginError('请输入短信验证码');
+    await ensureSdkInitialized();
 
     // 420012 只校验验证码并返回手机号关联的账号列表，不是最终登录。
-    const checked = await request(PHONE_LOGIN.loginUrl, {
+    const checked = await request(sdk.loginUrl, {
       ...baseFields(),
       protocol: '420012',
       phone: number,
@@ -325,12 +403,20 @@ export function createPhoneLogin({
     });
     const accounts = Array.isArray(checked?.userAccount) ? checked.userAccount : [];
     if (!accounts.length) throw new PhoneLoginError('验证码校验成功，但这个手机号没有关联账号');
-    const selected = accounts[0];
+    return { account: number, code: vcode, accounts };
+  }
+
+  async function loginSmsAccount(verified, selected) {
+    if (!Array.isArray(verified?.accounts) || !verified.accounts.includes(selected)) {
+      throw new PhoneLoginError('请选择本次短信验证返回的 APP 账号');
+    }
+    const { account: number, code: vcode, accounts } = verified;
     const multiAccountToken = selected?.multiAccountToken;
-    if (!multiAccountToken) throw new PhoneLoginError('验证码校验成功，但没有返回 multiAccountToken');
+    if (!multiAccountToken) throw new PhoneLoginError('此 APP 账号缺少短信登录凭证，请重新获取验证码后重试');
+    await ensureSdkInitialized();
 
     // 420007 用 multiAccountToken 完成最终登录。
-    const payload = await request(PHONE_LOGIN.loginUrl, {
+    const payload = await request(sdk.loginUrl, {
       ...baseFields(),
       protocol: '420007',
       phone: number,
@@ -351,6 +437,11 @@ export function createPhoneLogin({
     };
   }
 
+  async function loginWithSms(phone, code) {
+    const verified = await verifySmsAccounts(phone, code);
+    return loginSmsAccount(verified, verified.accounts[0]);
+  }
+
   function candidateUids(result) {
     const values = [result?.ewan?.openId, result?.ewan?.userName, result?.account];
     return [...new Set(values.filter(Boolean).map(String))];
@@ -363,23 +454,21 @@ export function createPhoneLogin({
       sign: '',
       ts: now().toString(),
       nonce,
-      initId: device.initId || nonce,
       reqId: nonce,
       apiVersion: 200,
       bai: config.bai,
       bci: config.bci,
-      rpf: '31',
-      openId: '',
       did: device.businessDid,
       dc: device.businessDeviceCode,
       sst: config.sst,
       ...queryExtra,
     };
+    if (device.initId) query.initId = device.initId;
     const header = {
       ai: config.appId,
       pi: config.packetId,
       ci: config.channelId,
-      cv: '101200',
+      cv: config.sdkVersion,
       fv: '',
       token: '',
       pf: '1',
@@ -388,26 +477,44 @@ export function createPhoneLogin({
     const bodyText = JSON.stringify(body);
     query.sign = businessSign(config.signKey, device.clientSignKey, bodyText, query, header);
     const url = `${PHONE_LOGIN.businessBase}/api${path}?${sortedQuery(query)}`;
+    const signal = AbortSignal.timeout(15000);
     let response;
     try {
       response = await fetchImpl(url, {
         method,
+        signal,
         headers: { 'content-type': 'application/json;charset=utf-8', ...header },
         body: method === 'GET' ? undefined : bodyText,
       });
     } catch (error) {
+      if (signal.aborted || error.name === 'TimeoutError') {
+        throw new PhoneLoginError('游戏登录服务响应超时，请稍后重试', { cause: error });
+      }
       throw new PhoneLoginError(`游戏登录服务连接失败：${error.message}`, { cause: error });
     }
     let payload;
     try {
       payload = await response.json();
     } catch (error) {
+      if (signal.aborted || error.name === 'TimeoutError') {
+        throw new PhoneLoginError('游戏登录服务响应超时，请稍后重试', { cause: error });
+      }
       throw new PhoneLoginError(`游戏登录服务返回了无法解析的内容（HTTP ${response.status}）`, { cause: error });
     }
     return assertBusinessOk(payload, `游戏登录服务请求失败（HTTP ${response.status}）`);
   }
 
-  async function businessInit() {
+  function businessInit() {
+    if (!businessInitPromise) {
+      businessInitPromise = initializeBusiness().catch((error) => {
+        businessInitPromise = null;
+        throw error;
+      });
+    }
+    return businessInitPromise;
+  }
+
+  async function initializeBusiness() {
     const config = PHONE_LOGIN.business;
     const publicInfo = await businessRequest('/public/info', {
       method: 'GET',
@@ -443,9 +550,65 @@ export function createPhoneLogin({
         appName: config.appName,
       },
     });
+    if (typeof init?.channel?.appKey !== 'string' || !init.channel.appKey.trim()) {
+      throw new PhoneLoginError('游戏初始化没有返回账号 SDK 密钥，请稍后重试');
+    }
     device.initId = init?.initId ?? '';
     device.channel = init?.channel ?? null;
     return init;
+  }
+
+  function sdkUrl(value, fallback) {
+    if (typeof value !== 'string') return fallback;
+    try {
+      const url = new URL(value);
+      if (['http:', 'https:'].includes(url.protocol)
+        && (url.hostname === 'ewan.cn' || url.hostname.endsWith('.ewan.cn'))
+        && !url.username && !url.password) return url.href;
+    } catch {}
+    return fallback;
+  }
+
+  function ensureSdkInitialized() {
+    if (!sdkInitPromise) {
+      sdkInitPromise = initializeSdk().catch((error) => {
+        sdkInitPromise = null;
+        throw error;
+      });
+    }
+    return sdkInitPromise;
+  }
+
+  async function initializeSdk() {
+    let oaid;
+    try {
+      oaid = decryptBody(device.oi, PHONE_LOGIN.aesKey);
+    } catch (error) {
+      throw new PhoneLoginError('设备档案 oi 无法解密，请重新导入设备档案', { cause: error });
+    }
+    const init = await businessInit();
+    const initKey = md5(init.channel.appKey).slice(8, 24);
+    const fields = baseFields();
+    delete fields.appserverid;
+    delete fields.userpoint;
+    fields.protocol = '400008';
+    fields.sign = md5(`${PHONE_LOGIN.appId}|${init.channel.appKey}`);
+    const initialized = await request(`${PHONE_LOGIN.initUrl}?requestid=${PHONE_LOGIN.appId}`, fields, {
+      key: initKey,
+      headers: {
+        di: encryptForm(device.deviceCode, initKey),
+        oi: encryptForm(oaid, initKey),
+      },
+    });
+    if (typeof initialized.k === 'string' && Buffer.byteLength(initialized.k, 'utf8') === 16) {
+      sdk.key = initialized.k;
+    }
+    sdk.loginUrl = sdkUrl(initialized.loginurl, PHONE_LOGIN.loginUrl);
+    sdk.accountUrl = sdkUrl(initialized.accounturl, PHONE_LOGIN.accountUrl);
+    if (sdk.key !== PHONE_LOGIN.aesKey) {
+      sdk.di = encryptForm(device.deviceCode, sdk.key);
+      sdk.oi = encryptForm(oaid, sdk.key);
+    }
   }
 
   async function businessLogin(ewan) {
@@ -481,7 +644,7 @@ export function createPhoneLogin({
       const detail = Object.keys(summary).length ? `；响应: ${JSON.stringify(summary).slice(0, 500)}` : '';
       throw new PhoneLoginError(`登录响应没有完整游戏凭证（字段: ${keys || '空'}${detail}）`);
     }
-    if (!device.initId) await businessInit();
+    await businessInit();
     const business = await businessLogin(ewan);
     const data = {
       openId: business?.openId,
@@ -524,7 +687,7 @@ export function createPhoneLogin({
         eworldClientInfo: {
           appId: PHONE_LOGIN.superAppId,
           channelId: PHONE_LOGIN.channel,
-          clientVersion: '1.12.9',
+          clientVersion: PHONE_LOGIN.gatewayClientVersion,
           networkType: 'Wifi',
           platform: PHONE_LOGIN.gatewayPlatform,
           did: game.did,
@@ -548,6 +711,8 @@ export function createPhoneLogin({
     device,
     loginWithPassword,
     loginWithSms,
+    verifySmsAccounts,
+    loginSmsAccount,
     requestSmsCode,
     candidateUids,
     gameLogin,

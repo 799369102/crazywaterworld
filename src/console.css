@@ -236,6 +236,32 @@ label:is([for=source-query],[for=gift-code-input]) { display:block; margin-botto
 .qr { display:flex; align-items:flex-start; flex-wrap:wrap; gap:16px }
 .qr img,.qr svg { max-width:100%; width:200px }
 .steps { padding-left:20px }
+.phone-step { margin-block:12px 20px; font-size:14px; font-weight:500 }
+.phone-layout { display:grid; grid-template-columns:minmax(0,440px) minmax(0,1fr); gap:24px 48px; align-items:start }
+.phone-tabs { margin-bottom:20px }
+.phone-form { display:grid; gap:18px }
+.phone-form input { width:100% }
+.phone-form>button { justify-self:start }
+.phone-input-action { display:flex; gap:8px; align-items:center }
+.phone-input-action input { flex:1; min-width:0 }
+.phone-help { display:grid; gap:12px; min-width:0 }
+.phone-help details .choice-field { margin-block:12px }
+.phone-help p { overflow-wrap:anywhere }
+.phone-feedback:not(:empty) { margin-block:16px 0; font-size:14px }
+#phone-preview,#phone-success { display:grid; gap:12px }
+#phone-preview h3,#phone-success h3 { font-weight:600 }
+#phone-preview .bar { margin:0 }
+#phone-result { display:grid; gap:12px }
+.phone-roles { display:grid; gap:10px; min-width:0 }
+.phone-roles legend { margin-bottom:8px; font-size:14px }
+.phone-role { display:flex; align-items:flex-start; gap:10px; padding:14px; min-width:0; cursor:pointer }
+.phone-role input { margin-top:4px; flex:none }
+.phone-role-info { display:grid; gap:6px; min-width:0; font-weight:400 }
+.phone-role-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 12px }
+.phone-role-info p,.phone-role-info strong { overflow-wrap:anywhere }
+.phone-role-failures { display:grid; gap:8px }
+#phone-success>button { justify-self:start }
+@container main (max-width:700px) { .phone-layout { grid-template-columns:minmax(0,1fr) } }
 .gift-accounts { border:1px solid var(--border); border-radius:calc(var(--radius) * 1.4); padding:12px 16px; margin:12px 0 }
 .gift-accounts legend { padding:0 6px; font-weight:500 }
 .gift-accounts p { margin:8px 0 0 }

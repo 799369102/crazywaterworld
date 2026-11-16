@@ -176,21 +176,60 @@ export function accountPage() {
     <div id="worlds"></div>
 
     </div></div></Panel>
-    <Panel title="手机号登录" help="使用益世界/APP 的账号密码或短信验证码登录。密码只用于本次请求，不保存。登录后先核对 openId 是否对应已有角色，再保存。">
-    <div className="bar">
-      <Input id="phone-account" placeholder="手机号或账号" autoComplete="username" />
-      <Input id="phone-password" type="password" placeholder="登录密码" autoComplete="current-password" />
-      <Button id="phone-login" variant="default">账号登录并预览</Button>
-      <Button id="phone-save" variant="outline" disabled>保存为账号</Button>
-      <span id="phone-hint" className="warn" role="status"></span>
-    </div>
-    <div className="bar">
-      <Input id="phone-code" placeholder="短信验证码" inputMode="numeric" autoComplete="one-time-code" />
-      <Button id="phone-send-code" variant="outline">发送验证码</Button>
-      <Button id="phone-sms-login" variant="default">验证码登录并预览</Button>
-    </div>
-    <div id="phone-result"></div>
-</Panel>
+    <Panel title="APP 账号登录">
+      <p className="dim">使用《疯狂水世界》益世界 APP 的账号。微信、抖音小游戏角色请使用下方对应的添加入口。</p>
+      <p id="phone-step" className="phone-step" role="status">登录验证 → 选择区服和角色 → 保存并切换</p>
+      <div className="phone-layout">
+        <div id="phone-flow">
+          <div id="phone-entry">
+            <div className="config-subtabs phone-tabs" role="tablist" aria-label="APP 登录方式">
+              <button type="button" id="phone-password-tab" role="tab" aria-selected="true" aria-controls="phone-password-panel">账号密码</button>
+              <button type="button" id="phone-sms-tab" role="tab" aria-selected="false" aria-controls="phone-sms-panel" tabIndex={-1}>短信验证码</button>
+            </div>
+            <form id="phone-password-panel" className="phone-form" role="tabpanel" aria-labelledby="phone-password-tab" noValidate>
+              <div className="choice-field"><label htmlFor="phone-account">APP 账号或绑定手机号</label><Input id="phone-account" name="username" placeholder="输入益世界账号或手机号" autoComplete="username" aria-describedby="phone-hint" /></div>
+              <div className="choice-field"><label htmlFor="phone-password">APP 登录密码</label><div className="phone-input-action"><Input id="phone-password" name="password" type="password" placeholder="输入 APP 的登录密码" autoComplete="current-password" aria-describedby="phone-password-help phone-hint" /><Button id="phone-password-toggle" type="button" variant="outline" aria-label="显示密码" aria-pressed="false">显示</Button></div><p id="phone-password-help" className="dim">忘记密码可切换短信验证码，或在游戏 APP 中找回。</p></div>
+              <Button id="phone-login" type="submit">登录并读取角色</Button>
+            </form>
+            <form id="phone-sms-panel" className="phone-form" role="tabpanel" aria-labelledby="phone-sms-tab" noValidate hidden>
+              <div className="choice-field"><label htmlFor="phone-number">APP 绑定手机号</label><Input id="phone-number" name="tel" type="tel" placeholder="输入 11 位大陆手机号" inputMode="tel" autoComplete="tel-national" aria-describedby="phone-sms-help phone-hint" /></div>
+              <div className="choice-field"><label htmlFor="phone-code">短信验证码</label><div className="phone-input-action"><Input id="phone-code" name="code" placeholder="输入收到的验证码" inputMode="numeric" autoComplete="one-time-code" aria-describedby="phone-sms-help phone-hint" /><Button id="phone-send-code" type="button" variant="outline">获取验证码</Button></div><p id="phone-sms-help" className="dim">先获取验证码，再填写短信中的验证码登录。</p></div>
+              <Button id="phone-sms-login" type="submit">验证并读取角色</Button>
+            </form>
+          </div>
+          <p id="phone-hint" className="phone-feedback" role="status" aria-live="polite" aria-atomic="true" />
+          <section id="phone-preview" aria-labelledby="phone-preview-title" hidden>
+            <h3 id="phone-preview-title" tabIndex={-1}>选择区服和游戏角色</h3>
+            <div id="phone-result" />
+            <p id="phone-selection" className="dim" role="status">请选择要使用的角色。</p>
+            <p id="phone-expiry" className="dim" />
+            <div className="bar"><Button id="phone-save" type="button" disabled>保存所选角色</Button><Button id="phone-roles-retry" type="button" variant="outline" hidden>重试读取失败的账号</Button><Button id="phone-back" type="button" variant="outline">返回修改</Button></div>
+          </section>
+          <section id="phone-success" aria-labelledby="phone-success-title" hidden>
+            <h3 id="phone-success-title" tabIndex={-1}>账号已保存</h3>
+            <p id="phone-saved-account" />
+            <p id="phone-success-next" className="dim">点击页面顶部的「连接」进入所选角色，随后可前往「挂机」设置任务。</p>
+            <Button id="phone-add-another" type="button" variant="outline">继续添加账号</Button>
+          </section>
+        </div>
+        <aside className="phone-help" aria-label="APP 登录准备">
+          <strong>首次使用</strong>
+          <p className="dim">先在游戏 APP 中确认账号和角色所属区服。APP 与小游戏的角色可能属于不同渠道。</p>
+          <p id="phone-device-status" role="status">正在检查本机设备档案…</p>
+          <details id="phone-device-details">
+            <summary>高级选项 · 导入设备档案</summary>
+            <p className="dim">已有 APP 设备档案可在此导入，用于兼容性排查。</p>
+            <p className="dim">档案需包含 di 和 deviceCode，oi 可自动补全。保存后会在后续登录中复用。</p>
+            <div className="choice-field"><label htmlFor="phone-device-file">导入设备档案 JSON</label><Input id="phone-device-file" type="file" accept=".json,application/json" /></div>
+            <p id="phone-device-path" className="dim" />
+            <Button id="phone-device-refresh" type="button" variant="outline" size="sm">重新检查</Button>
+          </details>
+          <p id="phone-device-hint" className="phone-feedback" role="status" aria-live="polite" />
+          <p className="dim">读取角色列表会短暂登录游戏，可能让当前游戏客户端下线。首次进入的 APP 账号按游戏规则分配角色。</p>
+          <p className="dim">密码和验证码仅用于本次验证。保存后，控制台会使用所选角色的区服连接游戏。</p>
+        </aside>
+      </div>
+    </Panel>
     <Panel title="添加账号">
     <div className="bar">
       <Button id="cap-start" variant="default">从电脑微信添加</Button>

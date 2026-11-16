@@ -1,6 +1,7 @@
 import { GameClient } from './client.mjs';
 import { toNumber } from './client.mjs';
 import { worldName } from './world-name.mjs';
+import { uidText } from './hero-equipment.mjs';
 
 // The gateway is not world-scoped: one socket serves the whole account, and the world
 // is chosen by LoginRequest.worldId (0 means "wherever this account last was"). So both
@@ -24,8 +25,9 @@ export function normalize(value) {
 export function describeRole(info) {
   if (!info) return null;
   const role = normalize(info);
+  const exactId = uidText(info.id ?? info.playerId);
   return {
-    id: role.id ?? role.playerId,
+    id: exactId && !Number.isSafeInteger(Number(exactId)) ? exactId : role.id ?? role.playerId,
     nickname: role.nickname,
     level: role.level,
     power: role.power,
@@ -46,22 +48,22 @@ export function describeRole(info) {
 // world merge the two differ, and the server resolves the requested key to the successor.
 export function describeWorld(world) {
   const value = normalize(world);
-  return { worldId: value.worldId, worldName: worldName(value.worldId), tag: value.tag, role: describeRole(value.roleInfo) };
+  return { worldId: value.worldId, worldName: worldName(value.worldId), tag: value.tag, role: describeRole(world.roleInfo) };
 }
 
 // Pure query. Returns the worlds this account has roles on, which is exactly what the
 // game's server-select screen renders.
 export async function listWorlds(client, timeout = 10000) {
-  const body = normalize(await client.request('GameWorldListRequest', {}, 'GameWorldListResponse', timeout));
+  const body = await client.request('GameWorldListRequest', {}, 'GameWorldListResponse', timeout);
   return {
-    latestGroupId: body.latestGroupId,
+    latestGroupId: normalize(body.latestGroupId),
     recentWorlds: (body.recentWorlds || []).map(describeWorld),
   };
 }
 
 // All worlds inside a group, not just the ones this account has visited.
 export async function listGroup(client, groupId, timeout = 10000) {
-  const body = normalize(await client.request('GameWorldGroupListRequest', { groupId }, 'GameWorldGroupListResponse', timeout));
+  const body = await client.request('GameWorldGroupListRequest', { groupId }, 'GameWorldGroupListResponse', timeout);
   return (body.worlds || []).map(describeWorld);
 }
 

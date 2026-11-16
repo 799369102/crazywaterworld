@@ -697,19 +697,19 @@ async function accountsCli(args) {
     });
     if (values.help) {
       console.log(`node src/app.mjs accounts login-phone --phone <手机号或账号> [--password 密码 | --code 短信验证码]
-  可选: --label 备注  --probe  --save  --yes  --connect
-默认只打印结果，不加 --save 不写入；新 openId 需要 --yes 才写入。也可用 CW_PHONE / CW_PHONE_PASSWORD / CW_PHONE_CODE。`);
+  可选 --label 备注  --probe  --save  --yes  --connect
+账号在加 --save 后保存，新 openId 还需 --yes。设备档案首次自动生成并持久复用。也可用 CW_PHONE / CW_PHONE_PASSWORD / CW_PHONE_CODE。`);
       return;
     }
     const phone = values.phone ?? process.env.CW_PHONE;
     if (!phone) throw new Error('缺少 --phone（手机号或账号），也可设置 CW_PHONE');
+    const client = createPhoneLogin();
     let password = values.password ?? process.env.CW_PHONE_PASSWORD;
-    const code = values.code ?? process.env.CW_PHONE_CODE;
+    let code = values.code ?? process.env.CW_PHONE_CODE;
     if (!password && !code) password = await readSecret('登录密码（留空则改用已获取的短信验证码）: ');
     if (!password && !code) code = await readSecret('短信验证码: ');
     if (!password && !code) throw new Error('密码和短信验证码至少填一个');
 
-    const client = createPhoneLogin();
     const result = password
       ? await client.loginWithPassword(phone, password)
       : await client.loginWithSms(phone, code);

@@ -22,6 +22,9 @@ const cases = [
   ['selftest-console-output.mjs'],
   ['selftest-platform-recovery.mjs'],
   ['selftest-capture-recovery-http.mjs'],
+  ['selftest-phone-login.mjs'],
+  ['selftest-phone-login-http.mjs'],
+  ['selftest-phone-login-ui.mjs'],
 ];
 
 try {

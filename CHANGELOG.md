@@ -4,6 +4,9 @@
 
 ## 2026-11-16
 
+- 修复新设备 APP 登录 1068，登录前自动完成业务与账号 SDK 初始化。设备档案自动生成、保存并跨流程复用，统一使用已验证的益世界配置。完整密码登录及角色读取已实测通过。
+- APP 登录展示全部已有角色的昵称、区服、等级、战力和合服信息，由用户选择后保存。短信关联多个 APP 账号时逐个查询，部分读取失败可重试。
+- 账号密码与短信验证码使用独立页签，增加密码显隐、重发倒计时、并发保护、请求超时和设备档案导入入口，补充协议、HTTP 与界面离线回归。
 - 核心逻辑增加本地回归入口 `npm run test:offline`，预算、预留、防重、迁移、调度、日志及抓包恢复使用隔离数据和显式协议夹具运行。账本与文件事务增加 JSDoc 静态检查。
 - 设置和用量账本的读改写增加跨进程互斥、异常进程锁恢复及落盘同步。旧配置转换集中到版本迁移入口，未知操作继续按原防重键核对。
 - 联盟互助共用待确认操作生命周期，主循环共用唤醒合并、到期复查和退出清理。增加丢回包、重复回包、暂停、断线及有限轮数退出验证。
@@ -75,7 +78,7 @@
 - 账号、总览和区服列表改为显示区服名称（如“海岛1986服”），并保留 worldId 便于核对；CLI `accounts list` 与 `worlds` 同步显示。协议本身不返回区服名，名称按客户端 `WorldIdRule` 从 `worldId` 计算，大区 3、4 分别为海港、海灯。
 - 修复手机号登录连接网关被 `1000 Bye` 关闭：ewan 登录后补走 `api.gzxianc.com/api/user/login` 业务登录，并用 `signToken` 作为网关 token；同时按 APP 抓包对齐 `clientVersion=1.12.9`、`language=zh_CN`、`systemLanguage=zh_cn_#hans`、`sc/extc=261390`、`biz=102`、生日和 `originVersion`。已实测连接成功并读取角色。
 - 修复手机号登录页面把 11 位手机号误判为格式错误：页面脚本是模板字符串，正则中的 `\d` 被转义丢失，改为 `[0-9]` 并加入回归检查。
-- 新增手机号/账号密码和短信验证码登录：按 APK 抓包接入益世界 ewan 账号 SDK（`loginsdk.ewan.cn/login`，AES-128-ECB；账号密码协议 100003，验证码校验 420012、完成登录 420007），换取网关 `openid/token/sign/timestamp`。已用真实账号验证账号密码成功响应；登录绑定 APP 的 `di/oi/devicecode`，工具读取本机 `data/ewan-device.json` 设备档案，APP 重装或换设备后需重新导入。控制台「账号 → 手机号登录」支持发送验证码、验证码登录和账号密码登录，先预览 openId，再确认保存；CLI 为 `accounts login-phone`，支持 `--password`、`--code`、`--probe`、`--save`、`--connect`。密码和验证码不落盘，待保存凭证只在内存保留 10 分钟，详见 `docs/phone-login.md`。
+- 新增手机号/账号密码和短信验证码登录：按 APK 抓包接入益世界 ewan 账号 SDK（`loginsdk.ewan.cn/login`，AES-128-ECB；账号密码协议 100003，验证码校验 420012、完成登录 420007），换取网关 `openid/token/sign/timestamp`。已用真实账号和 APP 采集的设备档案验证账号密码成功响应，工具读取本机 `data/ewan-device.json`。控制台「账号 → 手机号登录」支持发送验证码、验证码登录和账号密码登录，先预览 openId，再确认保存；CLI 为 `accounts login-phone`，支持 `--password`、`--code`、`--probe`、`--save`、`--connect`。密码和验证码不落盘，待保存凭证只在内存保留 10 分钟，详见 `docs/phone-login.md`。
 - `start-console.cmd` 默认启动控制台（端口 17323，不自动打开浏览器），只在服务就绪后输出地址；`.\start-console.cmd url` 只输出地址并保持窗口，`.\start-console.cmd status` 查看抓包 CA 状态。
 - 抓包 CA 和代理备份改存到项目内的 `certificates/`，路径按项目位置计算并可被 `CW_CA_DIR` 覆盖；停止抓包并移除证书后自动删除本次生成的文件，保留 CA 或目标证书文件清理失败时除外。
 - `data/protocol.log` 增加大小轮转：默认每个文件 5 MB，主日志和 `data/protocol.log.1` 交替写入，避免长期运行无限增长；可用 `CW_PROTOCOL_LOG_MAX_BYTES` 调整上限。
