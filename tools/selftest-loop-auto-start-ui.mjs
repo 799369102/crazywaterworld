@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { PAGE } from '../src/page.mjs';
 
 const script = [...PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
-  .map(match => match[1]).find(value => value.includes('async function toggleLoopAutoStart('));
+  .map(match => match[1]).find(value => value.includes('async function saveLoopInterval('));
 assert.ok(script);
 function section(start, end) {
   const from = script.indexOf(start), to = script.indexOf(end, from);
@@ -11,8 +11,9 @@ function section(start, end) {
 }
 const source = [
   section('function setTaskSwitch(', 'const pirateAdvanceErrors'),
+  section('function renderHostingControl(', 'function renderAccountSelect('),
   section('function renderLoop(', 'async function toggleAutoTask('),
-  section('async function toggleLoopAutoStart(', "$('loop-start').onclick"),
+  section('async function saveLoopInterval(', 'let orderClockOffset=0;'),
 ].join('\n');
 const settle = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
 function deferred() {
@@ -25,146 +26,230 @@ function fixture() {
   const node = id => {
     if (!nodes.has(id)) {
       const attributes = new Map(), thumb = { dataset: {} };
+      let value = '';
       nodes.set(id, {
-        value: '', textContent: '', disabled: false, dataset: {},
-        classList: { contains: () => false },
-        setAttribute: (name, value) => attributes.set(name, String(value)),
+        get value() { return value; },
+        set value(next) { value = String(next); },
+        textContent: '', disabled: false, dataset: {},
+        classList: { contains: () => true },
+        setAttribute: (name, next) => attributes.set(name, String(next)),
         getAttribute: name => attributes.get(name),
+        removeAttribute: name => attributes.delete(name),
         querySelector: () => thumb,
+        reportValidity: () => value !== '' && Number.isFinite(Number(value)) && Number(value) >= 1 && Number(value) <= 86400 && Number.isInteger(Number(value)),
       });
     }
     return nodes.get(id);
   };
-  const view = autoStart => ({ autoStart, running: false, rounds: 0, everyMs: 60000, completed: 0, controls: [] });
-  const env = { node, calls: [], errors: [], states: { a: view(false), b: view(false) }, flushes: 0 };
+  const view = seconds => ({ running: false, rounds: 0, everyMs: seconds * 1000, completed: 0, controls: [], settingsRevision: 1 });
+  const env = { node, calls: [], errors: [], states: { a: view(60), b: view(90) }, flushes: 0 };
   env.flush = async () => { env.flushes++; return env.onFlush ? env.onFlush() : true; };
   env.call = async (account, route, options) => {
     const payload = options?.body ? JSON.parse(options.body) : null;
     env.calls.push({ account, route, payload });
     if (!payload) {
+      const data = structuredClone(env.states[account]);
       await env.onGet?.(account);
-      return structuredClone(env.states[account]);
+      return data;
     }
-    assert.equal(route, '/api/loop/auto-start');
+    assert.equal(route, '/api/loop/interval');
     await env.onPost?.(account, payload);
-    env.states[account].autoStart = payload.autoStart;
-    if (payload.autoStart) env.states[account].running = true;
+    env.states[account].everyMs = payload.everySeconds * 1000;
+    env.states[account].settingsRevision++;
     return structuredClone(env.states[account]);
   };
   const api = new Function('env', `
     let current = 'a', loopAccount = null, loopVersion = 0, loopFieldDefaults = null, loopSettingsRevision = null;
-    let overviewLoopOwner = null, overviewLoopData = null, overviewRenderKey = '';
-    const savingTasks = new Set(), loopAutoStartSaves = new Map(), taskInputs = [], pirateFailureOptions = new Map();
+    let overviewLoopOwner = null, overviewLoopData = null, overviewRenderKey = '', snapshot = {};
+    const savingTasks = new Set(), loopIntervalSaves = new Map(), taskInputs = [], pirateFailureOptions = new Map(), hostingActions = new Set();
     const $ = env.node, document = { hidden: false }, configFlush = env.flush;
     const call = (route, options) => env.call(current, route, options);
     const reportError = error => env.errors.push(error);
     const renderAutomationOverview = data => { overviewLoopOwner = current; overviewLoopData = data; };
     const renderPirateAdvance = () => {}, filterIdleControls = () => {}, clear = () => {};
+    const configIntervalSaved = () => {};
     ${source}
     return {
-      load: refreshLoop, render: renderLoop, toggle: toggleLoopAutoStart,
-      change(account) { current = account; return refreshLoop(); },
-      pending: () => loopAutoStartSaves.size,
+      load: refreshLoop, render: renderLoop, save: saveLoopInterval,
+      change(account) { current = account; snapshot = {}; return refreshLoop(); },
+      pending: () => loopIntervalSaves.size,
     };
   `)(env);
-  return { ...api, env, node, checked: () => node('loop-auto-start').getAttribute('aria-checked') === 'true',
-    posts: () => env.calls.filter(row => row.payload) };
+  return { ...api, env, node, posts: () => env.calls.filter(row => row.payload) };
 }
 
 let passed = 0;
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
 
-await test('挂机页显示按账号保存的自动开始开关和默认持续运行说明', () => {
-  assert.equal([...PAGE.matchAll(/id="loop-auto-start"/g)].length, 1);
-  assert.match(PAGE, /aria-describedby="loop-auto-start-help"/);
-  assert.match(PAGE, /新账号默认持续挂机，开关按账号保存/);
-  assert.match(PAGE, /暂停挂机会记住关闭状态/);
+await test('页头仅有一个间隔输入，位于统一托管按钮左侧', () => {
+  const header = PAGE.match(/<header>[\s\S]*?<\/header>/)?.[0];
+  assert.ok(header);
+  for (const id of ['loop-every', 'account-pause', 'loop-hint', 'loop-interval-status']) {
+    assert.equal([...PAGE.matchAll(new RegExp('id="' + id + '"', 'g'))].length, 1, id);
+    assert.ok(header.includes('id="' + id + '"'), id);
+  }
+  assert.ok(header.indexOf('id="loop-every"') < header.indexOf('id="account-pause"'));
+  assert.match(header, /aria-label="托管间隔（秒）"/);
+  assert.match(header, /aria-describedby="loop-interval-status"/);
 });
 
-await test('挂机说明卡片及旧节点绑定已移除，挂机与挑战操作仍可使用', () => {
-  for (const removed of ['idle-notes', 'idle-more', 'challenge-run-state', 'single-task-status',
-    'single-go-pirate', 'single-go-stages', 'single-go-mutual', 'idle-go-settings', 'idle-go-overview', 'runtime-version']) {
+await test('重复定时卡片及旧节点绑定已移除，挂机与挑战仍可操作', () => {
+  for (const removed of ['idle-schedule', 'loop-auto-start', 'loop-start', 'loop-stop', 'loop-rounds',
+    'idle-notes', 'idle-more', 'challenge-run-state', 'single-task-status', 'single-go-pirate',
+    'single-go-stages', 'single-go-mutual', 'idle-go-settings', 'idle-go-overview', 'runtime-version']) {
     assert.equal(PAGE.includes(removed), false, removed + ' 应从页面和脚本中移除');
   }
-  for (const id of ['loop-auto-start', 'loop-start', 'loop-stop', 'stage-start', 'trial-refresh', 'pirate-advance-start']) {
+  for (const id of ['idle-search', 'stage-start', 'trial-refresh', 'pirate-advance-start']) {
     assert.equal([...PAGE.matchAll(new RegExp('id="' + id + '"', 'g'))].length, 1, id);
   }
 });
 
-await test('读取保持保存值，开关先保存草稿再提交并渲染后台运行状态', async () => {
+await test('任意页签读取当前账号间隔，运行中修改先保存草稿再提交', async () => {
   const f = fixture();
+  f.env.states.a.running = true;
   await f.load();
-  assert.equal(f.checked(), false);
-  assert.equal(f.posts().length, 0);
-  await f.toggle(); await settle();
+  assert.equal(f.node('loop-every').value, '60');
+  assert.equal(f.node('loop-every').disabled, false);
+  assert.equal(f.node('account-pause').textContent, '暂停托管');
+  f.node('loop-every').value = '120';
+  assert.equal(await f.save(), true); await settle();
   assert.equal(f.env.flushes, 1);
-  assert.deepEqual(f.posts()[0], { account: 'a', route: '/api/loop/auto-start', payload: { confirm: true, autoStart: true } });
-  assert.equal(f.checked(), true);
-  assert.equal(f.node('loop-start').disabled, true);
-  assert.equal(f.node('loop-stop').disabled, false);
-  await f.toggle(); await settle();
-  assert.equal(f.checked(), false);
+  assert.deepEqual(f.posts()[0], { account: 'a', route: '/api/loop/interval', payload: { confirm: true, everySeconds: 120, revision: 1 } });
+  assert.equal(f.node('loop-every').value, '120');
   assert.equal(f.env.states.a.running, true);
-  assert.equal(f.node('loop-stop').disabled, false);
+  assert.equal(f.node('loop-every').disabled, false);
+  assert.equal(f.node('loop-interval-status').textContent, '间隔已保存，下一轮生效');
+  await f.save();
+  assert.equal(f.posts().length, 1, '同值无需重复保存');
+  await f.change('b');
+  assert.equal(f.node('loop-every').value, '90');
+  await f.change('a');
+  assert.equal(f.node('loop-every').value, '120');
 });
 
-await test('保存中的重复点击和旧轮询不能覆盖待保存的开关', async () => {
+await test('轮询保留正在编辑的值，同步未编辑的服务端修改', async () => {
+  const f = fixture();
+  f.env.states.a.running = true;
+  await f.load();
+  f.node('loop-every').value = '125';
+  await f.load();
+  assert.equal(f.node('loop-every').value, '125');
+  f.node('loop-every').value = '60';
+  f.env.states.a.everyMs = 180000;
+  await f.load();
+  assert.equal(f.node('loop-every').value, '180');
+});
+
+await test('保存中的重复提交和旧轮询不会覆盖待保存的间隔', async () => {
   const f = fixture(), gate = deferred();
   await f.load();
+  f.node('loop-every').value = '120';
   f.env.onPost = () => gate.promise;
-  const saving = f.toggle(); await settle();
-  await f.toggle();
+  const saving = f.save(); await settle();
+  const duplicate = f.save();
   f.render(structuredClone(f.env.states.a));
   assert.equal(f.posts().length, 1);
-  assert.equal(f.checked(), true);
-  assert.equal(f.node('loop-auto-start').disabled, true);
-  assert.equal(f.node('loop-start').disabled, true);
-  gate.resolve(); await saving; await settle();
+  assert.equal(f.node('loop-every').value, '120');
+  assert.equal(f.node('loop-every').disabled, true);
+  gate.resolve();
+  assert.equal(await saving, true);
+  assert.equal(await duplicate, true); await settle();
   assert.equal(f.pending(), 0);
-  assert.equal(f.node('loop-auto-start').disabled, false);
+  assert.equal(f.node('loop-every').disabled, false);
 });
 
-await test('草稿保存期间切换账号会取消尚未提交的自动开始请求', async () => {
+await test('空值、越界和小数均不提交，边界整数可保存', async () => {
+  const f = fixture();
+  await f.load();
+  for (const value of ['', '0', '-1', '86401', '1.5', 'NaN']) {
+    f.node('loop-every').value = value;
+    assert.equal(await f.save(), false, value);
+    assert.equal(f.node('loop-every').getAttribute('aria-invalid'), 'true');
+  }
+  assert.equal(f.posts().length, 0);
+  for (const value of ['1', '86400']) {
+    f.node('loop-every').value = value;
+    assert.equal(await f.save(), true); await settle();
+    assert.equal(f.node('loop-every').getAttribute('aria-invalid'), undefined);
+  }
+});
+
+await test('保存前发出的旧读取晚到时不能回滚新间隔', async () => {
   const f = fixture(), gate = deferred();
   await f.load();
+  f.env.onGet = () => gate.promise;
+  const oldRead = f.load();
+  f.env.onGet = undefined;
+  f.node('loop-every').value = '120';
+  assert.equal(await f.save(), true); await settle();
+  gate.resolve(); await oldRead;
+  assert.equal(f.node('loop-every').value, '120');
+  f.node('loop-every').value = '180';
+  assert.equal(await f.save(), true);
+  assert.equal(f.posts()[1].payload.revision, 2);
+});
+
+await test('草稿保存期间切换账号会取消尚未提交的间隔请求', async () => {
+  const f = fixture(), gate = deferred();
+  await f.load();
+  f.node('loop-every').value = '120';
   f.env.onFlush = () => gate.promise;
-  const saving = f.toggle();
+  const saving = f.save();
   await f.change('b');
-  gate.resolve(true); await saving;
+  gate.resolve(true);
+  assert.equal(await saving, false);
   assert.equal(f.posts().length, 0);
-  assert.equal(f.checked(), false);
+  assert.equal(f.node('loop-every').value, '90');
   assert.equal(f.pending(), 0);
 });
 
-await test('旧账号的成功或失败响应均不会改写当前账号的开关', async () => {
+await test('旧账号的成功或失败响应均不会改写当前账号间隔', async () => {
   for (const fails of [false, true]) {
     const f = fixture(), gate = deferred();
     await f.load();
+    f.node('loop-every').value = '120';
     f.env.onPost = () => gate.promise;
-    const saving = f.toggle(); await settle();
+    const saving = f.save(); await settle();
     await f.change('b');
     if (fails) gate.reject(new Error('旧账号保存失败'));
     else gate.resolve();
     await saving; await settle();
-    assert.equal(f.checked(), false);
-    assert.equal(f.node('loop-auto-start').disabled, false);
-    assert.equal(f.env.states.b.autoStart, false);
+    assert.equal(f.node('loop-every').value, '90');
+    assert.equal(f.node('loop-every').disabled, false);
+    assert.equal(f.env.states.b.everyMs, 90000);
     assert.equal(f.env.errors.length, 0);
     assert.equal(f.pending(), 0);
   }
 });
 
-await test('保存失败且回读失败时恢复可操作状态并显示原开关值', async () => {
+await test('保存失败且回读失败时保留输入并允许重试', async () => {
   const f = fixture();
   await f.load();
+  f.node('loop-every').value = '120';
   f.env.onPost = async () => { throw new Error('保存失败'); };
   f.env.onGet = async () => { throw new Error('回读失败'); };
-  await f.toggle(); await settle();
-  assert.equal(f.checked(), false);
-  assert.equal(f.node('loop-auto-start').disabled, false);
-  assert.equal(f.node('loop-start').disabled, false);
+  assert.equal(await f.save(), false); await settle();
+  assert.equal(f.node('loop-every').value, '120');
+  assert.equal(f.node('loop-every').disabled, false);
+  assert.equal(f.node('loop-every').getAttribute('aria-invalid'), 'true');
   assert.equal(f.env.errors[0]?.message, '保存失败');
   assert.equal(f.pending(), 0);
+  f.env.onPost = f.env.onGet = undefined;
+  assert.equal(await f.save(), true); await settle();
+  assert.equal(f.node('loop-every').value, '120');
+  assert.equal(f.node('loop-every').getAttribute('aria-invalid'), undefined);
 });
 
-console.log('自动开始挂机 UI 专项 ' + passed + '/' + passed + ' 通过');
+await test('草稿校验失败时不提交间隔并恢复可操作状态', async () => {
+  const f = fixture();
+  await f.load();
+  f.node('loop-every').value = '120';
+  f.env.onFlush = async () => false;
+  assert.equal(await f.save(), false); await settle();
+  assert.equal(f.posts().length, 0);
+  assert.equal(f.node('loop-every').disabled, false);
+  assert.equal(f.pending(), 0);
+  assert.match(f.env.errors[0]?.message, /配置尚未保存/);
+});
+
+console.log('页头托管与间隔 UI 专项 ' + passed + '/' + passed + ' 通过');

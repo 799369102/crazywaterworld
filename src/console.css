@@ -23,6 +23,8 @@ h1 { font-size:16px; font-weight:600; line-height:1.2; letter-spacing:-.01em; wh
 .account-picker-option [data-picker-field=status] { grid-column:1; grid-row:2; min-width:0; overflow-wrap:anywhere }
 .account-picker-option [data-picker-field=check] { grid-column:2; grid-row:1 / 3; align-self:center }
 .account-label { color:var(--muted-foreground); font-size:13px; font-weight:400; white-space:nowrap }
+.hosting-controls,.hosting-interval { display:flex; align-items:center; gap:8px; flex-shrink:0 }
+.hosting-interval { gap:6px; font-size:13px; color:var(--muted-foreground); white-space:nowrap }
 #log-top-count { color:var(--muted-foreground); font-variant-numeric:tabular-nums }
 #hint:empty { display:none }
 #hint { font-size:12px; white-space:nowrap }
@@ -149,9 +151,6 @@ section h2:first-child { margin-top:0 }
 #world-view:empty { display:none }
 
 /* ---- 挂机 ---- */
-.loop-form { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px }
-.loop-form label { display:grid; gap:8px }
-.loop-form input { width:112px }
 .idle-filter-bar { margin-block:0 }
 .idle-filter-bar #idle-search { flex:1 1 130px; width:auto; max-width:320px }
 .idle-filter-bar label { color:var(--muted-foreground); font-weight:400 }
@@ -439,10 +438,10 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
   .brand-label,.account-label { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%) }
   .connection { display:contents }
   .account-picker { grid-column:1 / -1; grid-row:2; width:100%; max-width:none }
-  #connect { grid-column:1; grid-row:3; justify-self:end }
-  #account-pause { grid-column:2; grid-row:3 }
+  #connect { grid-column:1 / -1; grid-row:4; justify-self:end }
+  .hosting-controls { grid-column:1 / 3; grid-row:3; justify-content:flex-end; min-width:0 }
   #logs-open { grid-column:3; grid-row:3 }
-  #hint { grid-column:1 / -1; grid-row:4; white-space:normal }
+  #hint { grid-column:1 / -1; grid-row:5; white-space:normal }
   /* 导航固定到底部，八个入口一屏放下。 */
   #tabs { position:fixed; inset:auto 0 0; z-index:40; display:grid; grid-template-columns:repeat(8,minmax(0,1fr)); gap:0; width:100%; margin:0; padding:4px calc(4px + env(safe-area-inset-right)) calc(4px + env(safe-area-inset-bottom)) calc(4px + env(safe-area-inset-left)); overflow:visible; background:var(--background); border-top:1px solid var(--border) }
   .nav-tab { flex-direction:column; justify-content:center; gap:2px; height:48px; padding:0; font-size:11px; min-width:0 }
@@ -453,12 +452,15 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
   .resource-tabs { display:flex; width:100% }
   .help-popover { left:16px !important; right:16px; top:auto !important; bottom:calc(68px + env(safe-area-inset-bottom)); width:auto; max-width:none !important; max-height:50dvh !important }
   .world-map-scroll { height:min(52vh,420px); min-height:260px }
-  .loop-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)) }
-  .loop-form input { width:100% }
   .world-map-toolbar input[type=range] { flex:1 1 90px; width:auto }
   .overview-task-filter select { flex:0 1 112px }
   #journal-dialog { width:100vw; max-width:100vw; height:100dvh; max-height:100dvh; border:0; border-radius:0; margin:0; align-content:start }
   #journal-dialog #log { height:calc(100dvh - 190px); max-height:none }
+}
+@media (max-width:359px) {
+  .hosting-controls { grid-column:1 / -1 }
+  #connect { grid-column:1 / 3 }
+  #logs-open { grid-row:4 }
 }
 @media (pointer:coarse) {
   :is(input:not([type=checkbox],[type=radio],[type=range],[type=file],[type=hidden]),select) { height:40px; font-size:16px }

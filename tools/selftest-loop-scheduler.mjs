@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createLoopScheduler } from '../src/loop-scheduler.mjs';
 
 let passed = 0;
@@ -120,6 +123,62 @@ await test('同账号恢复时新调度器清空旧运行的唤醒与任务', as
   await next.runDue('factory', () => 0, () => executed++);
   assert.equal(executed, 1);
   next.dispose();
+});
+
+await test('运行中修改间隔按原等待起点重算下一轮，缩短、延长与已到期均及时生效', async () => {
+  const temporaryRoot = fs.realpathSync(os.tmpdir());
+  const directory = fs.mkdtempSync(path.join(temporaryRoot, 'cw-loop-interval-'));
+  const previousDataDir = process.env.CW_DATA_DIR, originalNow = Date.now;
+  process.env.CW_DATA_DIR = directory;
+  try {
+    const { runLoop } = await import('../src/loop.mjs');
+    const { defaultSettings } = await import('../src/automation-settings.mjs');
+    const settings = defaultSettings();
+    function disable(value) {
+      for (const [key, item] of Object.entries(value)) {
+        if (typeof item === 'boolean') value[key] = false;
+        else if (item && typeof item === 'object') disable(item);
+      }
+    }
+    disable(settings);
+    for (const scenario of [
+      { initial: 60000, next: 1000, elapsed: 500, waits: [60000, 500], finish: 1000 },
+      { initial: 1000, next: 60000, elapsed: 500, waits: [1000, 59500], finish: 60000 },
+      { initial: 60000, next: 1000, elapsed: 5000, waits: [60000], finish: 5000 },
+    ]) {
+      const base = Date.UTC(2026, 10, 17, 4);
+      let now = base, interval = scenario.initial;
+      Date.now = () => now;
+      const client = new EventEmitter();
+      client.setMaxListeners(50);
+      client.connected = true;
+      client.request = async name => assert.fail('关闭业务任务时不应请求 ' + name);
+      const waits = [], rounds = [];
+      await runLoop(client, {}, {
+        rounds: 2, allowMutate: true, isEnabled: () => false,
+        getSettings: () => settings, getEveryMs: () => interval,
+        sleep: async ms => {
+          assert(waits.length < 3, '更新间隔后应在新截止时间完成等待');
+          waits.push(ms);
+          if (waits.length === 1) {
+            now += scenario.elapsed;
+            interval = scenario.next;
+            client.emit('automationSettingsChanged');
+          } else now += ms;
+        },
+        onRound: () => rounds.push(now - base),
+      });
+      assert.deepEqual(waits, scenario.waits);
+      assert.deepEqual(rounds, [0, scenario.finish]);
+      assert.equal(client.listenerCount('automationSettingsChanged'), 0);
+    }
+  } finally {
+    Date.now = originalNow;
+    if (previousDataDir === undefined) delete process.env.CW_DATA_DIR;
+    else process.env.CW_DATA_DIR = previousDataDir;
+    assert.equal(path.dirname(fs.realpathSync(directory)), temporaryRoot);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 console.log('循环调度离线专项 ' + passed + '/' + passed + ' 通过');

@@ -47,13 +47,15 @@ try {
       assert(['基地', '世界', '英雄', '日常与活动'].includes(control.idleGroup), control.key);
       assert(configGroups.some(group => group.id === control.configTarget), control.key + ' 配置入口存在');
     }
-    const scheduledInIdle = new Set(['loop.rounds', 'loop.everySeconds']);
+    const scheduledInHeader = new Set(['loop.everySeconds']);
     const fields = new Set([...staticGroups.flatMap(group => group.fields.map(field => field.key)), ...activityKeys]);
     for (const key of fields) {
-      const locations = Number(movedFields.includes(key)) + Number(configKeys.has(key)) + Number(scheduledInIdle.has(key)) + Number(activityKeys.has(key));
+      const locations = Number(movedFields.includes(key)) + Number(configKeys.has(key)) + Number(scheduledInHeader.has(key)) + Number(activityKeys.has(key));
       assert.equal(locations, 1, key + ' 应有且仅有一个编辑位置');
     }
-    assert(html.includes('id="loop-rounds"') && html.includes('id="loop-every"'));
+    assert(!html.includes('id="loop-rounds"') && !html.includes('id="loop-every"'));
+    assert(configGroups.find(group => group.id === 'runtime').fields.some(field => field.key === 'loop.rounds'));
+    assert(!configKeys.has('loop.everySeconds'));
   });
 
   await check('执行细项、资源权限、策略与预算没有被搬到挂机', () => {

@@ -35,7 +35,12 @@ export function chrome() {
           <div id="account-picker-list" role="listbox" aria-label="选择账号" hidden />
         </div>
         <Button id="connect" size="sm">连接</Button>
-        <Button id="account-pause" size="sm" variant="outline" title="暂停后断开游戏连接，方便自行上号">暂停托管</Button>
+        <div className="hosting-controls">
+          <label className="hosting-interval" htmlFor="loop-every">间隔<Input id="loop-every" className="h-8 w-20 max-sm:w-16" type="number" min="1" max="86400" step="1" required defaultValue="60" disabled aria-label="托管间隔（秒）" aria-describedby="loop-interval-status" title="按账号自动保存，下一轮使用新间隔" /><span>秒</span></label>
+          <Button id="account-pause" size="sm" variant="outline" disabled title="按已保存的任务和轮数开始托管">开始托管</Button>
+          <span id="loop-interval-status" className="sr-only" role="status" />
+          <span id="loop-hint" className="sr-only" role="status" />
+        </div>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>
         <span id="hint" className="warn" />
       </div>

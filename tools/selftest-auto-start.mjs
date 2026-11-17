@@ -15,7 +15,7 @@ const { GameClient } = await import('../src/client.mjs');
 const { loadStore, saveStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
-const { saveAutomationSettings, settingsFromNative } = await import('../src/automation-settings.mjs');
+const { loadAutomationSettings, saveAutomationSettings, settingsFromNative } = await import('../src/automation-settings.mjs');
 
 const live = new Set();
 const states = new Map();
@@ -45,7 +45,10 @@ GameClient.prototype.send = () => {};
 GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.request = async function (name) {
   this.fixture.requests.push(name);
-  if (name === 'EmailBoxRequest') return { email: [] };
+  if (name === 'EmailBoxRequest') {
+    await this.fixture.mailGate;
+    return { email: [] };
+  }
   if (name === 'OnWaterRequest') return { building: [] };
   if (name === 'AllItemRequest') return { items: [] };
   return {};
@@ -261,6 +264,142 @@ try {
     assert.equal(saved(f.id).autoStart, true);
     await api(f.id, 'accounts/pause', { paused: false });
     await running(f.id);
+  });
+
+  await test('页头开始托管可启动旧账号并按配置轮数运行，重复开始共用循环', async () => {
+    const f = account({ enabled: false, rounds: 2 });
+    await launch([f]);
+    const started = await api(f.id, 'accounts/pause', { paused: false, start: true });
+    assert.equal(started.paused, false);
+    assert.equal(started.looping, true);
+    await running(f.id);
+    const job = session(f.id).loop.job;
+    assert.equal(session(f.id).loop.rounds, 2);
+    assert.equal(saved(f.id).autoStart, false);
+    await api(f.id, 'accounts/pause', { paused: false, start: true });
+    assert.equal(session(f.id).loop.job, job);
+    assert.equal(f.state.logins, 1);
+  });
+
+  await test('页头恢复托管使用保存的有限轮数，普通恢复继续遵循自动开始偏好', async () => {
+    const finite = account({ paused: true, autoStart: true, rounds: 3 });
+    const stopped = account({ paused: true, autoStart: false });
+    await launch([finite, stopped]);
+    await api(finite.id, 'accounts/pause', { paused: false, start: true });
+    await running(finite.id);
+    assert.equal(session(finite.id).loop.rounds, 3);
+    assert.equal(saved(finite.id).autoStart, false);
+    const resumed = await api(stopped.id, 'accounts/pause', { paused: false });
+    assert.equal(resumed.looping, false);
+    assert.equal(stopped.state.logins, 0);
+    await api(stopped.id, 'accounts/pause', { paused: false, start: true });
+    await running(stopped.id);
+    assert.equal(session(stopped.id).loop.rounds, 0);
+    assert.equal(saved(stopped.id).autoStart, true);
+  });
+
+  await test('页头恢复等待旧循环退出，等待期间再次暂停优先生效', async () => {
+    for (const pauseAgain of [false, true]) {
+      const f = account({ autoStart: false });
+      let release;
+      f.state.mailGate = new Promise(resolve => { release = resolve; });
+      await launch([f]);
+      await api(f.id, 'accounts/pause', { paused: false, start: true });
+      await waitFor(() => f.state.requests.includes('EmailBoxRequest'), '旧循环邮件请求进入等待');
+      const previousJob = session(f.id).loop.job;
+      await api(f.id, 'accounts/pause', { paused: true });
+      const resumed = api(f.id, 'accounts/pause', { paused: false, start: true });
+      await waitFor(() => !session(f.id).paused, '恢复请求等待旧循环');
+      assert.equal(session(f.id).loop.job, previousJob);
+      if (pauseAgain) await api(f.id, 'accounts/pause', { paused: true });
+      release();
+      const result = await resumed;
+      assert.equal(result.paused, pauseAgain);
+      assert.equal(result.looping, !pauseAgain);
+      if (pauseAgain) assert.equal(f.state.logins, 1);
+      else {
+        await running(f.id);
+        assert.notEqual(session(f.id).loop.job, previousJob);
+        assert.equal(f.state.logins, 2);
+      }
+      await shutdown();
+    }
+  });
+
+  await test('页头开始清除顶号阻塞并报告无任务的启动错误', async () => {
+    const blocked = account({ autoStart: false, loginBlocked: true });
+    const empty = account({ autoStart: false, tasks: Object.fromEntries(Object.keys(tasks).map(key => [key, false])) });
+    await launch([blocked, empty]);
+    const started = await api(blocked.id, 'accounts/pause', { paused: false, start: true });
+    assert.equal(started.loginBlocked, false);
+    await running(blocked.id);
+    assert.equal(saved(blocked.id).loginBlocked, false);
+    const failed = await response(empty.id, 'accounts/pause', { paused: false, start: true });
+    assert.equal(failed.status, 400);
+    assert.match(failed.data.error, /至少启用一个自动项目/);
+    assert.equal(session(empty.id).loop.running, false);
+    assert.equal(empty.state.logins, 0);
+    assert.equal((await response(empty.id, 'accounts/pause', { paused: true, start: true })).status, 400);
+    assert.equal(session(empty.id).paused, false);
+  });
+
+  await test('页头间隔按账号保存且保持暂停状态，刷新与重启读取新值', async () => {
+    const f = account({ paused: true, autoStart: false, rounds: 4 });
+    const other = account({ paused: true, autoStart: false });
+    await launch([f, other]);
+    const current = await api(f.id, 'settings');
+    const updated = await api(f.id, 'loop/interval', { everySeconds: 47, revision: current.revision });
+    assert.equal(updated.everyMs, 47000);
+    assert.equal(updated.rounds, 4);
+    assert.equal(updated.settingsRevision, current.revision + 1);
+    const stored = loadAutomationSettings(f.id);
+    assert.equal(stored.settings.loop.everySeconds, 47);
+    assert.equal(stored.settings.loop.rounds, 4);
+    assert.equal(stored.settings.schedule.mail, true);
+    assert.equal(saved(f.id).autoStart, false);
+    assert.equal(session(f.id).paused, true);
+    assert.equal(f.state.logins, 0);
+    assert.equal((await api(other.id, 'loop')).everyMs, 3600000);
+    await shutdown();
+    await launch();
+    assert.equal((await api(f.id, 'loop')).everyMs, 47000);
+    assert.equal((await api(f.id, 'loop')).running, false);
+    assert.equal(f.state.logins, 0);
+  });
+
+  await test('运行中保存间隔沿用当前循环、进度和挑战计数', async () => {
+    const f = account({ autoStart: true });
+    await launch([f]);
+    await running(f.id);
+    const loop = session(f.id).loop;
+    const job = loop.job, challengeRun = loop.challengeRun, completed = loop.completed;
+    const current = await api(f.id, 'settings');
+    const updated = await api(f.id, 'loop/interval', { everySeconds: 53, revision: current.revision });
+    assert.equal(updated.everyMs, 53000);
+    assert.equal(loop.job, job);
+    assert.equal(loop.challengeRun, challengeRun);
+    assert.equal(loop.completed, completed);
+    assert.equal(f.state.logins, 1);
+    assert.equal(saved(f.id).autoStart, true);
+  });
+
+  await test('页头间隔拒绝无效整数与过期版本，保持最新已保存值', async () => {
+    const f = account({ autoStart: false });
+    await launch([f]);
+    const current = await api(f.id, 'settings');
+    for (const everySeconds of [0, 86401, 1.5, '60', null]) {
+      const result = await response(f.id, 'loop/interval', { everySeconds, revision: current.revision });
+      assert.equal(result.status, 400);
+      assert.equal(session(f.id).loop.everyMs, 3600000);
+    }
+    const savedInterval = await api(f.id, 'loop/interval', { everySeconds: 86400, revision: current.revision });
+    const stale = await response(f.id, 'loop/interval', { everySeconds: 2, revision: current.revision });
+    assert.equal(stale.status, 400);
+    assert.ok(stale.data.fields.revision);
+    assert.equal(session(f.id).loop.everyMs, 86400000);
+    await api(f.id, 'loop/interval', { everySeconds: 1, revision: savedInterval.settingsRevision });
+    assert.equal(session(f.id).loop.everyMs, 1000);
+    assert.equal(f.state.logins, 0);
   });
 
   await test('停止账号的配置读取、保存、预览与明确连接保持停止', async () => {

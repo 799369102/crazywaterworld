@@ -536,6 +536,14 @@ function refreshAccountStatuses() {
 }
 
 let accountDetailsOwner=null;
+const hostingActions = new Set();
+function renderHostingControl() {
+  const resume = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting);
+  const running = snapshot.looping || snapshot.reconnecting;
+  $('account-pause').disabled = !current || hostingActions.has(current) || !!snapshot.loopStopping || (!(running && !resume) && loopAccount !== current);
+  $('account-pause').textContent = resume ? '恢复托管' : running ? '暂停托管' : '开始托管';
+  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : running ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
+}
 function renderAccountSelect() {
   appointmentsAccountChanged();
   if (dailyAccount !== current || snapshot.paused || disconnected.has(current)) {
@@ -553,9 +561,7 @@ function renderAccountSelect() {
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
   $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
-  $('account-pause').disabled = !current;
-  $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
-  $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
+  renderHostingControl();
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
   $('connect').hidden = !current || snapshot.connected || snapshot.paused || snapshot.reconnecting || snapshot.loginBlocked;
@@ -625,10 +631,18 @@ $('account').onchange = async () => {
 };
 $('account-pause').onclick = async () => {
   const account = current;
+  if (!account || hostingActions.has(account) || snapshot.loopStopping) return;
+  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting) && !!(snapshot.looping || snapshot.reconnecting);
+  hostingActions.add(account);
   accountStatusRevision++;
-  $('account-pause').disabled = true;
+  renderHostingControl();
   try {
-    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify({ paused: !(snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting)) }) });
+    if (!paused) {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (current !== account || !await saveLoopInterval()) return;
+    }
+    if (current !== account) return;
+    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify(paused ? { paused: true } : { paused: false, start: true, confirm: true }) });
     setAccountStatus(account, status);
     if (current !== account) return;
     if (!status.paused) disconnected.delete(account);
@@ -638,8 +652,15 @@ $('account-pause').onclick = async () => {
     refreshOverview();
     refreshLoop();
     refreshActivities();
+  } catch (error) {
+    if (current === account) reportError(error);
   } finally {
-    if (current === account) $('account-pause').disabled = false;
+    hostingActions.delete(account);
+    if (current === account) {
+      renderAccountSelect();
+      refreshAccountStatuses();
+      refreshLoop();
+    }
   }
 };
 
@@ -792,7 +813,7 @@ $('stage-stop').onclick = () => stageCommand(false);
 let loopVersion = 0;
 let loopAccount = null,loopFieldDefaults=null;
 const savingTasks = new Set();
-const loopAutoStartSaves = new Map();
+const loopIntervalSaves = new Map();
 let loopSettingsRevision = null;
 function selectIdleGroup(value) {
   document.querySelector('[aria-label="挂机设置分组"]').hidden=false;
@@ -898,10 +919,8 @@ function renderLoop(data) {
   renderAutomationOverview(data);
   renderPirateAdvance(data.pirateAdvance);
   loopSettingsRevision = data.settingsRevision;
-  const autoStartSaving = loopAutoStartSaves.has(current);
-  setTaskSwitch($('loop-auto-start'), autoStartSaving ? loopAutoStartSaves.get(current) : data.autoStart === true);
-  $('loop-auto-start').disabled = !current || autoStartSaving;
-  $('loop-auto-start-status').textContent = autoStartSaving ? '正在保存' : '';
+  snapshot.looping = data.running;
+  snapshot.loopStopping = data.stopping;
   for (const input of taskInputs) {
     if (savingTasks.has(current + ':' + input.dataset.autoTask)) continue;
     const task = (data.controls ?? []).find(t => t.key === input.dataset.autoTask);
@@ -913,16 +932,14 @@ function renderLoop(data) {
     if(note){note.textContent=task?.configurationNote||(task?.enabled&&task?.blockedBy?.length?'需先开启：'+task.blockedBy.join('、'):'');note.hidden=!note.textContent;}
     input.disabled = !task;
   }
-  if (loopAccount !== current || data.running) {
+  if (loopAccount !== current || !loopIntervalSaves.has(current) && $('loop-every').value === String(loopFieldDefaults?.seconds)) {
     $('loop-every').value = data.everyMs / 1000;
-    $('loop-rounds').value = data.rounds;
-    loopFieldDefaults={rounds:data.rounds,seconds:data.everyMs/1000};
   }
+  loopFieldDefaults={seconds:data.everyMs/1000};
   filterIdleControls();
   loopAccount = current;
-  $('loop-every').disabled = $('loop-rounds').disabled = data.running;
-  $('loop-start').disabled = data.running || autoStartSaving;
-  $('loop-stop').disabled = !data.running || data.stopping || autoStartSaving;
+  renderHostingControl();
+  $('loop-every').disabled = !current || loopIntervalSaves.has(current);
   $('loop-hint').textContent = (data.recovery ? '网络恢复中（第 ' + data.recovery.attempt + ' 次），已完成 ' : data.running ? '后台挂机中，已完成 ' : '未在挂机，累计 ') + data.completed + ' 轮' + (data.error ? '，已中止' : '');
   if (data.stopping) $('loop-hint').textContent = '正在暂停，等待在途请求结束';
 
@@ -932,7 +949,6 @@ let loopReads = 0;
 async function refreshLoop() {
   if(document.hidden)return;
   const account = current, version = ++loopVersion;
-  if ($('tab-idle').classList.contains('hidden')&&$('tab-overview').classList.contains('hidden')&&$('tab-settings').classList.contains('hidden')) return;
   if (loopAccount !== account || !account) {
     $('loop-hint').textContent = account ? '正在读取设置' : '请选择账号';
     for (const input of taskInputs) {
@@ -942,13 +958,13 @@ async function refreshLoop() {
     }
     if(overviewLoopOwner!==account){overviewLoopData=null;overviewLoopOwner=account;overviewRenderKey='';clear($('overview-task-groups'));$('overview-task-summary').textContent=account?'正在读取运行状态':'请先选择账号';}
     loopSettingsRevision = null;
-    $('loop-auto-start').disabled = true;
-    setTaskSwitch($('loop-auto-start'), false);
-    $('loop-auto-start-status').textContent = '';
+    $('loop-every').disabled = true;
+    $('loop-every').value = '';
+    $('loop-every').removeAttribute('aria-invalid');
+    $('loop-interval-status').textContent = '';
     $('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
     $('pirate-advance-state').textContent=account?'正在读取首杀状态':'请选择账号';
     $('pirate-manual-failures').value=pirateFailureOptions.get(account)??1;
-    $('loop-start').disabled = $('loop-stop').disabled = true;
   }
   if (!account) return;
   loopReads++;
@@ -996,77 +1012,60 @@ async function toggleAutoTask(input) {
 }
 for (const input of taskInputs) input.onclick = () => toggleAutoTask(input);
 
-async function toggleLoopAutoStart() {
-  const account = current, input = $('loop-auto-start');
-  if (!account || loopAccount !== account || loopAutoStartSaves.has(account)) return;
-  const autoStart = input.getAttribute('aria-checked') !== 'true';
-  loopAutoStartSaves.set(account, autoStart);
-  setTaskSwitch(input, autoStart);
+async function saveLoopInterval() {
+  const account = current, input = $('loop-every');
+  if (!account || loopAccount !== account) return false;
+  if (loopIntervalSaves.has(account)) return loopIntervalSaves.get(account).promise;
+  const everySeconds = Number(input.value);
+  if (!input.reportValidity() || !Number.isSafeInteger(everySeconds) || everySeconds < 1 || everySeconds > 86400) {
+    input.setAttribute('aria-invalid', 'true');
+    $('loop-interval-status').textContent = '请输入 1–86400 的整数秒数';
+    return false;
+  }
+  input.removeAttribute('aria-invalid');
+  if (everySeconds === loopFieldDefaults?.seconds) return true;
   input.disabled = true;
-  $('loop-start').disabled = $('loop-stop').disabled = true;
-  $('loop-auto-start-status').textContent = '正在保存';
+  $('loop-interval-status').textContent = '正在保存间隔';
   ++loopVersion;
-  try {
-    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
-    if (account !== current) return;
-    const updated = await call('/api/loop/auto-start', {
-      method: 'POST', body: JSON.stringify({ confirm: true, autoStart }),
-    });
-    loopAutoStartSaves.delete(account);
-    if (account === current) {
-      ++loopVersion;
-      renderLoop(updated);
+  const pending = { writing: false, promise: null };
+  loopIntervalSaves.set(account, pending);
+  pending.promise = (async () => {
+    try {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (account !== current) return false;
+      const revision = loopSettingsRevision;
+      pending.writing = true;
+      const updated = await call('/api/loop/interval', {
+        method: 'POST', body: JSON.stringify({ confirm: true, everySeconds, revision }),
+      });
+      if (account === current) {
+        ++loopVersion;
+        input.value = String(updated.everyMs / 1000);
+        configIntervalSaved(account, everySeconds, revision, updated.settingsRevision);
+        renderLoop(updated);
+        $('loop-interval-status').textContent = '间隔已保存，下一轮生效';
+      }
+      return true;
+    } catch (error) {
+      if (account === current) {
+        input.setAttribute('aria-invalid', 'true');
+        $('loop-interval-status').textContent = '间隔保存失败，请重试';
+        reportError(error);
+      }
+      return false;
+    } finally {
+      loopIntervalSaves.delete(account);
+      if (account === current) {
+        input.disabled = false;
+        refreshLoop();
+      }
     }
-  } catch (error) {
-    if (account === current) {
-      ++loopVersion;
-      setTaskSwitch(input, !autoStart);
-      reportError(error);
-    }
-  } finally {
-    loopAutoStartSaves.delete(account);
-    if (account === current) {
-      input.disabled = false;
-      $('loop-auto-start-status').textContent = '';
-      if (overviewLoopOwner === account && overviewLoopData) renderLoop(overviewLoopData);
-      refreshLoop();
-    }
-  }
+  })();
+  return pending.promise;
 }
-$('loop-auto-start').onclick = toggleLoopAutoStart;
-
-$('loop-start').onclick = async () => {
-  const account = current;
-  if (!await configFlush()) { reportError(new Error('配置尚未保存，请先处理配置页的提示')); return; }
-  if (account !== current) return;
-  try {
-    await call('/api/loop/start', {
-      method: 'POST',
-      body: JSON.stringify({
-        confirm: true,
-        rounds: Number($('loop-rounds').value || 0),
-        everySeconds: Number($('loop-every').value || 60),
-      }),
-    });
-    if (account === current) {
-      snapshot.loginBlocked = false;
-      snapshot.reconnecting = false;
-      renderAccountSelect();
-    }
-    refreshLoop();
-  } catch (error) {
-    $('loop-hint').textContent = '';
-    reportError(error);
-  }
-};
-$('loop-stop').onclick = async () => {
-  try {
-    await call('/api/loop/stop', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-    refreshLoop();
-  } catch (error) {
-    $('loop-hint').textContent = '';
-    reportError(error);
-  }
+$('loop-every').onchange = saveLoopInterval;
+$('loop-every').onkeydown = event => {
+  if (event.key === 'Enter') { event.preventDefault(); saveLoopInterval(); }
 };
 
 let orderClockOffset=0;

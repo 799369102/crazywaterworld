@@ -1047,9 +1047,10 @@ export async function runLoop(client, protocol, {
     onRound?.(summary);
     if (round < total && !stop.aborted) {
       try {
-        const nextRound = Date.now() + getEveryMs();
+        const waitStartedAt = Date.now();
         let upgradeAt = Date.now() + 30_000;
-        while (scheduler.active() && Date.now() < nextRound) {
+        while (scheduler.active() && Date.now() < waitStartedAt + getEveryMs()) {
+          const nextRound = waitStartedAt + getEveryMs();
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
           const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
@@ -1062,7 +1063,7 @@ export async function runLoop(client, protocol, {
             forgeEnabled(getSettings()) ? forgeAt : Infinity,
             antiqueEnabled(getSettings()) ? antiqueAt : Infinity, afkAt);
           if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
-          if (!scheduler.active() || Date.now() >= nextRound) break;
+          if (!scheduler.active() || Date.now() >= waitStartedAt + getEveryMs()) break;
           if (activityVersion !== roundActivityVersion || activityAt <= Date.now()) {
             for (const key of activityTimeTasks) rewards?.clearTask(key);
             break;

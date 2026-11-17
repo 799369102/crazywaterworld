@@ -1533,7 +1533,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -2322,9 +2322,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       // ---- 连接 ----
       if (route === 'POST /api/accounts/pause') {
         const { account, session } = scoped_(parsed);
-        const { paused } = jsonBody();
+        const payload = jsonBody();
+        const { paused, start = false } = payload;
         if (typeof paused !== 'boolean') throw new Error('请选择暂停或恢复');
-        if (!paused && !session.paused && loginRecoveryActive(session)) {
+        if (typeof start !== 'boolean' || (start && paused)) throw new Error('开始托管需要先恢复账号');
+        if (start) needConfirm(payload);
+        if (!paused && !session.paused && loginRecoveryActive(session) && (!start || session.loop.running)) {
           json(accountStatus(session));
           return;
         }
@@ -2347,7 +2350,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             emit(session, 'state', '账号已暂停，可以自行上号', { pauseChanged: true });
           } else {
             emit(session, 'state', '账号已恢复托管', { pauseChanged: true });
-            await startAutomaticLoop(session);
+            if (!start) await startAutomaticLoop(session);
+          }
+        }
+        if (start) {
+          const generation = session.generation;
+          if (session.loop.controller?.signal.aborted) await session.loop.job;
+          if (!closing && sessions.get(session.id) === session && generation === session.generation && !session.loop.running && !session.paused) {
+            startLoop(session, account, { explicitLogin: true });
           }
         }
         json(accountStatus(session));
@@ -3152,6 +3162,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         const { account, session } = scoped_(parsed);
         startLoop(session, account, { rounds: payload.rounds, everySeconds: payload.everySeconds, explicitLogin: true });
+        json(loopView(session));
+        return;
+      }
+      if (route === 'POST /api/loop/interval') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const { everySeconds } = payload;
+        if (!Number.isSafeInteger(everySeconds) || everySeconds < 1 || everySeconds > 86400) throw new Error('间隔秒数需要为 1–86400 的整数');
+        const current = settingsView(session);
+        if (payload.revision !== current.revision) throw new SettingsError({ revision: '配置已变化，请刷新挂机设置后再操作' });
+        const next = structuredClone(current.settings);
+        next.loop.everySeconds = everySeconds;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision, catalog: current.catalog }));
+        emit(session, 'info', `挂机间隔已保存为 ${everySeconds} 秒，下次检查使用新设置`);
         json(loopView(session));
         return;
       }

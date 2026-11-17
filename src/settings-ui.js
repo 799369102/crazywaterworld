@@ -402,7 +402,7 @@ const configGroups = [
   ]},
   { id:'fleet-dispatch',title:'舰队调度',category:'world',fields:[configField('fleetDispatch.priority','任务优先顺序','dispatchOrder',{wide:true,help:'从上到下检查，已出征舰队不抢占。有效城战时段预留优先；已启动首杀对较低优先级任务预留舰队，无目标后释放。巨轮跟随独立排序；当天世界Boss首战完成后释放舰队。'})]},
   { id: 'runtime', title: '运行安排', category: 'runtime', fields: [
-    configField('loop.rounds', '运行轮数', 'number', { unit: '轮', help: '0 表示持续运行。此值用于下次开始挂机。' }),
+    configField('loop.rounds', '运行轮数', 'number', { unit: '轮', help: '0 表示持续运行。保存后点击页头的开始托管或恢复托管时生效。' }),
     configField('loop.everySeconds', '每轮间隔', 'number', { unit: '秒', help: '保存后下一轮使用新间隔。已有到期领奖与生产检查仍按游戏状态调度。' }),
     configField('loop.tasks', '领取主线、支线与成就'), configField('loop.dailies', '日常行动与钻石点金', 'switch', { help: '控制英雄免费/招募券招募、免费点金、竞技场、海盗日常、折扣店及钻石点金。开启本项不会单独触发消费：钻石点金还需开启基地中的付费点金及钻石总开关，并满足次数、余额和预算限制。' }), configField('loop.world', '基地生产与收取', 'switch', { help: '控制建筑、工厂、居民订单、农田、贸易港、漂浮物与采集船等基地动作，各分项开关仍有效。不是整个挂机的总开关；暂停全部托管请用页面的“暂停托管”。' }),
   ] },
@@ -451,7 +451,10 @@ async function configFlush() {
   const account = current;
   configCancelSaveTimer();
   while (account === current) {
-    if (configEditor.savePromise) {
+    const intervalSave = loopIntervalSaves.get(account);
+    if (intervalSave?.writing) {
+      if (!await intervalSave.promise) return false;
+    } else if (configEditor.savePromise) {
       if (!await configEditor.savePromise) return false;
     } else if (!configIsDirty()) return true;
     else if (configEditor.owner !== account || configEditor.busy || configEditor.loading) {
@@ -460,6 +463,13 @@ async function configFlush() {
     configCancelSaveTimer();
   }
   return false;
+}
+function configIntervalSaved(account, everySeconds, revision, nextRevision) {
+  if (configEditor.owner !== account || configEditor.data?.revision !== revision) return;
+  configEditor.data.settings.loop.everySeconds = everySeconds;
+  configEditor.baseline.loop.everySeconds = everySeconds;
+  configEditor.draft.loop.everySeconds = everySeconds;
+  configEditor.data.revision = nextRevision;
 }
 function configVisible() { return !$('tab-settings').classList.contains('hidden'); }
 function configMessage(text, kind = 'info') {
@@ -662,7 +672,7 @@ function configRender() {
   );
   for (let index = groups.length - 1; index >= 0; index--) if (!groups[index].fields.length) groups.splice(index, 1);
   const movedFields = new Set(configEditor.data.rules?.controlFields ?? []);
-  movedFields.add('loop.rounds'); movedFields.add('loop.everySeconds');
+  movedFields.add('loop.everySeconds');
   for (const group of groups) {
     group.controlGroup = group.id==='pirate-hunt'?'世界':configEditor.data.rules?.controlGroups?.[group.fields.find(field=>movedFields.has(field.key))?.key] ?? '总控制';
     group.controlKeys=group.fields.map(field=>field.key);
@@ -718,8 +728,8 @@ function configRender() {
       }
       if (group.movedCount || group.id === 'pirate-hunt') {
         const jump=el('button','config-small-button','前往挂机启停');jump.type='button';
-        jump.onclick=()=>openIdleControls(group.controlKeys.find(key=>movedFields.has(key)));
-        const note=el('div','config-help','是否自动运行由挂机页控制；执行细项、策略、权限和参数在这里设置。');note.append(jump);section.append(note);
+        jump.onclick=()=>openIdleControls(group.controlKeys.find(key=>key!=='loop.everySeconds'&&movedFields.has(key)));
+        const note=el('div','config-help',group.id==='runtime'?'每轮间隔在页头修改，任务开关在挂机页设置。':'是否自动运行由挂机页控制。执行细项、策略、权限和参数在这里设置。');note.append(jump);section.append(note);
       }
       configRenderFields(group.fields.map(spec => ({ ...spec, category, groupId: group.id })), section);
       groupHost.append(section);
@@ -1137,6 +1147,14 @@ function configSave(event, { automatic = false } = {}) {
   if (!configEditor.draft || configEditor.busy || configEditor.loading || configEditor.owner !== current) return Promise.resolve(false);
   if (!configIsDirty()) return Promise.resolve(true);
   if (configEditor.saveError?.fields?.revision) return Promise.resolve(false);
+  const intervalSave = loopIntervalSaves.get(current);
+  if (intervalSave?.writing) {
+    const account = current, serial = configEditor.serial;
+    return intervalSave.promise.then(() => {
+      if (account !== current || configEditor.owner !== account || configEditor.serial !== serial) return false;
+      return configSave(null, { automatic });
+    });
+  }
   if (!configCheckForm({ focus: !automatic })) {
     configEditor.saveError = { fields: { ...configEditor.errors } };
     configMessage('请修正标出的配置，填写完整后会自动保存。', 'error'); configUpdateState();
@@ -1164,9 +1182,8 @@ function configSave(event, { automatic = false } = {}) {
     configRenderUsage();
     if (!data.running) {
       const prior=loopFieldDefaults;
-      if(!prior||$('loop-rounds').value===String(prior.rounds))$('loop-rounds').value=data.settings.loop.rounds;
       if(!prior||$('loop-every').value===String(prior.seconds))$('loop-every').value=data.settings.loop.everySeconds;
-      loopFieldDefaults={rounds:data.settings.loop.rounds,seconds:data.settings.loop.everySeconds};
+      loopFieldDefaults={seconds:data.settings.loop.everySeconds};
     }
     return true;
   } catch (error) {
