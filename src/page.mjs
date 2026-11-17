@@ -16,6 +16,7 @@ const productionPlanningScript = readFileSync(new URL('./production-planning-ui.
 const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
 import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
+const alipayLoginScript = readFileSync(new URL('./alipay-login-ui.js', import.meta.url), 'utf8');
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
 const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
 const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
@@ -1503,7 +1504,7 @@ async function renderAccounts() {
   const details=$('account-details');$('account-detail-home').append(details);
   const box = clear($('accounts'));
   if (!accounts.length) {
-    box.appendChild(el('div', 'dim', '还没有账号。请按角色所属渠道，使用下方的 APP 登录、电脑微信或电脑抖音入口添加。'));
+    box.appendChild(el('div', 'dim', '还没有账号。请按角色所属渠道，使用下方的支付宝扫码、APP 登录、电脑微信或电脑抖音入口添加。'));
     return;
   }
   for (const account of accounts) {
@@ -1775,6 +1776,9 @@ $('cap-stop').onclick = async () => {
 
 // ---- APP 账号登录 ---------------------------------------------------------
 ${phoneLoginScript}
+
+// ---- 支付宝扫码登录 --------------------------------------------------------
+${alipayLoginScript}
 
 // ---- 启动 ------------------------------------------------------------------
 ${progressionScript}

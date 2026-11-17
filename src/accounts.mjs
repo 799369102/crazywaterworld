@@ -20,6 +20,7 @@ function emptyStore() {
 export function accountId(credential) {
   const id = credential?.login?.eworldParams?.openId;
   if (typeof id !== 'string' || !id) return null;
+  if (credential.source === 'alipay') return 'alipay:' + id;
   return credential.source === 'douyin-mitm' ? 'douyin:' + id : id;
 }
 
@@ -163,7 +164,8 @@ function mask(value) {
 
 export function describeAccount(account, { active = false } = {}) {
   const params = account.login?.eworldParams ?? {};
-  const title = account.label || account.lastSeen?.nickname || `账号 ${account.id.slice(0, 6)}`;
+  const title = account.label || account.lastSeen?.nickname || (account.source === 'alipay'
+    ? `支付宝账号 ${String(params.openId ?? '').slice(-6)}` : `账号 ${account.id.slice(0, 6)}`);
   const lastSeen = account.lastSeen
     ? { ...account.lastSeen, worldName: worldName(account.lastSeen.worldId) }
     : null;

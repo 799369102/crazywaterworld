@@ -91,9 +91,10 @@ import { captureManualProductionMaterialState } from './order-reservations.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
-import { loadStore, saveStore, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, rememberSeen, DATA_DIR } from './accounts.mjs';
+import { accountId, loadStore, saveStore, upsertAccount, removeAccount, setActive, pickAccount, describeAccount, revealAccount, rememberSeen, DATA_DIR } from './accounts.mjs';
 import { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture, DEFAULT_PROXY_PORT } from './capture.mjs';
 import { createPhoneLogin, loadDeviceProfile, saveDeviceProfile, DEVICE_PROFILE_PATH } from './phone-login.mjs';
+import { createAlipayLogin } from './alipay-login.mjs';
 import { iconIndex, atlasFile, itemIcon, resourceIcon, materialIcon, heroIcon, heroCard, buildingIcon, workerIcon } from './art.mjs';
 
 const LOG_LIMIT = 400;
@@ -132,10 +133,13 @@ const pageAsset = {
 };
 
 export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride,
+  alipayLoginController = null,
   captureController = { startCapture, stopCapture, captureState, inspectCaptureRecovery, recoverCapture } } = {}) {
   // 保留测试/嵌入调用方注入延迟的能力；正常运行时由当前账号的登录设置决定。
   const injectedRecoveryDelay = typeof recoveryDelayMs === 'function' ? recoveryDelayMs : null;
   const protocol = protocolOverride ?? loadProtocol();
+  const alipayLogin = alipayLoginController ?? createAlipayLogin({ protocol });
+  let alipaySaving = false;
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const globalLog = [];
   const streams = new Set();
@@ -168,6 +172,45 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       deviceSource: device?.source ?? null,
       deviceError: !device && fs.existsSync(devicePath) ? '设备档案无法读取或格式无效，请修复文件或重新导入。' : null,
     };
+  }
+
+  function alipayLoginStatus(id) {
+    const state = alipayLogin.status(id);
+    if (state.phase !== 'captured') return state;
+    const credential = alipayLogin.takeCredential(state.id);
+    const idOfAccount = accountId(credential);
+    const existing = loadStore().accounts.find(account => account.id === idOfAccount);
+    return { ...state, account: {
+      id: idOfAccount,
+      title: existing ? describeAccount(existing).title : `支付宝账号 ${credential.login.eworldParams.openId.slice(-6)}`,
+    } };
+  }
+
+  function saveAlipayAccount(id) {
+    if (closing) throw new Error('控制台已关闭');
+    // 排队期间二维码可能被取消或过期，落盘前重新取出有效凭证。
+    const credential = alipayLogin.takeCredential(id);
+    const idOfAccount = accountId(credential);
+    if (!idOfAccount || credential.source !== 'alipay') throw new Error('支付宝游戏登录凭证无效，请重新扫码');
+    const session = sessions.get(idOfAccount);
+    if (session) {
+      requireProductionSync(session);
+      session.generation++;
+      stopLoop(session, '支付宝账号已重新扫码，请重新连接');
+      saveAutomation(session.id, { enabled: false });
+      session.stages.stop('支付宝账号已重新扫码');
+      session.mutualAid.stop('支付宝账号已重新扫码');
+      for (const task of session.trials.values()) task.stop('支付宝账号已重新扫码');
+      session.client?.stop();
+      session.worldClient?.stop();
+      session.connecting = session.client = session.player = null;
+    }
+    const store = loadStore();
+    const { account, created } = upsertAccount(store, credential);
+    setActive(store, account.id);
+    saveStore(store);
+    emit(null, 'info', `${created ? '支付宝扫码已新增' : '支付宝扫码已更新'}账号 ${describeAccount(account).title}，可连接游戏`);
+    return { ok: true, account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) } };
   }
 
   async function readPhoneWorlds(credential) {
@@ -2002,6 +2045,46 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         return;
       }
 
+      // ---- 支付宝扫码登录 ----
+      if (route === 'POST /api/accounts/alipay-login/start') {
+        needConfirm(jsonBody());
+        if (closing) throw new Error('控制台已关闭');
+        if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
+        const state = await alipayLogin.start();
+        json(alipayLoginStatus(state.id));
+        return;
+      }
+      if (route === 'GET /api/accounts/alipay-login/status') {
+        json(alipayLoginStatus(parsed.searchParams.get('id') || undefined));
+        return;
+      }
+      if (route === 'POST /api/accounts/alipay-login/cancel') {
+        const { id } = jsonBody();
+        if (typeof id !== 'string' || !id) throw new Error('请选择要取消的扫码会话');
+        await alipayLogin.cancel(id);
+        json({ ok: true });
+        return;
+      }
+      if (route === 'POST /api/accounts/alipay-login/save') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
+        if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
+        alipaySaving = true;
+        try {
+          const credential = alipayLogin.takeCredential(payload.id);
+          const session = sessions.get(accountId(credential));
+          const save = () => saveAlipayAccount(payload.id);
+          const result = session && !session.paused ? await enqueue(session, save) : save();
+          // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
+          try { await alipayLogin.cancel(payload.id); } catch {}
+          json(result);
+        } finally {
+          alipaySaving = false;
+        }
+        return;
+      }
+
       // ---- 手机号登录 ----
       if (route === 'GET /api/accounts/phone-login/status') {
         json(phoneLoginStatus());
@@ -3375,6 +3458,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     close: async () => {
       closing = true;
+      await alipayLogin.close();
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();
       pendingPhoneLogins.clear();

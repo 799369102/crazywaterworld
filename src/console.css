@@ -384,6 +384,9 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 #account-dialog input { width:100% }
 #m-body { display:grid; gap:8px }
 
+.alipay-flow { display:grid; gap:8px; margin-block:12px }
+.alipay-qr { width:256px; height:256px; max-width:100%; object-fit:contain; padding:16px; background:#fff; image-rendering:pixelated }
+
 /* ---- 手机 ---- */
 @media (max-width:768px) {
   .headline,.deck { padding-inline:16px }
