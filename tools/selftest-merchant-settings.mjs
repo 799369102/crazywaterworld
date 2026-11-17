@@ -119,15 +119,15 @@ test('拒绝错误类型、越界参数、未知字段，合法边界与零值�
   assert.throws(() => importAutomationSettings(invalid), /不支持的设置项/);
 });
 
-test('周期海商王界面完整接线，并说明估算、默认不亏卖和独立指针开关', () => {
+test('海商王活动配置完整接线，并说明估算、默认不亏卖和独立指针开关', () => {
   const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
   const definitions = script.slice(0, script.indexOf('function configGet('));
-  const groups = new Function(definitions + '\nreturn configGroups;')();
-  const group = groups.find(row => row.id === 'merchant-week');
-  assert(group);
-  const byKey = new Map(group.fields.map(field => [field.key, field]));
+  const { groups, fields } = new Function(definitions + '\nreturn {groups: configGroups, fields: merchantActivityFields};')();
+  assert(!groups.some(row => row.id === 'merchant-week'));
+  const byKey = new Map(fields.map(field => [field.key, field]));
   for (const key of Object.keys(defaults)) assert(byKey.has('merchant.' + key), key);
   assert(byKey.has('schedule.merchantRewards'));
+  assert(byKey.has('schedule.tradeTasks'));
   assert.match(byKey.get('schedule.merchantTrade').help, /没有成员共享/);
   assert.match(byKey.get('merchant.estimateDiscountPercent').help, /估算/);
   assert.match(byKey.get('merchant.maxLossPercent').help, /不自动亏损/);

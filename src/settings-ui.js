@@ -27,6 +27,38 @@ const configZeroHints={
  'pirateHunt.minDurabilityPercent':'0 表示不设比例门槛，仍须有耐久。','pirateHunt.petrolReserve':'0 表示不保留汽油。','cityWar.petrolReserve':'0 表示不保留汽油。','heroes.keepExp':'0 表示不保留英雄经验。',
  'trials.maxSingleCost':'0 表示禁止付费扫荡。','trials.dailyDiamondBudget':'0 表示禁止付费扫荡。'
 };
+const merchantActivityFields = [
+    configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'周期活动。按批次成本、资金、舱位和本港库存规划多商品组合，比较整船预期收益选港；没有成员共享紧缺货也可选择已知普通港口，本港盈利出售不依赖商情。远端价格可能是估算，到港重新核价；临近结束停止无法及时卖出的采购。'}),
+    configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认开启，仅随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
+    configField('schedule.tradeTasks','领取海商王联盟任务奖励','switch',{help:'保留原联盟任务领奖开关，按本期联盟任务达成进度自动领取。'}),
+    configField('schedule.merchantRewards','领取战令、利润和联盟奖励','switch',{help:'按本期利润、战令分数、联盟任务进度和当日商情贡献领取已达成档。'}),
+    configField('merchant.quoteMaxAgeSeconds','报价最长参考时间','number',{unit:'秒',help:'默认300秒。记录采集时间，过期或跨刷新时点的报价不能当作有效报价；到港仍须重新读取当前报价。'}),
+    configField('merchant.monitorSeconds','港口监控间隔','number',{unit:'秒',help:'默认60秒。监测本港价格和联盟共享库存，推送可提前唤醒串行检查；刷新时刻和到港时刻单独安排检查。异地港口没有实时价格接口，仍以到港读取为准。'}),
+    configField('merchant.estimateDiscountPercent','估算卖价风险折扣','number',{unit:'%',help:'默认10%。没有可用远端报价时，以商品基准价扣除此比例估算，日志标明估算；实际成交价和收益以到港回读为准。'}),
+    configField('merchant.minExpectedProfit','最低预期整船利润','number',{unit:'商会币',help:'采购与选港需达到的风险调整后预期利润，默认1。资金、容量和可购库存同时限制采购数量。'}),
+    configField('merchant.refreshWaitSeconds','刷新前最多等待','number',{unit:'秒',help:'默认120秒，0关闭。仅在等待后的预计收益优于立即出航且能及时成交时等待；刷新后重新读取价格和库存。刷新时刻使用游戏配置。'}),
+    configField('merchant.liquidationMinutes','活动结束前清仓窗口','number',{unit:'分钟',help:'默认120分钟，0关闭提前清仓。窗口内优先处理持货；无论此值多少，都不采购无法在交易截止前卖出的货物。'}),
+    configField('merchant.maxLossPercent','清仓最大亏损率','number',{unit:'%',help:'默认0，不自动亏损卖出。大于0时，清仓可按各批次买价接受此比例以内的亏损，仍须符合来源港出售限制。'}),
+    configField('merchant.autoSpeedUp','允许使用商会指针','switch',{help:'默认关闭。遵守每日用量、保留数量和每程上限。购买指针必须另开购买开关及钻石预算。'}),
+    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：免费跑船，临近截止才补救'],['refresh','刷新窗口加速：不卡点到港'],['arrival','刷新窗口加速：每刷新最多一程'],['profit','原有策略：周转增益及截止补救']],help:'新策略仍按本港实时报价和目的港保守估值决策。卡点模式用持久航程记录限制同一刷新周期的出航次数。'}),
+    configField('merchant.refreshWindowMinutes','刷新后加速窗口','number',{ parent: 'merchant.speedUpMode',unit:'分钟',when:d=>['refresh','arrival'].includes(d.merchant.speedUpMode),help:'仅在真实配置刷新时刻之后的此窗口内加速，窗口外等待；交易截止前仍可补救。'}),
+    configField('merchant.dailyPointerLimit','每日指针使用上限','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant.autoSpeedUp,help:'默认28，0 禁止使用；跨重启保留已用和未确认用量。'}),
+    configField('merchant.autoBuyPointers','自动购买缺少的商会指针','switch',{ parent: 'merchant.autoSpeedUp',when:d=>d.merchant.autoSpeedUp,help:'仅补足当前有效加速方案所缺数量，受游戏日购买上限、全局钻石及本项预算限制。'}),
+    configField('merchant.pointerDailyDiamondLimit','每日购买指针钻石上限','number',{ parent: 'merchant.autoBuyPointers',when:d=>d.merchant.autoBuyPointers,help:'0 禁止购买；还需开启全局钻石消费。'}),
+    configField('merchant.profitLimit','本期累计利润上限','number',{unit:'商会币',help:'0 表示不额外限制。50000万元对应500000000商会币；达到后停止新增买卖、升级与加速，仍可按开关共享当前港口情报，领奖独立。不是收益保证。'}),
+    configField('merchant.firstDepartureMode','每日首趟出发','choice',{options:[['smart','自行判定：先找盈利商品'],['time','指定最早时间']]}),
+    configField('merchant.firstDepartureTime','首趟最早出发时间','time',{ parent: 'merchant.firstDepartureMode',when:d=>d.merchant.firstDepartureMode==='time',help:'北京时间。到点后仍需满足报价、舱位、交易时段和预计成交条件。'}),
+    configField('merchant.firstDepartureWaitMinutes','首趟无盈利商情最多等待','number',{ parent: 'merchant.firstDepartureMode',unit:'分钟',when:d=>d.merchant.firstDepartureMode==='smart',help:'默认29分钟。已有盈利路线直接执行；信息不足先等，超时后才使用已知普通港口有限寻价。'}),
+    configField('merchant.speedUpMaxPerLeg','每程最多使用指针','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant?.autoSpeedUp,help:'默认4，按整段航程累计，分轮执行也不能超过上限。指针不足时只在部分加速仍有可核验收益依据时使用。'}),
+    configField('merchant.speedUpMinProfit','每根指针最低估算收益增量','number',{ parent: 'merchant.autoSpeedUp',unit:'商会币',when:d=>d.merchant?.autoSpeedUp,help:'默认1000。只加速能产生足够预期增益的航程，无法确认有效交易机会时不使用。'}),
+    configField('merchant.keepPointers','保留指针数量','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant?.autoSpeedUp,help:'自动加速后至少保留此数量，默认0。'}),
+    configField('merchant.autoUpgrade','允许回本评估后升级商船','switch',{help:'默认关闭。需同时开启全局钻石消费。仅用可执行航次、已观察库存与新船增量收益保守评估；没有足够回本证据时不升级。'}),
+    configField('merchant.upgradeCoinValuePerDiamond','每钻石要求的商会币价值','number',{ parent: 'merchant.autoUpgrade',unit:'商会币',when:d=>d.merchant?.autoUpgrade,help:'默认100，是你用于评估的价值假设，不是游戏兑换汇率。升级需同时满足下方回本比例。'}),
+    configField('merchant.upgradeMinReturnPercent','升级最低预期回本比例','number',{ parent: 'merchant.autoUpgrade',unit:'%',when:d=>d.merchant?.autoUpgrade,help:'默认150%。保守增量收益至少达到钻石成本折算值的此比例；活动结束重置船级，不能跨期摊销。'}),
+    configField('merchant.upgradeMaxLevel','自动升级最高船级','number',{ parent: 'merchant.autoUpgrade',when:d=>d.merchant?.autoUpgrade,help:'默认2级。达到后不继续自动升级。'}),
+    configField('merchant.upgradeDailyDiamondLimit','商船升级每日钻石上限','number',{ parent: 'merchant.autoUpgrade',unit:'钻石',when:d=>d.merchant?.autoUpgrade,help:'默认300，0禁止。与全局钻石预算和钻石保留量同时生效；未知结果保留占用，重连也不重复扣款。'}),
+];
+for (const field of merchantActivityFields) activityOwnedSettings.add(field.key);
 const configGroups = [
   {id:'alliance',title:'联盟 · 募兵与互助',category:'world',fields:[
     configField('alliance.enabled','联盟自动化总开关','switch',{help:'开启后接管联盟募兵、互助和福利任务；关闭保留本组细项。原有独立任务开关仍可在原入口管理。'}),
@@ -116,36 +148,6 @@ const configGroups = [
     configField('schedule.compassSpin','龙王罗盘 · 自动抽取'),
     configField('eventActions.compassThreshold','铜钱达到多少开始抽取','number',{ parent: 'schedule.compassSpin',unit:'枚',help:'每轮先核对活动、道具单价与库存，默认10枚。'}),
     configField('eventActions.compassDrawCount','每批最多抽取','choice',{ parent: 'schedule.compassSpin',numeric:true,options:[[1,'1次'],[5,'5次'],[10,'10次'],[50,'50次']],help:'按实际铜钱和游戏支持的批次选择，每轮最多一批。'}),
-  ]},
-  {id:'merchant-week',title:'周期 · 海商王',category:'daily',fields:[
-    configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'周期活动。按批次成本、资金、舱位和本港库存规划多商品组合，比较整船预期收益选港；没有成员共享紧缺货也可选择已知普通港口，本港盈利出售不依赖商情。远端价格可能是估算，到港重新核价；临近结束停止无法及时卖出的采购。'}),
-    configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认开启，仅随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
-    configField('schedule.merchantRewards','领取战令、利润和联盟奖励','switch',{help:'按本期利润、战令分数、联盟任务进度和当日商情贡献领取已达成档。'}),
-    configField('merchant.quoteMaxAgeSeconds','报价最长参考时间','number',{unit:'秒',help:'默认300秒。记录采集时间，过期或跨刷新时点的报价不能当作有效报价；到港仍须重新读取当前报价。'}),
-    configField('merchant.monitorSeconds','港口监控间隔','number',{unit:'秒',help:'默认60秒。监测本港价格和联盟共享库存，推送可提前唤醒串行检查；刷新时刻和到港时刻单独安排检查。异地港口没有实时价格接口，仍以到港读取为准。'}),
-    configField('merchant.estimateDiscountPercent','估算卖价风险折扣','number',{unit:'%',help:'默认10%。没有可用远端报价时，以商品基准价扣除此比例估算，日志标明估算；实际成交价和收益以到港回读为准。'}),
-    configField('merchant.minExpectedProfit','最低预期整船利润','number',{unit:'商会币',help:'采购与选港需达到的风险调整后预期利润，默认1。资金、容量和可购库存同时限制采购数量。'}),
-    configField('merchant.refreshWaitSeconds','刷新前最多等待','number',{unit:'秒',help:'默认120秒，0关闭。仅在等待后的预计收益优于立即出航且能及时成交时等待；刷新后重新读取价格和库存。刷新时刻使用游戏配置。'}),
-    configField('merchant.liquidationMinutes','活动结束前清仓窗口','number',{unit:'分钟',help:'默认120分钟，0关闭提前清仓。窗口内优先处理持货；无论此值多少，都不采购无法在交易截止前卖出的货物。'}),
-    configField('merchant.maxLossPercent','清仓最大亏损率','number',{unit:'%',help:'默认0，不自动亏损卖出。大于0时，清仓可按各批次买价接受此比例以内的亏损，仍须符合来源港出售限制。'}),
-    configField('merchant.autoSpeedUp','允许使用商会指针','switch',{help:'默认关闭。遵守每日用量、保留数量和每程上限。购买指针必须另开购买开关及钻石预算。'}),
-    configField('merchant.speedUpMode','跑船与加速策略','choice',{options:[['deadline','稳定模式：免费跑船，临近截止才补救'],['refresh','刷新窗口加速：不卡点到港'],['arrival','刷新窗口加速：每刷新最多一程'],['profit','原有策略：周转增益及截止补救']],help:'新策略仍按本港实时报价和目的港保守估值决策。卡点模式用持久航程记录限制同一刷新周期的出航次数。'}),
-    configField('merchant.refreshWindowMinutes','刷新后加速窗口','number',{ parent: 'merchant.speedUpMode',unit:'分钟',when:d=>['refresh','arrival'].includes(d.merchant.speedUpMode),help:'仅在真实配置刷新时刻之后的此窗口内加速，窗口外等待；交易截止前仍可补救。'}),
-    configField('merchant.dailyPointerLimit','每日指针使用上限','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant.autoSpeedUp,help:'默认28，0 禁止使用；跨重启保留已用和未确认用量。'}),
-    configField('merchant.autoBuyPointers','自动购买缺少的商会指针','switch',{ parent: 'merchant.autoSpeedUp',when:d=>d.merchant.autoSpeedUp,help:'仅补足当前有效加速方案所缺数量，受游戏日购买上限、全局钻石及本项预算限制。'}),
-    configField('merchant.pointerDailyDiamondLimit','每日购买指针钻石上限','number',{ parent: 'merchant.autoBuyPointers',when:d=>d.merchant.autoBuyPointers,help:'0 禁止购买；还需开启全局钻石消费。'}),
-    configField('merchant.profitLimit','本期累计利润上限','number',{unit:'商会币',help:'0 表示不额外限制。50000万元对应500000000商会币；达到后停止新增买卖、升级与加速，仍可按开关共享当前港口情报，领奖独立。不是收益保证。'}),
-    configField('merchant.firstDepartureMode','每日首趟出发','choice',{options:[['smart','自行判定：先找盈利商品'],['time','指定最早时间']]}),
-    configField('merchant.firstDepartureTime','首趟最早出发时间','time',{ parent: 'merchant.firstDepartureMode',when:d=>d.merchant.firstDepartureMode==='time',help:'北京时间。到点后仍需满足报价、舱位、交易时段和预计成交条件。'}),
-    configField('merchant.firstDepartureWaitMinutes','首趟无盈利商情最多等待','number',{ parent: 'merchant.firstDepartureMode',unit:'分钟',when:d=>d.merchant.firstDepartureMode==='smart',help:'默认29分钟。已有盈利路线直接执行；信息不足先等，超时后才使用已知普通港口有限寻价。'}),
-    configField('merchant.speedUpMaxPerLeg','每程最多使用指针','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant?.autoSpeedUp,help:'默认4，按整段航程累计，分轮执行也不能超过上限。指针不足时只在部分加速仍有可核验收益依据时使用。'}),
-    configField('merchant.speedUpMinProfit','每根指针最低估算收益增量','number',{ parent: 'merchant.autoSpeedUp',unit:'商会币',when:d=>d.merchant?.autoSpeedUp,help:'默认1000。只加速能产生足够预期增益的航程，无法确认有效交易机会时不使用。'}),
-    configField('merchant.keepPointers','保留指针数量','number',{ parent: 'merchant.autoSpeedUp',unit:'根',when:d=>d.merchant?.autoSpeedUp,help:'自动加速后至少保留此数量，默认0。'}),
-    configField('merchant.autoUpgrade','允许回本评估后升级商船','switch',{help:'默认关闭。需同时开启全局钻石消费。仅用可执行航次、已观察库存与新船增量收益保守评估；没有足够回本证据时不升级。'}),
-    configField('merchant.upgradeCoinValuePerDiamond','每钻石要求的商会币价值','number',{ parent: 'merchant.autoUpgrade',unit:'商会币',when:d=>d.merchant?.autoUpgrade,help:'默认100，是你用于评估的价值假设，不是游戏兑换汇率。升级需同时满足下方回本比例。'}),
-    configField('merchant.upgradeMinReturnPercent','升级最低预期回本比例','number',{ parent: 'merchant.autoUpgrade',unit:'%',when:d=>d.merchant?.autoUpgrade,help:'默认150%。保守增量收益至少达到钻石成本折算值的此比例；活动结束重置船级，不能跨期摊销。'}),
-    configField('merchant.upgradeMaxLevel','自动升级最高船级','number',{ parent: 'merchant.autoUpgrade',when:d=>d.merchant?.autoUpgrade,help:'默认2级。达到后不继续自动升级。'}),
-    configField('merchant.upgradeDailyDiamondLimit','商船升级每日钻石上限','number',{ parent: 'merchant.autoUpgrade',unit:'钻石',when:d=>d.merchant?.autoUpgrade,help:'默认300，0禁止。与全局钻石预算和钻石保留量同时生效；未知结果保留占用，重连也不重复扣款。'}),
   ]},
   {id:'side-rewards',title:'漫剧 · 擂台赛 · 赛季宝箱',category:'daily',fields:[
     configField('schedule.comicDrama','漫剧观看与每日奖励','switch',{help:'默认开启。已解锁的集数每轮最多处理 10 集，并在每天领取 1 次每日奖励；当天没有新集时重看最后一集以满足领取条件。'}),
@@ -1239,7 +1241,7 @@ async function configPreview() {
         data.moduleActions=plan.actions.filter(a=>selected.id==='daily-actions'?a.kind==='daily':selected.id==='daily-challenges'?isTrial(a):a.kind!=='daily'&&!isTrial(a));
         data.usage=plan.usage;
       }
-      const activityNames={'merchant-week':['海商王'],'military-week':['军备竞赛'],'beauty-contest':['海上风采大赛'],'river-series':['走江踏浪','龙王罗盘','酆都法旨']};
+      const activityNames={'military-week':['军备竞赛'],'beauty-contest':['海上风采大赛'],'river-series':['走江踏浪','龙王罗盘','酆都法旨']};
       if(activityNames[selected.id]){
         const stats=await call('/api/activity-statistics?refresh=1');
         data.moduleActivities=stats.items.filter(r=>activityNames[selected.id].includes(r.name));

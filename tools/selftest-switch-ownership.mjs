@@ -1,4 +1,4 @@
-// 挂机只管理自动执行入口，细项、策略、权限与参数保留在游戏配置。
+// 挂机管理自动执行入口，游戏配置与活动详情各自拥有唯一的编辑字段。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -16,7 +16,10 @@ const { automationTasks } = await import('../src/automation.mjs');
 const { idlePanel } = await import('../src/ui/dist/console.mjs');
 const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const definitions = script.slice(0, script.indexOf('function configGet('));
-const staticGroups = new Function(definitions + '\nreturn configGroups;')();
+const { staticGroups, merchantFields } = new Function(definitions + '\nreturn { staticGroups: configGroups, merchantFields: merchantActivityFields };')();
+const activityKeys = new Set([...merchantFields.map(field => field.key),
+  'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
+  'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const renderStart = script.indexOf('function configRender()');
 const modelStart = script.indexOf('  const groups =', renderStart), modelEnd = script.indexOf('  const scopeSelect=', modelStart);
 assert(modelStart > renderStart && modelEnd > modelStart);
@@ -31,7 +34,7 @@ let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 
 try {
-  await check('挂机只显示33个自动执行入口，详细开关与参数在配置且两页没有重复字段', () => {
+  await check('挂机显示33个自动执行入口，全部字段在挂机、游戏配置或活动页有唯一编辑位置', () => {
     const html = idlePanel(automationControls), rendered = [...html.matchAll(/data-auto-task="([^"]+)"/g)].map(match => match[1]);
     const idleKeys = idleAutomationControls.map(control => control.key), movedFields = idleAutomationControls.flatMap(control => control.fields);
     assert.equal(idleKeys.length, 33, '超凡英雄统一在活动页编辑，其余紧凑模块和独立任务入口保留');
@@ -44,9 +47,10 @@ try {
       assert(configGroups.some(group => group.id === control.configTarget), control.key + ' 配置入口存在');
     }
     const scheduledInIdle = new Set(['loop.rounds', 'loop.everySeconds']);
-    for (const group of staticGroups) for (const field of group.fields) {
-      const locations = Number(movedFields.includes(field.key)) + Number(configKeys.has(field.key)) + Number(scheduledInIdle.has(field.key));
-      assert.equal(locations, 1, field.key + ' 应有且仅有一个编辑位置');
+    const fields = new Set([...staticGroups.flatMap(group => group.fields.map(field => field.key)), ...activityKeys]);
+    for (const key of fields) {
+      const locations = Number(movedFields.includes(key)) + Number(configKeys.has(key)) + Number(scheduledInIdle.has(key)) + Number(activityKeys.has(key));
+      assert.equal(locations, 1, key + ' 应有且仅有一个编辑位置');
     }
     assert(html.includes('id="loop-rounds"') && html.includes('id="loop-every"'));
   });
@@ -56,20 +60,19 @@ try {
       'farm.harvest', 'farm.autoPlant', 'farm.customPlant', 'gather.fishing', 'gather.keyOpen',
       'museum.enabled', 'museum.upgrade', 'schedule.museumCollect', 'radar.enabled', 'schedule.radarRepair',
       'heroes.level', 'heroes.star', 'heroes.skill', 'heroes.universal', 'resources.allowDiamonds',
-      'alliance.autoHelp', 'silicon.fleets.0.enabled', 'silicon.fleets.1.huntEnabled',
-      'merchant.autoSpeedUp', 'merchant.autoBuyPointers', 'merchant.autoUpgrade'];
+      'alliance.autoHelp', 'silicon.fleets.0.enabled', 'silicon.fleets.1.huntEnabled'];
     const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
     for (const key of details) {
       assert(!idleFields.has(key), key + ' 不属于挂机主控');
       assert.equal(configFields.find(field => field.key === key)?.kind, 'switch', key + ' 仍能在配置中编辑');
     }
     for (const key of ['building.maxUpgrades', 'factory.keepStock', 'farm.crops', 'gather.targetLevel',
-      'treasure.fleetIds', 'merchant.pointerDailyDiamondLimit', 'resources.diamondDailyLimit', 'heroes.heroIds']) {
+      'treasure.fleetIds', 'resources.diamondDailyLimit', 'heroes.heroIds']) {
       assert(configKeys.has(key), key + ' 参数应保留'); assert(!idleFields.has(key));
     }
   });
 
-  await check('商人与超凡英雄配置由活动页管理，挂机和游戏配置均无重复编辑入口', () => {
+  await check('商人、超凡英雄和海商王由活动页管理，全部海商王开关与参数均可编辑', () => {
     const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
     for (const key of ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
       'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']) {
@@ -81,6 +84,19 @@ try {
     assert(!configGroups.some(group => group.id === 'hero-raid'));
     assert(!configKeys.has('heroRaid.retryTimes'));
     assert(!idleFields.has('heroRaid.retryTimes'));
+    assert(!configGroups.some(group => group.id === 'merchant-week'));
+    const expectedMerchantKeys = new Set([...Object.keys(defaultSettings().merchant).map(key => 'merchant.' + key),
+      'schedule.merchantTrade', 'schedule.merchantRewards', 'schedule.tradeTasks']);
+    assert.deepEqual(new Set(merchantFields.map(field => field.key)), expectedMerchantKeys);
+    assert.equal(merchantFields.length, expectedMerchantKeys.size, '每个海商王字段只有一套定义');
+    for (const field of merchantFields) {
+      assert(!configKeys.has(field.key), field.key + ' 由活动页编辑');
+      assert(!idleFields.has(field.key), field.key + ' 由活动页编辑');
+      const value = read(defaultSettings(), field.key);
+      if (typeof value === 'boolean') assert.equal(field.kind, 'switch', field.key + ' 开关可编辑');
+      else if (typeof value === 'number') assert.equal(field.kind, 'number', field.key + ' 数值可编辑');
+      else assert(['choice', 'time'].includes(field.kind), field.key + ' 策略或时间可编辑');
+    }
   });
 
   await check('关闭基地模块只暂停主控，混合细项和参数往返不变', () => {

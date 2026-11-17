@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { defaultSettings, settingsUiRules } from '../src/automation-settings.mjs';
 
 const script = fs.readFileSync(new URL('../src/ui/activities.js', import.meta.url), 'utf8');
+const configScript = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
+const merchantActivityFields = new Function(configScript.slice(0, configScript.indexOf('function configGet(')) + '\nreturn merchantActivityFields;')();
 const clone = value => JSON.parse(JSON.stringify(value));
 const deferred = () => {
   let resolve, reject;
@@ -91,6 +94,12 @@ function fixture() {
     revision, baseRevision: 'base-' + revision,
   });
   const heroSaved = new Map([['merchant-a', heroSettings()], ['merchant-b', heroSettings({ rewards: false }, 3)]]);
+  const seaSettings = (values = {}, schedule = {}, revision = 1) => ({
+    settings: { merchant: { ...defaultSettings().merchant, ...values },
+      schedule: { merchantTrade: false, merchantRewards: true, tradeTasks: true, ...schedule } },
+    rules: { numbers: settingsUiRules().numbers }, revision, baseRevision: 'base-' + revision,
+  });
+  const seaSaved = new Map([['merchant-a', seaSettings()], ['merchant-b', seaSettings({ profitLimit: 100 }, { merchantRewards: false }, 3)]]);
   const now = Math.floor(state.now / 1000);
   const catalog = { activities: [], eventTasks: [], status: {}, serverNow: now, catalogOnly: true };
   const activities = {
@@ -105,10 +114,12 @@ function fixture() {
   const context = {
     current: 'merchant-a', snapshot: { paused: false, connected: true }, disconnected: new Set(), savingTasks: new Set(),
     loopSettingsRevision: 1,
+    merchantActivityFields,
     $: node, el: element,
     clear: item => { item.textContent = ''; return item; },
     component: name => element(name === 'ui-number' ? 'input' : 'button'),
     smallButton: text => element('button', '', text),
+    makeHelpTip: (label, help) => element('span', 'help-tip', help),
     setTaskSwitch: (input, enabled) => input.setAttribute('aria-checked', enabled),
     table: (headers, rows) => {
       const table = element('table'); table.headers = headers; table.rows = rows; return table;
@@ -166,6 +177,22 @@ function fixture() {
         }
         return clone(heroSaved.get(account));
       }
+      if (request.route === '/api/merchant/settings') {
+        if (request.method === 'POST') {
+          const previous = seaSaved.get(account), payload = request.body;
+          assert.equal(payload.revision, previous.revision);
+          assert.equal(payload.baseRevision, previous.baseRevision);
+          assert.equal(payload.confirm, true);
+          assert(merchantActivityFields.some(field => field.key === payload.key));
+          const next = clone(previous);
+          const [group, key] = payload.key.split('.');
+          next.settings[group][key] = payload.value;
+          next.revision++;
+          next.baseRevision = 'base-' + next.revision;
+          seaSaved.set(account, next);
+        }
+        return clone(seaSaved.get(account));
+      }
       if (request.route === '/api/activities') return clone(activities);
       if (request.route === '/api/activities/catalog') return clone(catalog);
       throw Error('未声明前端测试请求 ' + request.route);
@@ -177,19 +204,32 @@ function fixture() {
     render: renderActivityTabs, rows: activityRows, select: selectActivity, lifecycle: activityLifecycle,
     get settings() { return merchantSettingsData; },
     get owner() { return merchantSettingsOwner; },
-    selectMerchant() { selectedActivity = activityRows().find(row => row.weekType === 5)?.id; renderActivityTabs(); },
+    selectMerchant() { selectActivity(activityRows().find(row => row.weekType === 5)?.id); },
     get heroSettings() { return heroRaidSettingsData; },
     get heroOwner() { return heroRaidSettingsOwner; },
     selectHero() { selectActivity(activityRows().find(isHeroRaidActivity)?.id); },
     readHeroSettings: refreshHeroRaidSettings, saveHero: saveHeroRaidSetting,
+    get seaSettings() { return seaMerchantSettingsData; },
+    get seaOwner() { return seaMerchantSettingsOwner; },
+    selectSea() { selectActivity(activityRows().find(isSeaMerchantActivity)?.id); },
+    readSeaSettings: refreshSeaMerchantSettings, saveSea: saveSeaMerchantSetting,
   })`, context);
   const controls = () => node('activities-list').querySelectorAll('[data-merchant-setting]');
   const heroControls = () => node('activities-list').querySelectorAll('[data-hero-raid-setting]');
+  const seaControls = () => node('activities-list').querySelectorAll('[data-sea-merchant-setting]');
   return { api, context, state, node, saved, settings, activities, catalog, controls, heroSaved, heroSettings, heroControls,
+    seaSaved, seaSettings, seaControls,
     input: key => controls().find(input => input.dataset.merchantSetting === key),
     heroInput: key => heroControls().find(input => input.dataset.heroRaidSetting === key),
     async clickHero(key) { const input = this.heroInput(key); assert(input && !input.disabled, key + ' 开关应可编辑'); await input.onclick(); },
     async setHeroRetries(value) { const input = this.heroInput('retryTimes'); input.value = value; await input.onchange(); },
+    seaInput: key => seaControls().find(input => input.dataset.seaMerchantSetting === key),
+    async setSea(key, value) {
+      const input = this.seaInput(key);
+      assert(input && !input.disabled, key + ' 应可编辑');
+      if (merchantActivityFields.find(field => field.key === key).kind === 'switch') await input.onclick();
+      else { input.value = value; await input.onchange(); }
+    },
     async click(key) { const input = this.input(key); assert(input && !input.disabled, key + ' 开关应可编辑'); await input.onclick(); },
   };
 }
@@ -245,7 +285,7 @@ await test('暂停、断开及首次未连接时可配置商人，游戏读取�
     assert.equal(f.node('activities-order').querySelectorAll('button').length, 0);
     await f.click('autoSubmit');
     assert.equal(f.saved.get('merchant-a').settings.autoSubmit, true);
-    assert(f.state.calls.every(call => ['/api/week-order/settings', '/api/hero-raid/settings', '/api/activities/catalog'].includes(call.route)));
+    assert(f.state.calls.every(call => ['/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/catalog'].includes(call.route)));
   }
 });
 
@@ -531,6 +571,8 @@ await test('超凡英雄未连接、暂停及未开放时均可预先配置，�
     if (state === 'paused') f.context.snapshot.paused = true;
     if (state === 'notConnected') f.context.snapshot.connected = false;
     await f.api.refresh(); f.api.selectHero();
+    assert.equal(f.api.rows().find(row => row.id === 'hero-raid').kind, 'weekly');
+    assert.equal(f.node('activity-kind').textContent, '周期');
     assert.equal(f.heroControls().length, 6);
     assert(f.heroControls().every(input => !input.disabled));
     await f.clickHero('orders');
@@ -538,21 +580,89 @@ await test('超凡英雄未连接、暂停及未开放时均可预先配置，�
     assert(!f.state.calls.some(call => call.route === '/api/activities/run'));
   }
   const f = fixture(), now = f.activities.serverNow;
-  f.activities.activities.push({ id: 'hero-raid:1001', name: '超凡英雄活动', kind: 'limited',
+  f.activities.activities.push({ id: 'hero-raid:1001', name: '超凡英雄活动', kind: 'weekly',
     startTime: now - 100, endTime: now + 100, taskKeys: [] });
   await f.api.refresh(); f.api.selectHero();
   assert.equal(f.api.rows().filter(row => row.id.startsWith('hero-raid')).length, 1);
   assert.equal(f.heroControls().length, 6);
+  assert.equal(f.node('activity-kind').textContent, '周期');
   assert(!f.node('activities-list').textContent.includes('暂未接入'));
+});
+
+await test('未开放配置入口默认收起，展开后可编辑且按账号保存', async () => {
+  for (const state of ['connected', 'paused', 'notConnected', 'readFailed']) {
+    const f = fixture();
+    f.activities.activities = [];
+    if (state === 'paused') f.context.snapshot.paused = true;
+    if (state === 'notConnected') f.context.snapshot.connected = false;
+    if (state === 'readFailed') f.state.respond = request => {
+      if (request.route === '/api/activities') throw Error('活动暂时不可读');
+    };
+    await f.api.refresh();
+    const tabs = f.node('activity-tabs');
+    const group = tabs.querySelector('#activity-group-upcoming');
+    assert(group, '未开放配置入口应归入收起的活动分组');
+    assert.equal(group.hidden, true);
+    const toggle = tabs.querySelector('[data-activity-group=upcoming]');
+    assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+    assert.match(toggle.textContent, /未开放活动/);
+    for (const id of ['hero-raid', 'rich-merchant']) {
+      assert(group.querySelector('[data-activity=' + id + ']'));
+      assert(!tabs.querySelector('.activity-current-tabs').querySelector('[data-activity=' + id + ']'));
+    }
+    tabs.querySelector('[aria-selected=true]').onkeydown({ key: 'Home', preventDefault() {} });
+    assert.notEqual(tabs.querySelector('[aria-selected=true]').dataset.activity, 'hero-raid');
+    toggle.onclick();
+    tabs.querySelector('[data-activity=hero-raid]').onclick();
+    assert.equal(f.heroControls().length, 6);
+    await f.clickHero('enabled');
+    assert.equal(f.heroSaved.get('merchant-a').settings.enabled, true);
+    tabs.querySelector('[data-activity-group=upcoming]').onclick();
+    assert.equal(tabs.querySelector('#activity-group-upcoming').hidden, true);
+    assert.notEqual(tabs.querySelector('[aria-selected=true]').dataset.activity, 'hero-raid');
+    assert(!f.state.calls.some(call => call.route === '/api/activities/run'));
+  }
+});
+
+await test('超凡英雄读取到开放期次后自动移上，结束后收起并沿用设置复开', async () => {
+  const f = fixture(), now = f.activities.serverNow;
+  f.heroSaved.set('merchant-a', f.heroSettings({ enabled: true, orders: true }));
+  await f.api.refresh();
+  const tabs = f.node('activity-tabs');
+  assert(tabs.querySelector('#activity-group-upcoming')?.querySelector('[data-activity=hero-raid]'));
+  const raid = { id: 'hero-raid:1001', name: '超凡英雄活动', kind: 'weekly', observed: true,
+    startTime: now - 100, endTime: now + 100, taskKeys: [] };
+  f.activities.activities.push(raid);
+  await f.api.refresh();
+  assert(!tabs.querySelector('[data-activity=hero-raid]'));
+  assert(tabs.querySelector('.activity-current-tabs').querySelector('[data-activity="hero-raid:1001"]'));
+  tabs.querySelector('[data-activity="hero-raid:1001"]').onclick();
+  assert.equal(f.heroInput('enabled').getAttribute('aria-checked'), 'true');
+  assert.equal(f.heroInput('orders').getAttribute('aria-checked'), 'true');
+  f.state.now += 100000;
+  f.api.render();
+  const ended = tabs.querySelector('#activity-group-ended');
+  assert.equal(ended.hidden, true);
+  assert(ended.querySelector('[data-activity="hero-raid:1001"]'));
+  assert.notEqual(tabs.querySelector('[aria-selected=true]').dataset.activity, raid.id);
+  f.activities.serverNow = now + 100;
+  f.activities.activities.push({ ...raid, id: 'hero-raid:1002', startTime: now + 100, endTime: now + 200 });
+  await f.api.refresh();
+  assert(tabs.querySelector('.activity-current-tabs').querySelector('[data-activity="hero-raid:1002"]'));
+  tabs.querySelector('[data-activity="hero-raid:1002"]').onclick();
+  assert.equal(f.heroInput('enabled').getAttribute('aria-checked'), 'true');
+  assert.equal(f.heroInput('orders').getAttribute('aria-checked'), 'true');
+  assert(!f.state.calls.some(call => call.method === 'POST'));
 });
 
 await test('历史超凡英雄期次从sourceId识别，离线展开后仍可编辑', async () => {
   const f = fixture(), now = f.activities.serverNow;
   f.context.snapshot.connected = false;
-  f.catalog.activities.push({ id: 'archive:hero-1001', sourceId: 'hero-raid:1001', name: '超凡英雄活动', kind: 'limited',
+  f.catalog.activities.push({ id: 'archive:hero-1001', sourceId: 'hero-raid:1001', name: '超凡英雄活动', kind: 'weekly',
     startTime: now - 100, endTime: now - 1, observed: false, taskKeys: [] });
   await f.api.refresh(); f.api.selectHero();
   assert.equal(f.heroControls().length, 6);
+  assert.equal(f.node('activity-kind').textContent, '周期');
   assert(!f.api.rows().some(row => row.id === 'hero-raid'));
   await f.clickHero('rewards');
   assert.equal(f.heroSaved.get('merchant-a').settings.rewards, false);
@@ -633,4 +743,188 @@ await test('超凡英雄旧读取与配置草稿失败均不能覆盖新值', as
   assert.equal(f.state.calls.filter(call => call.method === 'POST').length, 1);
 });
 
-console.log('活动分组、商人与超凡英雄配置专项 ' + passed + '/' + passed + ' 通过');
+await test('海商王未开放默认收起，未连接与暂停仍能编辑已有配置', async () => {
+  for (const state of ['connected', 'paused', 'notConnected', 'disconnected', 'readFailed']) {
+    const f = fixture();
+    if (state === 'paused') f.context.snapshot.paused = true;
+    if (state === 'notConnected') f.context.snapshot.connected = false;
+    if (state === 'disconnected') f.context.disconnected.add('merchant-a');
+    if (state === 'readFailed') f.state.respond = request => {
+      if (request.route === '/api/activities') throw Error('活动读取失败');
+    };
+    await f.api.refresh();
+    const tabs = f.node('activity-tabs'), group = tabs.querySelector('#activity-group-upcoming');
+    assert.equal(group.hidden, true);
+    assert(group.querySelector('[data-activity=merchant]'));
+    assert(!tabs.querySelector('.activity-current-tabs').querySelector('[data-activity=merchant]'));
+    assert.equal(f.api.rows().find(row => row.id === 'merchant').kind, 'weekly');
+    tabs.querySelector('[data-activity-group=upcoming]').onclick();
+    tabs.querySelector('[data-activity=merchant]').onclick();
+    assert.equal(f.node('activity-title').textContent, '海商王');
+    assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'false');
+    await f.setSea('schedule.merchantTrade');
+    assert.equal(f.seaSaved.get('merchant-a').settings.schedule.merchantTrade, true);
+    assert(!f.node('activities-list').textContent.includes('暂未接入'));
+    assert.equal(f.node('activities-list').querySelectorAll('[data-auto-task]').length, 0);
+    assert(!f.state.calls.some(call => call.route === '/api/activities/run'));
+  }
+});
+
+await test('海商王全部参数沿用类型和约束，父项关闭隐藏后代并保留选择', async () => {
+  const f = fixture();
+  f.seaSaved.set('merchant-a', f.seaSettings({ autoSpeedUp: true, autoBuyPointers: true, autoUpgrade: true,
+    speedUpMode: 'refresh', firstDepartureMode: 'time', pointerDailyDiamondLimit: 300 }));
+  await f.api.refresh(); f.api.selectSea();
+  const fields = merchantActivityFields.filter(field => field.key !== 'merchant.firstDepartureWaitMinutes');
+  assert.deepEqual(f.seaControls().map(control => control.dataset.seaMerchantSetting), fields.map(field => field.key));
+  for (const field of fields) {
+    const input = f.seaInput(field.key);
+    const [group, key] = field.key.split('.');
+    const value = f.seaSaved.get('merchant-a').settings[group][key];
+    if (field.kind === 'switch') assert.equal(input.getAttribute('aria-checked'), String(value));
+    else assert.equal(input.value, value);
+    if (field.kind === 'number') {
+      assert.equal(input.type, 'number');
+      assert.equal(input.min, settingsUiRules().numbers[field.key].min);
+      assert.equal(input.max, settingsUiRules().numbers[field.key].max);
+    }
+    if (field.kind === 'choice') assert.equal(input.tagName, 'SELECT');
+    if (field.kind === 'time') assert.equal(input.type, 'time');
+  }
+  await f.setSea('merchant.autoSpeedUp');
+  assert(!f.seaInput('merchant.autoBuyPointers'));
+  assert(!f.seaInput('merchant.pointerDailyDiamondLimit'));
+  assert.equal(f.seaSaved.get('merchant-a').settings.merchant.autoBuyPointers, true);
+  assert.equal(f.seaSaved.get('merchant-a').settings.merchant.pointerDailyDiamondLimit, 300);
+  await f.setSea('merchant.autoSpeedUp');
+  assert.equal(f.seaInput('merchant.pointerDailyDiamondLimit').valueAsNumber, 300);
+  await f.setSea('merchant.firstDepartureMode', 'smart');
+  assert(f.seaInput('merchant.firstDepartureWaitMinutes'));
+  assert(!f.seaInput('merchant.firstDepartureTime'));
+});
+
+await test('海商王开关、整数、选择与时间逐项保存，非法输入回退且不提交', async () => {
+  const f = fixture();
+  await f.api.refresh(); f.api.selectSea();
+  await f.setSea('merchant.profitLimit', 123456);
+  await f.setSea('merchant.speedUpMode', 'arrival');
+  await f.setSea('merchant.firstDepartureMode', 'time');
+  await f.setSea('merchant.firstDepartureTime', '09:15');
+  await f.setSea('schedule.merchantRewards');
+  await f.setSea('schedule.tradeTasks');
+  const expected = f.seaSettings({ profitLimit: 123456, speedUpMode: 'arrival', firstDepartureMode: 'time', firstDepartureTime: '09:15' },
+    { merchantRewards: false, tradeTasks: false }).settings;
+  assert.deepEqual(f.seaSaved.get('merchant-a').settings, expected);
+  const count = f.state.calls.filter(call => call.method === 'POST').length;
+  for (const invalid of ['', -1, 0.5, 1000000001, 'oops']) await f.setSea('merchant.profitLimit', invalid);
+  for (const invalid of ['', '24:00', '9:15', '12:60']) await f.setSea('merchant.firstDepartureTime', invalid);
+  await f.setSea('merchant.speedUpMode', 'unknown');
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').length, count);
+  assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 123456);
+  assert.equal(f.seaInput('merchant.firstDepartureTime').value, '09:15');
+  assert.equal(f.seaInput('merchant.speedUpMode').value, 'arrival');
+  assert.deepEqual(f.seaSaved.get('merchant-b'), f.seaSettings({ profitLimit: 100 }, { merchantRewards: false }, 3));
+});
+
+await test('海商王读取到真实开放期次自动移上，结束收起并支持历史离线编辑', async () => {
+  const f = fixture(), now = f.activities.serverNow;
+  f.seaSaved.set('merchant-a', f.seaSettings({}, { merchantTrade: true }));
+  await f.api.refresh();
+  const tabs = f.node('activity-tabs');
+  f.activities.activities.push({ id: 'merchant', name: '海商王', kind: 'weekly', observed: true,
+    startTime: now - 60, endTime: now + 60, taskKeys: ['merchantTrade', 'merchantRewards', 'tradeTasks'] });
+  f.activities.eventTasks.push(...['merchantTrade', 'merchantRewards', 'tradeTasks'].map(key => ({ key, enabled: true, label: key })));
+  await f.api.refresh();
+  assert.equal(f.api.rows().filter(row => row.id === 'merchant').length, 1);
+  assert(tabs.querySelector('.activity-current-tabs').querySelector('[data-activity=merchant]'));
+  f.api.selectSea();
+  assert.match(f.node('activity-end').textContent, /开始 .*结束 .*北京时间/);
+  assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'true');
+  assert.equal(f.node('activities-list').querySelectorAll('[data-auto-task]').length, 0);
+  f.state.now += 60000; f.api.render();
+  assert.equal(tabs.querySelector('#activity-group-ended').hidden, true);
+  assert(tabs.querySelector('#activity-group-ended').querySelector('[data-activity=merchant]'));
+  f.context.snapshot.connected = false;
+  f.catalog.activities = [{ ...f.activities.activities.at(-1), id: 'archive:merchant', sourceId: 'merchant', observed: false }];
+  await f.api.refresh(); f.api.selectSea();
+  assert(!f.api.rows().some(row => row.id === 'merchant'));
+  assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'true');
+  await f.setSea('merchant.profitLimit', 6789);
+  assert.equal(f.seaSaved.get('merchant-a').settings.merchant.profitLimit, 6789);
+});
+
+await test('海商王保存失败回读原值，保存前读取最新版本且配置草稿失败阻止提交', async () => {
+  const f = fixture();
+  await f.api.refresh(); f.api.selectSea();
+  f.state.respond = request => { if (request.method === 'POST') throw Error('保存失败'); };
+  await f.setSea('merchant.profitLimit', 100);
+  assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 0);
+  assert(f.seaControls().every(control => !control.disabled));
+  f.state.respond = null;
+  f.seaSaved.set('merchant-a', f.seaSettings({ autoShareIntel: false }, { merchantRewards: false }, 9));
+  await f.setSea('merchant.profitLimit', 200);
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').at(-1).body.revision, 9);
+  assert.deepEqual(f.seaSaved.get('merchant-a').settings, f.seaSettings({ profitLimit: 200, autoShareIntel: false }, { merchantRewards: false }).settings);
+  f.context.configFlush = async () => false;
+  const count = f.state.calls.filter(call => call.method === 'POST').length;
+  await f.setSea('merchant.profitLimit', 300);
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').length, count);
+  assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 200);
+});
+
+await test('海商王保存期间禁用控件并合并重复操作，切号隔离迟到回包', async () => {
+  const f = fixture();
+  await f.api.refresh(); f.api.selectSea();
+  const entered = deferred(), release = deferred();
+  f.state.respond = request => {
+    if (request.route === '/api/merchant/settings' && request.method === 'POST') {
+      entered.resolve(); return release.promise;
+    }
+  };
+  const pending = f.setSea('schedule.merchantTrade');
+  await entered.promise;
+  assert(f.seaControls().every(control => control.disabled));
+  await f.api.saveSea('merchant.profitLimit', 500);
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').length, 1);
+  f.context.current = 'merchant-b';
+  await f.api.refresh(); f.api.selectSea();
+  release.resolve(f.seaSettings({}, { merchantTrade: true }, 2));
+  await pending;
+  assert.equal(f.api.seaOwner, 'merchant-b');
+  assert.deepEqual(clone(f.api.seaSettings), f.seaSaved.get('merchant-b'));
+  assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 100);
+  assert.equal(f.seaInput('schedule.merchantTrade').getAttribute('aria-checked'), 'false');
+});
+
+await test('海商王迟到读取不会覆盖新保存，保存回复丢失后回读确认结果', async () => {
+  const f = fixture();
+  await f.api.refresh(); f.api.selectSea();
+  const entered = deferred(), release = deferred();
+  let delayed = false;
+  f.state.respond = request => {
+    if (!delayed && request.route === '/api/merchant/settings' && request.method === 'GET') {
+      delayed = true; entered.resolve(); return release.promise;
+    }
+  };
+  const previous = clone(f.seaSaved.get('merchant-a'));
+  const reading = f.api.readSeaSettings('merchant-a');
+  await entered.promise;
+  await f.setSea('schedule.merchantTrade');
+  release.resolve(previous); await reading;
+  assert.equal(f.api.seaSettings.settings.schedule.merchantTrade, true);
+  f.state.respond = request => {
+    if (request.route === '/api/merchant/settings' && request.method === 'POST') {
+      const saved = clone(f.seaSaved.get('merchant-a'));
+      saved.settings.merchant.profitLimit = request.body.value;
+      saved.revision++;
+      saved.baseRevision = 'base-' + saved.revision;
+      f.seaSaved.set('merchant-a', saved);
+      throw Error('保存回复暂时不可读');
+    }
+  };
+  await f.setSea('merchant.profitLimit', 800);
+  assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 800);
+  assert(f.seaControls().every(control => !control.disabled));
+});
+
+console.log('活动分组与集中配置专项 ' + passed + '/' + passed + ' 通过');

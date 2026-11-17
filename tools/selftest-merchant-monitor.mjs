@@ -198,6 +198,39 @@ try {
     assert.equal(f.state.writes[0].name, 'TradeBuyRequest');
     assert.equal(wall - base, 10000);
   });
+  await test('仅开启走商时按已下发的开始时间唤醒，未开放期间不读写游戏', async () => {
+    const f = integration();
+    f.client.tradeWindow.startTime = f.now + 25;
+    const saved = structuredClone(f.settings);
+    f.sleepHook(ms => {
+      assert.equal(f.state.reads.length, 0);
+      assert.equal(f.state.writes.length, 0);
+      wall += ms;
+    });
+    f.reportHook(() => { if (f.state.writes.length) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.sleeps, [25000]);
+    assert.equal(f.state.writes[0].name, 'TradeBuyRequest');
+    assert.deepEqual(f.settings, saved);
+  });
+  await test('走商到服务端结束边界停止，保留自动走商与全部策略选择', async () => {
+    const f = integration();
+    f.client.tradeWindow.endTime = f.now + 25;
+    f.state.trade.cargo.cityId = 20;
+    f.state.trade.player.goods = [{ pid: 201, goodsId: 1001, cityId: 10, buyPrice: 40, num: 10 }];
+    const saved = structuredClone(f.settings);
+    let readsBeforeEnd;
+    f.sleepHook(ms => {
+      readsBeforeEnd = f.state.reads.length;
+      wall += ms;
+    });
+    f.reportHook(() => { if (wall >= base + 25000) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.sleeps, [25000]);
+    assert.deepEqual(f.state.writes.map(row => row.name), ['TradeSellRequest']);
+    assert.equal(f.state.reads.length, readsBeforeEnd, '结束边界不再读取已关闭活动');
+    assert.deepEqual(f.settings, saved);
+  });
   await test('等待期间关闭开关、停止或身份改变，不因推送继续执行', async () => {
     for (const mode of ['disabled', 'stopped', 'identity']) {
       wall = base;

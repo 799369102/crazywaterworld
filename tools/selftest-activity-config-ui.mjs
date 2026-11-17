@@ -43,7 +43,7 @@ await test('服务端已过滤任务时静态联动与广告入口仍隐藏', ()
 
 await test('周期、风采、新手及其他任务不受联动下线影响', () => {
   const keys = new Set(keysOf(renderGroups(dataFor())));
-  for (const key of ['armsRaceRewards', 'merchantTrade', 'merchantRewards', 'beautyVotes', 'beautyGift', 'newbieLogin', 'pirateRankRewards', 'warRankRewards']) {
+  for (const key of ['armsRaceRewards', 'beautyVotes', 'beautyGift', 'newbieLogin', 'pirateRankRewards', 'warRankRewards']) {
     assert(keys.has('schedule.' + key), key);
   }
   assert(keys.has('building.enabled'));
@@ -70,6 +70,19 @@ await test('超凡英雄配置集中在活动页，游戏配置保留原账号�
   assert(!groups.some(group => group.id === 'hero-raid'));
   assert(!keysOf(groups).some(key => key.startsWith('heroRaid.')));
   assert.deepEqual(data, before);
+});
+
+await test('海商王全部参数与三个任务开关集中到活动页，动态补齐保留其他任务', () => {
+  for (const data of [dataFor(), dataFor([]), dataFor([], automationTasks.filter(task => task.key !== 'merchantTrade'))]) {
+    data.settings.merchant = { autoSpeedUp: true, profitLimit: 12345 };
+    Object.assign(data.settings.schedule, { merchantTrade: true, merchantRewards: false, tradeTasks: true });
+    const before = structuredClone(data), groups = renderGroups(data), keys = keysOf(groups);
+    assert(!groups.some(group => group.id === 'merchant-week'));
+    assert(!keys.some(key => key.startsWith('merchant.')));
+    for (const key of ['merchantTrade', 'merchantRewards', 'tradeTasks']) assert(!keys.includes('schedule.' + key));
+    assert(keys.includes('schedule.armsRaceRewards'));
+    assert.deepEqual(data, before);
+  }
 });
 
 await test('复开后全部入口和参数恢复，原配置定义未被过滤污染', () => {

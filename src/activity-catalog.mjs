@@ -24,6 +24,7 @@ export function catalogEntry(row, now) {
 }
 
 const standalonePackSources = new Set(['limitTimePack', 'backLTPack', 'chainPack', 'tierActivity']);
+const periodicSources = new Set(['merchant', 'hero-raid']);
 function isCatalogActivity(row) {
   const id = row.sourceId ?? row.id;
   return !standalonePackSources.has(id.split(':')[0])
@@ -36,7 +37,7 @@ function savedEntries(account) {
   const saved = readJson(catalogPath(account), { version: 1, activities: [] });
   if (saved?.version !== 1 || !Array.isArray(saved.activities)) throw Error('活动目录记录格式无效');
   return saved.activities.filter(row => typeof row?.id === 'string' && typeof row.instanceId === 'string' && typeof row.name === 'string'
-    && isCatalogActivity(row));
+    && isCatalogActivity(row)).map(row => periodicSources.has(row.id.split(':')[0]) ? { ...row, kind: 'weekly' } : row);
 }
 
 function historicalEntry(row, now) {
@@ -91,7 +92,7 @@ export function pushedActivityEntries(client, now) {
   const cache = client.activityCatalogWindows ?? {}, result = [];
   const add = (id, name, row, start = 'startTime', end = 'endTime') => {
     if (!row || typeof row !== 'object') return;
-    result.push(catalogEntry({ id, name, kind: 'limited', taskKeys: [], startTime: row[start], endTime: row[end],
+    result.push(catalogEntry({ id, name, kind: periodicSources.has(id.split(':')[0]) ? 'weekly' : 'limited', taskKeys: [], startTime: row[start], endTime: row[end],
       ...(activityTimestamp(row.rwdEndTime) ? { rewardEndTime: activityTimestamp(row.rwdEndTime) } : {}) }, now));
   };
   if (activityTimestamp(client.tradeWindow?.period)

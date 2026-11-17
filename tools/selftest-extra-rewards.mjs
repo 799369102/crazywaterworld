@@ -149,6 +149,42 @@ if (onlineDue.status === 'ready') {
   assert.match((await run(closed, seasonPlayer, ['tradeTasks']))[0].reason, /未开放/);
 }
 {
+  for (const change of [
+    client => { client.tradeWindow.endTime = now(); },
+    client => { client.tradeWindow.startTime++; },
+    client => { client.tradeWindow.period++; },
+    client => { client.tradeWindow = null; },
+    client => { client.connected = false; },
+  ]) {
+    const client = fakeClient({
+      TradeTaskRequest: () => {
+        change(client);
+        return { guildTask: { profit: 150, tradeTimes: 6, gotTaskId: [] } };
+      },
+      TradeGotTaskRequest: () => ({ ...reward('RUBY', 100), gotTaskId: [1, 2, 3] }),
+    });
+    client.tradeWindow = { period: 1001, startTime: now() - 86400, endTime: now() + 86400 };
+    await run(client, seasonPlayer, ['tradeTasks']);
+    assert.equal(client.calls.filter(([name]) => name === 'TradeTaskRequest').length, 1, '使用当前连接下发的海商王时间');
+    assert(!client.calls.some(([name]) => name === 'TradeGotTaskRequest'), '读取期间活动截止、换期或断开后停止领取');
+  }
+  const client = fakeClient({
+    TradeTaskRequest: { guildTask: { profit: 150, tradeTimes: 6, gotTaskId: [] } },
+    TradeGotTaskRequest: () => {
+      client.tradeWindow = null;
+      return { ...reward('RUBY', 100), gotTaskId: [1, 2] };
+    },
+  });
+  client.tradeWindow = { period: 1001, startTime: now() - 86400, endTime: now() + 86400 };
+  await run(client, seasonPlayer, ['tradeTasks']);
+  assert.equal(client.calls.filter(([name]) => name === 'TradeGotTaskRequest').length, 1, '每次领取前复查活动时间');
+  const closed = fakeClient({});
+  closed.tradeActivity = { startTime: now() - 86400, endTime: now() + 86400 };
+  closed.tradeWindow = null;
+  assert.match((await run(closed, seasonPlayer, ['tradeTasks']))[0].reason, /未开放/);
+  assert.equal(closed.calls.length, 0, '当前连接关闭活动后忽略旧时间');
+}
+{
   const today = now();
   const client = fakeClient({ GuildInfoRequest: { gotTitle: 3, gotTitleTime: today - 86400 * 2 }, GotGuildTitleRewardRequest: reward('RUBY', 50) });
   assert.equal((await run(client, seasonPlayer, ['guildTitleReward']))[0].ok, true);

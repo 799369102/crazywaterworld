@@ -92,7 +92,7 @@ function fixture() {
       return row;
     };
     return {
-      editor: configEditor, groups: configGroups, collapsed: configCollapsed,
+      editor: configEditor, groups: configGroups, merchantFields: merchantActivityFields, collapsed: configCollapsed,
       render: configRenderFields, update: configUpdateVisibility, set: configSet,
       errors: configErrors, check: configCheckForm,
     };
@@ -118,7 +118,7 @@ function test(name, run) { run(); passed++; console.log('通过：' + name); }
 
 test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   const f = fixture();
-  for (const group of f.groups) {
+  for (const group of [...f.groups, { id: 'sea-merchant-activity', fields: f.merchantFields }]) {
     const fields = new Map(group.fields.map(field => [field.key, field]));
     assert.equal(fields.size, group.fields.length, group.id);
     for (const field of group.fields) {
@@ -131,7 +131,7 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
       }
     }
   }
-  const fields = new Map(f.groups.flatMap(group => group.fields.map(field => [field.key, field])));
+  const fields = new Map([...f.groups.flatMap(group => group.fields), ...f.merchantFields].map(field => [field.key, field]));
   for (const [child, parent] of [
     ['farm.crops', 'farm.customPlant'], ['pet.quality', 'pet.breed'],
     ['forge.universalReserve', 'forge.universal'], ['museum.matchedFactor', 'museum.materialFactor'],
@@ -141,15 +141,17 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
 
-test('商人与超凡英雄配置集中在活动页，游戏配置没有重复字段或分组', () => {
+test('商人、海商王与超凡英雄配置集中在活动页，游戏配置没有重复字段或分组', () => {
   const f = fixture();
   assert(!f.groups.some(group => group.id === 'rich-merchant'));
   assert(!f.groups.some(group => group.id === 'hero-raid'));
+  assert(!f.groups.some(group => group.id === 'merchant-week'));
   const fields = f.groups.flatMap(group => group.fields.map(field => field.key));
   for (const key of ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal']) {
     assert(!fields.includes(key), key);
   }
   assert(!fields.some(key => key.startsWith('heroRaid.')));
+  assert(!fields.some(key => key.startsWith('merchant.')));
 });
 
 test('不连续的培育参数跟随所属开关，并保持同级设置顺序', () => {
@@ -167,7 +169,7 @@ test('不连续的培育参数跟随所属开关，并保持同级设置顺序',
 test('三级开关关闭隐藏全部后代，重新启用保留子开关与预算', () => {
   const f = fixture();
   Object.assign(f.editor.draft.merchant, { autoSpeedUp: true, autoBuyPointers: true, pointerDailyDiamondLimit: 300 });
-  f.mount(f.groups.find(group => group.id === 'merchant-week').fields.filter(field => [
+  f.mount(f.merchantFields.filter(field => [
     'merchant.autoSpeedUp', 'merchant.autoBuyPointers', 'merchant.pointerDailyDiamondLimit',
   ].includes(field.key)));
   const parent = f.widget('merchant.autoSpeedUp'), purchase = f.widget('merchant.autoBuyPointers');
@@ -183,7 +185,7 @@ test('三级开关关闭隐藏全部后代，重新启用保留子开关与预�
 
 test('手动收起只改变展示状态，重新启用自动展开所属设置', () => {
   const f = fixture(); f.editor.draft.merchant.autoSpeedUp = true;
-  const fields = f.groups.find(group => group.id === 'merchant-week').fields.filter(field => [
+  const fields = f.merchantFields.filter(field => [
     'merchant.autoSpeedUp', 'merchant.dailyPointerLimit',
   ].includes(field.key));
   f.mount(fields);
@@ -201,7 +203,7 @@ test('手动收起只改变展示状态，重新启用自动展开所属设置',
 
 test('更换已收起的下拉模式会展开对应参数，并收回隐藏输入的焦点', () => {
   const f = fixture(); f.editor.draft.merchant.firstDepartureMode = 'smart';
-  f.mount(f.groups.find(group => group.id === 'merchant-week').fields.filter(field => [
+  f.mount(f.merchantFields.filter(field => [
     'merchant.firstDepartureMode', 'merchant.firstDepartureTime', 'merchant.firstDepartureWaitMinutes',
   ].includes(field.key)));
   const mode = f.widget('merchant.firstDepartureMode'), time = f.widget('merchant.firstDepartureTime');
@@ -226,7 +228,7 @@ test('更换已收起的下拉模式会展开对应参数，并收回隐藏输�
 test('收起子组与关闭多层开关时焦点回到仍可见的父控件', () => {
   const f = fixture();
   Object.assign(f.editor.draft.merchant, { autoSpeedUp: true, autoBuyPointers: true });
-  f.mount(f.groups.find(group => group.id === 'merchant-week').fields.filter(field => [
+  f.mount(f.merchantFields.filter(field => [
     'merchant.autoSpeedUp', 'merchant.autoBuyPointers', 'merchant.pointerDailyDiamondLimit',
   ].includes(field.key)));
   const parent = f.widget('merchant.autoSpeedUp'), purchase = f.widget('merchant.autoBuyPointers');

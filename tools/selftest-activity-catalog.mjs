@@ -93,6 +93,7 @@ try {
     assert(!all.some(row => /^(limitTimePack:|backLTPack:|chainPack:|tierActivity$)/.test(row.id)));
     for (const key of ['limitTimePack', 'backLTPack', 'chainPack', 'tierActivity']) assert.equal(game.activityCatalogWindows[key], undefined);
     assert.equal(all.find(row => row.id === 'hero-raid:1').lifecycle, 'upcoming');
+    assert.equal(all.find(row => row.id === 'hero-raid:1').kind, 'weekly');
     assert.equal(all.find(row => row.id === 'beauty').rewardEndTime, now + 100);
   });
 
@@ -104,6 +105,7 @@ try {
     }
     game.tradeWindow = { period: 2, ...window(now + 100, now + 200) };
     const [trade] = pushedActivityEntries(game, now);
+    assert.equal(trade.kind, 'weekly');
     assert.equal(trade.lifecycle, 'upcoming');
     assert.equal(trade.startTime, now + 100);
     assert.equal(trade.endTime, now + 200);
@@ -113,7 +115,53 @@ try {
     writeLegacyCatalog('legacy-merchant', [entry('merchant', null, null), entry('merchant', now - 200, now - 100)]);
     const saved = readActivityCatalog('legacy-merchant', now);
     assert.equal(saved.length, 1);
+    assert.equal(saved[0].kind, 'weekly');
     assert.equal(saved[0].lifecycle, 'ended');
+  });
+
+  await test('海商王当前、历史和复开期次统一归入周期活动并保留各期时间', () => {
+    const old = entry('merchant', now - 200, now - 100);
+    writeLegacyCatalog('merchant-periods', [old]);
+    const game = client();
+    game.tradeWindow = { period: 2, ...window() };
+    const current = pushedActivityEntries(game, now);
+    const merged = rememberActivityCatalog('merchant-periods', current, now);
+    assert.equal(merged.length, 2);
+    assert(merged.every(row => row.kind === 'weekly'));
+    assert.equal(merged.find(row => row.observed).lifecycle, 'active');
+    assert.equal(merged.find(row => !row.observed).startTime, old.startTime);
+    assert.equal(merged.find(row => !row.observed).endTime, old.endTime);
+    const saved = readActivityCatalog('merchant-periods', now);
+    assert(saved.every(row => row.kind === 'weekly' && row.observed === false));
+    assert.equal(saved.find(row => row.startTime === current[0].startTime).lifecycle, 'unknown');
+  });
+
+  await test('超凡英雄全量、增量和旧历史统一显示周期活动，时间与期次身份沿用', () => {
+    const old = entry('hero-raid:1001', now - 200, now - 100);
+    writeLegacyCatalog('hero-periods', [old]);
+    const game = client();
+    rememberActivityPush(game, 'SCAllActivity', { raid: [
+      { raidId: 1001, startTime: now + 100, finishTime: now + 200 },
+    ] });
+    let current = pushedActivityEntries(game, now);
+    assert.equal(current[0].kind, 'weekly');
+    assert.equal(current[0].lifecycle, 'upcoming');
+    rememberActivityPush(game, 'SCHeroRaidOpen', { raid: {
+      raidId: 1001, startTime: now - 50, finishTime: now + 50,
+    } });
+    current = pushedActivityEntries(game, now);
+    const merged = rememberActivityCatalog('hero-periods', current, now);
+    assert.equal(merged.length, 2);
+    assert(merged.every(row => row.kind === 'weekly'));
+    assert.equal(merged.find(row => row.observed).lifecycle, 'active');
+    const history = merged.find(row => !row.observed);
+    assert.equal(history.instanceId, old.instanceId);
+    assert.equal(history.startTime, old.startTime);
+    assert.equal(history.endTime, old.endTime);
+    assert.equal(history.lifecycle, 'ended');
+    const saved = readActivityCatalog('hero-periods', now);
+    assert(saved.every(row => row.kind === 'weekly' && row.observed === false));
+    assert.equal(saved.find(row => row.startTime === current[0].startTime).lifecycle, 'unknown');
   });
 
   await test('旧购买礼包历史按来源剔除，保留节日免费礼包和真实活动历史', () => {

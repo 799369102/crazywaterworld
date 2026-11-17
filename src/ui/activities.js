@@ -17,6 +17,13 @@ const savingMerchantSettings = new Set();
 let heroRaidSettingsData = null, heroRaidSettingsOwner = null, heroRaidSettingsVersion = 0;
 let heroRaidSettingsStatus = '';
 const savingHeroRaidSettings = new Set();
+let seaMerchantSettingsData = null, seaMerchantSettingsOwner = null, seaMerchantSettingsVersion = 0;
+let seaMerchantSettingsStatus = '';
+const savingSeaMerchantSettings = new Set();
+
+function isSeaMerchantActivity(row) {
+  return (row.sourceId ?? row.id) === 'merchant';
+}
 
 function isHeroRaidActivity(row) {
   const id = row.sourceId ?? row.id;
@@ -33,10 +40,11 @@ const activityKinds = {
   permanent: { tag: '常驻', group: '常驻活动' },
 };
 
-const activityStates = { upcoming: '待开放', ended: '已结束', unknown: '时间待确认' };
+const activityStates = { upcoming: '未开放活动', ended: '已结束', unknown: '时间待确认' };
 
 function activityLifecycle(row) {
-  if (row.settingsOnly || row.kind === 'permanent') return 'active';
+  if (row.settingsOnly) return 'upcoming';
+  if (row.kind === 'permanent') return 'active';
   const now = activityNow();
   if (row.startTime > 0 && row.endTime > 0 && row.endTime <= row.startTime) return 'unknown';
   if (row.endTime > 0 && row.endTime <= now) return 'ended';
@@ -70,7 +78,10 @@ function activityRows() {
     rows.push({ id: 'rich-merchant', name: '不差钱商人', kind: 'weekly', weekType: 5, settingsOnly: true, taskKeys: [] });
   }
   if (current && !rows.some(isHeroRaidActivity)) {
-    rows.push({ id: 'hero-raid', name: '超凡英雄活动', kind: 'limited', settingsOnly: true, taskKeys: [] });
+    rows.push({ id: 'hero-raid', name: '超凡英雄活动', kind: 'weekly', settingsOnly: true, taskKeys: [] });
+  }
+  if (current && !rows.some(isSeaMerchantActivity)) {
+    rows.push({ id: 'merchant', name: '海商王', kind: 'weekly', settingsOnly: true, taskKeys: [] });
   }
   if (activitiesData && !activitiesData.catalogOnly) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
   if (activitiesData?.vipLevel > 0) rows.push({ id: 'vip', name: 'VIP 每日奖励', kind: 'permanent', taskKeys: ['vipDaily'] });
@@ -211,6 +222,7 @@ function renderActivityDetail() {
   $('activity-pirates').hidden = row.id !== 'pirates';
   if (row.weekType === 5) renderMerchantSettings(box);
   if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
+  if (isSeaMerchantActivity(row)) renderSeaMerchantSettings(box);
   if (row.settingsOnly) return;
   if (!activitiesData) return;
   const active = activityLifecycle(row) === 'active' && !activitiesData.catalogOnly;
@@ -220,7 +232,7 @@ function renderActivityDetail() {
       unknown: '活动开放状态待同步，连接后刷新可核对最新时间。' };
     box.appendChild(el('p', 'dim', messages[activityLifecycle(row)] || '连接后刷新活动状态。'));
     for (const task of (row.taskKeys || []).map(key => activitiesData.eventTasks.find(task => task.key === key)).filter(Boolean)) {
-      if (row.weekType !== 5) renderActivityTask(box, row, task);
+      if (row.weekType !== 5 && !isSeaMerchantActivity(row)) renderActivityTask(box, row, task);
     }
     return;
   }
@@ -240,11 +252,12 @@ function renderActivityDetail() {
   }
   const tasks = (row.taskKeys || []).map(key => activitiesData.eventTasks.find(task => task.key === key)).filter(Boolean);
   for (const task of tasks) {
+    if (isSeaMerchantActivity(row)) continue;
     if (row.weekType === 5 && task.key === 'weekOrderSubmit') continue;
     renderActivityTask(box, row, task);
   }
-  if (tasks.length && row.weekType !== 5) box.appendChild(el('p', 'dim', '已开启的自动任务随挂机执行，并按活动开放时间自动启停。'));
-  else if (row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row)) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
+  if (tasks.length && row.weekType !== 5 && !isSeaMerchantActivity(row)) box.appendChild(el('p', 'dim', '已开启的自动任务随挂机执行，并按活动开放时间自动启停。'));
+  else if (row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row)) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
   if (row.weekType === 5) renderActivityOrder();
 }
 
@@ -551,6 +564,140 @@ async function saveHeroRaidSetting(key, value) {
   }
 }
 
+function renderSeaMerchantSettings(box) {
+  const account = current;
+  if (seaMerchantSettingsOwner !== account || !seaMerchantSettingsData) {
+    box.appendChild(el('p', 'dim', seaMerchantSettingsStatus || '正在读取海商王配置…'));
+    return;
+  }
+  const settings = seaMerchantSettingsData.settings;
+  const section = el('div', 'activity-settings');
+  const activeFields = new Map();
+  for (const field of merchantActivityFields) {
+    const [group, key] = field.key.split('.');
+    const value = settings[group][key];
+    const visible = (!field.parent || activeFields.get(field.parent)) && (!field.when || field.when(settings));
+    activeFields.set(field.key, visible && (field.kind !== 'switch' || value));
+    if (!visible) continue;
+    const row = el('div', 'config-row');
+    row.dataset.kind = field.kind;
+    const id = 'sea-merchant-' + field.key.replaceAll('.', '-');
+    const name = el('div', 'config-label-line');
+    const label = el('label', 'config-label', field.label);
+    label.htmlFor = id;
+    name.appendChild(label);
+    if (field.help) name.appendChild(makeHelpTip(field.label, field.help));
+    const controlBox = el('div', 'config-control');
+    const control = field.kind === 'switch' ? component('ui-event-switch') : el(field.kind === 'choice' ? 'select' : 'input');
+    control.id = id;
+    control.dataset.seaMerchantSetting = field.key;
+    control.setAttribute('aria-label', field.label);
+    control.disabled = savingSeaMerchantSettings.has(account);
+    if (field.kind === 'switch') {
+      setTaskSwitch(control, value);
+      control.onclick = () => {
+        if (current === account && !control.disabled) return saveSeaMerchantSetting(field.key, !value);
+      };
+    } else {
+      if (field.kind === 'choice') {
+        control.className = 'config-select';
+        for (const [optionValue, text] of field.options) {
+          const option = el('option', null, text);
+          option.value = optionValue;
+          control.appendChild(option);
+        }
+      } else {
+        control.type = field.kind;
+        control.required = true;
+      }
+      const rule = seaMerchantSettingsData.rules.numbers[field.key];
+      if (field.kind === 'number') {
+        control.min = rule.min;
+        control.max = rule.max;
+        control.step = 1;
+      }
+      control.value = value;
+      control.onchange = () => {
+        if (current !== account || control.disabled) return;
+        const next = field.kind === 'number' ? control.valueAsNumber : control.value;
+        let error = '';
+        if (field.kind === 'number' && (!Number.isInteger(next) || next < rule.min || next > rule.max)) {
+          error = field.label + '必须是 ' + rule.min + ' 到 ' + rule.max + ' 的整数';
+        }
+        if (field.kind === 'time' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(next)) error = field.label + '格式无效';
+        if (field.kind === 'choice' && !field.options.some(([optionValue]) => optionValue === next)) error = field.label + '选项无效';
+        if (error) {
+          control.value = value;
+          reportError(new Error(error), '设置海商王');
+          return;
+        }
+        if (next !== value) return saveSeaMerchantSetting(field.key, next);
+      };
+    }
+    if (field.unit) {
+      const numberLine = el('div', 'config-number');
+      numberLine.append(control, el('span', null, field.unit));
+      controlBox.appendChild(numberLine);
+    } else controlBox.appendChild(control);
+    row.append(name, controlBox);
+    section.appendChild(row);
+  }
+  section.appendChild(el('p', 'dim', '配置按账号自动保存，随挂机按服务端开放时间自动启停。购买指针和升级商船受全局钻石开关、每日预算和保留量限制。'));
+  const status = el('p', 'dim', savingSeaMerchantSettings.has(account) ? '正在保存…' : seaMerchantSettingsStatus);
+  status.setAttribute('role', 'status');
+  section.appendChild(status);
+  box.appendChild(section);
+}
+
+async function refreshSeaMerchantSettings(account) {
+  if (!account || savingSeaMerchantSettings.has(account)) return;
+  const version = ++seaMerchantSettingsVersion;
+  try {
+    const data = await call('/api/merchant/settings?account=' + encodeURIComponent(account));
+    if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
+    seaMerchantSettingsData = data;
+    seaMerchantSettingsStatus = '';
+  } catch {
+    if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
+    seaMerchantSettingsStatus = '海商王配置读取失败，请刷新重试。';
+  }
+}
+
+async function saveSeaMerchantSetting(key, value) {
+  const account = current;
+  if (!account || seaMerchantSettingsOwner !== account || !seaMerchantSettingsData || savingSeaMerchantSettings.has(account)) return;
+  const version = ++seaMerchantSettingsVersion;
+  savingSeaMerchantSettings.add(account);
+  seaMerchantSettingsStatus = '';
+  renderActivityDetail();
+  let failure = null;
+  try {
+    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+    if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
+    const latest = await call('/api/merchant/settings?account=' + encodeURIComponent(account));
+    if (account !== current || seaMerchantSettingsOwner !== account || version !== seaMerchantSettingsVersion) return;
+    const saved = await call('/api/merchant/settings?account=' + encodeURIComponent(account), {
+      method: 'POST', body: JSON.stringify({ key, value, revision: latest.revision, baseRevision: latest.baseRevision, confirm: true }),
+    });
+    if (account === current && seaMerchantSettingsOwner === account && version === seaMerchantSettingsVersion) {
+      seaMerchantSettingsData = saved;
+      loopSettingsRevision = saved.revision;
+    }
+  } catch (error) {
+    failure = error;
+    if (account === current && seaMerchantSettingsOwner === account) reportError(error, '保存海商王配置');
+  } finally {
+    savingSeaMerchantSettings.delete(account);
+    if (account === current && seaMerchantSettingsOwner === account) {
+      await refreshSeaMerchantSettings(account);
+      if (account === current && seaMerchantSettingsOwner === account) {
+        if (failure) seaMerchantSettingsStatus = failure.message;
+        renderActivityTabs();
+      }
+    }
+  }
+}
+
 function renderActivityOrder() {
   const materials = clear($('activities-order')), data = activitiesData;
   if (data.order?.materials.length && !data.order.finished) {
@@ -617,10 +764,14 @@ async function refreshActivities() {
     heroRaidSettingsData = null;
     heroRaidSettingsStatus = '';
     ++heroRaidSettingsVersion;
+    seaMerchantSettingsOwner = account;
+    seaMerchantSettingsData = null;
+    seaMerchantSettingsStatus = '';
+    ++seaMerchantSettingsVersion;
   }
   if ($('tab-activities').classList.contains('hidden')) return;
   const status = $('activities-status');
-  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account)]);
+  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account), refreshSeaMerchantSettings(account)]);
   if (version !== activitiesVersion || account !== current) return;
   const unavailable = !account || snapshot.connected !== true || snapshot.paused || disconnected.has(account);
   if (unavailable) {

@@ -7,6 +7,7 @@ import {resourceFieldRows,resourceFieldTotals} from './resource-fields.mjs';
 import {activityRankCatalog,readActivityRanking} from './activity-rankings.mjs';
 import {readActivityStatistics} from './activity-statistics.mjs';
 import { merchantActivity, readMerchantStatus, readMerchantJournal, merchantJournalSummary } from './merchant-activity.mjs';
+import { watchMerchant } from './merchant-monitor.mjs';
 import { giftCodeStatus, giftCodeSummary, startGiftCodeBatch } from './gift-codes.mjs';
 import { initialGiftCodeCatalog } from './gift-code-catalog.mjs';
 import {runtimeProgress, museumRuntimeStatus} from './runtime-progress.mjs';
@@ -97,6 +98,7 @@ const LOG_LIMIT = 400;
 const STREAM_BUFFER_LIMIT = 1024 * 1024;
 const RUN_VERSION = new Date().toISOString();
 const validSpinCount = count => Number.isSafeInteger(count) && count >= 1 && count <= maxCompassSpinCount;
+const merchantTaskKeys = ['merchantTrade', 'merchantRewards', 'tradeTasks'];
 const overviewQueries = ENTRY_QUERIES.filter(({ name }) => [
   'AllResourceRequest', 'AllItemRequest', 'AllHeroRequest', 'MainTaskInfoRequest', 'DailyTaskInfoRequest',
   'AchievementInfoRequest', 'EmailBoxRequest', 'AfkInfoRequest', 'OnWaterRequest', 'MyResFieldsRequest', 'MonthCardRequest',
@@ -486,6 +488,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function heroRaidSettingsView(session) {
     const current = settingsView(session);
     return { settings: current.settings.heroRaid, revision: current.revision, baseRevision: current.baseRevision };
+  }
+
+  function merchantSettingsView(session) {
+    const current = settingsView(session);
+    return {
+      settings: {
+        merchant: current.settings.merchant,
+        schedule: Object.fromEntries(merchantTaskKeys.map(key => [key, current.settings.schedule[key]])),
+      },
+      rules: { numbers: Object.fromEntries(Object.entries(current.rules.numbers).filter(([key]) => key.startsWith('merchant.'))) },
+      revision: current.revision,
+      baseRevision: current.baseRevision,
+    };
   }
 
   function activityCatalogView(session, activities, catalogOnly = false) {
@@ -1342,7 +1357,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -1449,6 +1464,42 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
         emit(session, 'info', '超凡英雄活动设置已保存');
         json(heroRaidSettingsView(session));
+        return;
+      }
+      if (route === 'GET /api/merchant/settings') {
+        const { session } = scoped_(parsed);
+        json(merchantSettingsView(session));
+        return;
+      }
+      if (route === 'POST /api/merchant/settings') {
+        const payload = jsonBody();
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || typeof payload.key !== 'string'
+          || Object.keys(payload).some(key => !['key', 'value', 'revision', 'baseRevision', 'confirm'].includes(key))) {
+          throw new SettingsError({ settings: '请选择有效的海商王活动设置' });
+        }
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const current = settingsView(session);
+        const fields = new Set([
+          ...Object.keys(current.settings.merchant).map(key => 'merchant.' + key),
+          ...merchantTaskKeys.map(key => 'schedule.' + key),
+        ]);
+        if (!fields.has(payload.key)) throw new SettingsError({ settings: '请选择有效的海商王活动设置' });
+        if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
+          || !current.revision && payload.baseRevision !== current.baseRevision) {
+          throw new SettingsError({ revision: '海商王活动设置已变化，请重新读取后再保存' });
+        }
+        const next = structuredClone(current.settings);
+        const [group, field] = payload.key.split('.');
+        next[group][field] = payload.value;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+        if (session.client) {
+          for (const key of merchantTaskKeys) rewardSchedule(session.client).clearTask(key);
+          watchMerchant(session.client).invalidate('海商王设置已变化');
+        }
+        emit(session, 'info', '海商王活动设置已保存');
+        json(merchantSettingsView(session));
         return;
       }
       if (route === 'GET /api/login-settings') {

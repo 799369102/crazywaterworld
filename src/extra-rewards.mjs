@@ -109,10 +109,17 @@ async function claimTradeTasks({ client, config, player, scheduler, report, allo
   const key = 'tradeTasks';
   const later = seconds => scheduler?.defer(key, scheduler.now() + seconds);
   const required = moduleLevel(config, '海商王');
-  const activity = client.tradeActivity;
+  const currentActivity = () => client.tradeWindow === undefined ? client.tradeActivity : client.tradeWindow;
+  const activity = { ...currentActivity() };
   const now = clock(client);
   if (!(player?.level >= required)) { later(3600); return report(skip(key, '海商王 ' + required + ' 级开放')); }
   if (!(activity?.startTime <= now && now < activity?.endTime)) { later(3600); return report(skip(key, '海商王活动未开放')); }
+  const active = () => {
+    const current = currentActivity(), time = clock(client);
+    return allowed(key) && client.connected !== false && current?.period === activity.period
+      && current?.startTime === activity.startTime && current?.endTime === activity.endTime
+      && activity.startTime <= time && time < activity.endTime;
+  };
   const task = (await client.request('TradeTaskRequest', {}, 'TradeTaskResponse'))?.guildTask;
   if (!task) throw new Error('未能读取海商王联盟任务');
   const got = new Set(task.gotTaskId ?? []);
@@ -120,7 +127,7 @@ async function claimTradeTasks({ client, config, player, scheduler, report, allo
   const ready = rows(config, 'TradeGuildTaskCfg').filter(row => row.day <= activityDay && !got.has(row.id)
     && (row.taskType === 0 ? task.profit : task.tradeTimes) >= row.tragetCount);
   for (const day of [...new Set(ready.map(row => row.day))].sort((a, b) => a - b)) {
-    if (!allowed(key)) return;
+    if (!active()) return;
     const reply = await client.request('TradeGotTaskRequest', { day }, 'TradeGotTaskResponse');
     const confirmed = new Set(reply?.gotTaskId ?? []);
     if (!ready.filter(row => row.day === day).some(row => confirmed.has(row.id))) throw new Error('服务端未确认第 ' + day + ' 天任务奖励');

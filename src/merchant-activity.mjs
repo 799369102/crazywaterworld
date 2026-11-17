@@ -151,6 +151,9 @@ function actionMatched(e, s, time) {
 
 export async function merchantActivity(client, config, ctx) {
   const event = client.tradeWindow && { ...client.tradeWindow };
+  if (ctx.key === 'merchantTrade') {
+    watchMerchant(client).observe({ event, time: clock(client), config, settings: ctx.settings?.() });
+  }
   const actor = () => JSON.stringify([ctx.player?.playerId, ctx.player?.worldId, ctx.player?.guildId]);
   const identity = actor();
   const allowed = () => ctx.enabled() && client.connected !== false && actor() === identity && moduleOpen(config, ctx.player, '海商王') &&
