@@ -25,16 +25,6 @@ export function chrome() {
     <div className="headline">
       <div className="mast">
         <span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span>
-        <div id="theme-picker" className="theme-picker">
-          <Button id="theme-trigger" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="切换主题，当前为跟随系统" title="切换主题，当前为跟随系统" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">
-            {themes.map(([mode, , Icon]) => <span key={mode} data-theme-icon={mode} hidden={mode !== "system"}><Icon aria-hidden="true" /></span>)}
-          </Button>
-          <div id="theme-menu" role="menu" aria-label="主题模式" className="absolute right-0 top-full z-50 mt-1.5 w-36 rounded-md border bg-popover p-1 text-popover-foreground shadow-md" hidden>
-            {themes.map(([mode, label, Icon]) => <Button key={mode} type="button" variant="ghost" size="sm" role="menuitemradio" aria-checked={mode === "system"} data-theme-option={mode} tabIndex={-1} className="w-full justify-start aria-checked:bg-accent">
-              <Icon aria-hidden="true" /><span className="flex-1 text-left">{label}</span><span data-theme-check="" hidden={mode !== "system"}><Check aria-hidden="true" /></span>
-            </Button>)}
-          </div>
-        </div>
       </div>
       <div className="connection">
         <span id="busy" className="sr-only" role="status" aria-live="polite" aria-atomic="true">未连接</span>
@@ -57,6 +47,16 @@ export function chrome() {
         </div>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>
         <span id="hint" className="warn" />
+        <div id="theme-picker" className="theme-picker">
+          <Button id="theme-trigger" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="切换主题，当前为跟随系统" title="切换主题，当前为跟随系统" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">
+            {themes.map(([mode, , Icon]) => <span key={mode} data-theme-icon={mode} hidden={mode !== "system"}><Icon aria-hidden="true" /></span>)}
+          </Button>
+          <div id="theme-menu" role="menu" aria-label="主题模式" className="absolute right-0 top-full z-50 mt-1.5 w-36 rounded-md border bg-popover p-1 text-popover-foreground shadow-md" hidden>
+            {themes.map(([mode, label, Icon]) => <Button key={mode} type="button" variant="ghost" size="sm" role="menuitemradio" aria-checked={mode === "system"} data-theme-option={mode} tabIndex={-1} className="w-full justify-start aria-checked:bg-accent">
+              <Icon aria-hidden="true" /><span className="flex-1 text-left">{label}</span><span data-theme-check="" hidden={mode !== "system"}><Check aria-hidden="true" /></span>
+            </Button>)}
+          </div>
+        </div>
       </div>
     </div>
     <nav id="tabs" aria-label="功能导航">{tabs.map(([key, title, short, Icon]) =>
