@@ -216,15 +216,73 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .trial-single-action { display:inline-flex }
 
 /* ---- 账号 ---- */
-.acct { margin:12px 0; padding:16px }
-.acct:last-child { margin-bottom:0 }
-.acct.on { border-color:var(--ring) }
-.acct .top { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px }
-.acct .title { font-weight:600; overflow-wrap:anywhere }
-.acct .id { overflow-wrap:anywhere }
-#account-details { border-top:1px solid var(--border); margin-top:16px; padding-top:4px }
+.account-page { display:grid; gap:24px }
+.account-page-heading,.account-page-title,.account-page-actions { display:flex; align-items:center; gap:12px }
+.account-page-heading { justify-content:space-between; flex-wrap:wrap }
+.account-page-title { flex-wrap:wrap }
+.account-page-title h2 { margin:0 }
+.account-page-actions { margin-inline-start:auto }
+.account-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr)); align-items:start; gap:16px }
+.account-card { min-width:0 }
+.account-card-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px }
+.account-card-badges { display:flex; align-items:center; flex-wrap:wrap; gap:6px }
+.account-card [data-account-field=title] { line-height:1.5; overflow-wrap:anywhere }
+.account-card-data { display:grid; grid-template-columns:1fr 1fr; gap:16px 24px }
+.account-card-data>div { min-width:0 }
+.account-card-data dt { margin-bottom:4px; font-size:12px }
+.account-card-data dd { margin:0; overflow-wrap:anywhere; font-size:14px; font-weight:500 }
+.account-card-data>div:nth-child(-n+2) { grid-column:1 / -1 }
+.account-card-footer { flex-direction:column; align-items:stretch; gap:16px; margin-top:auto }
+.account-card-footer [data-account-field=seen] { font-size:12px; overflow-wrap:anywhere }
+.account-card-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px }
+.account-card-menu,.account-backup-menu { position:relative }
+.account-card-menu>summary { width:32px; height:32px; justify-content:center }
+.account-card-menu>summary::after { display:none }
+.account-card-menu>summary svg { width:18px; height:18px }
+.account-backup-menu>summary { min-height:36px; padding-inline:12px }
+.account-menu-content { position:absolute; top:calc(100% + 6px); right:0; z-index:10; min-width:160px; display:grid; gap:2px; padding:4px }
+.account-menu-content>button { width:100%; justify-content:flex-start }
+.account-menu-content>p { width:180px; padding:6px 8px; font-size:12px; line-height:1.5 }
+.account-grid>.account-empty { grid-column:1 / -1 }
+.account-empty { display:grid; justify-items:center; gap:12px; padding:56px 24px; text-align:center }
+#account-add-dialog,#account-info-dialog { width:min(680px,calc(100vw - 32px)); max-width:none; padding:24px }
+#account-add-dialog[open] { grid-template-rows:auto minmax(0,1fr); gap:20px; overflow:hidden }
+.account-dialog-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:20px }
+.account-dialog-heading>[data-slot=dialog-header] { min-width:0; padding-top:4px }
+.account-dialog-heading h2 { margin:0; overflow-wrap:anywhere }
+.account-dialog-heading>button { flex:none }
+.account-add-body { min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain }
+#account-add-feedback:not(:empty) { margin:0 0 16px }
+.account-add-footer:not(:has(button:not([hidden]))) { display:none }
+.account-channel-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px }
+.account-channel { height:auto; min-height:104px; padding:20px; justify-content:flex-start; align-items:flex-start; gap:14px; text-align:left; white-space:normal }
+.account-channel>svg { width:22px; height:22px; flex:none; margin-top:1px }
+.account-channel>span { display:grid; gap:6px; min-width:0 }
+.account-channel strong { font-weight:600 }
+.account-channel>span>span { font-size:12px; line-height:1.5; font-weight:400 }
+.account-add-body .phone-layout { grid-template-columns:minmax(0,1fr); gap:20px }
+.account-add-body .phone-help { padding-top:16px }
+@media (max-width:520px) {
+  .account-page { gap:20px }
+  .account-page-heading { align-items:flex-start; gap:16px }
+  .account-page-title { gap:8px }
+  .account-page-actions { gap:4px }
+  .account-backup-menu>summary { padding-inline:8px }
+  .account-channel-grid { grid-template-columns:minmax(0,1fr) }
+  .account-channel { min-height:88px }
+  #account-add-dialog,#account-info-dialog { padding:20px }
+  #account-add-dialog[open] { gap:16px }
+  .account-dialog-heading { gap:12px }
+}
+#account-details { min-width:0 }
+#account-details h4:first-child { margin-top:0 }
 #account-details h4 { margin:16px 0 8px; font-weight:500 }
 #account-details .bar { margin-block:8px }
+#worlds .acct { margin:12px 0; padding:16px }
+#worlds .acct:last-child { margin-bottom:0 }
+#worlds .acct .top { display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px }
+#worlds .acct .title { font-weight:600; overflow-wrap:anywhere }
+#worlds .acct .id { overflow-wrap:anywhere }
 .foot { display:flex; align-items:center; flex-wrap:wrap; gap:8px }
 .kv { display:grid; grid-template-columns:minmax(84px,auto) 1fr; gap:6px 12px }
 .kv .v { overflow-wrap:anywhere }

@@ -24,7 +24,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function fixture() {
+function fixture({ wizard = false } = {}) {
   let now = fixedNow;
   let nextTimer = 0;
   const timers = new Map();
@@ -34,7 +34,7 @@ function fixture() {
     worldId: 3000000123, worldName: '海港123服', roleWorldId: 3000000123, roleWorldName: '海港123服', matched: false }];
   const env = {
     calls: [], selections: [], accounts: [{ id: 'old-account', title: '已有账号' }],
-    disconnected: new Set(), allowed: true, mayChangeCalls: [], loadCalls: [], detailsAtSelection: [],
+    disconnected: new Set(), allowed: true, mayChangeCalls: [], loadCalls: [], detailsAtSelection: [], wizard, wizardEvents: [],
   };
   function makeNode() {
     const attributes = new Map();
@@ -97,12 +97,14 @@ function fixture() {
     const accounts = env.accounts, disconnected = env.disconnected;
     const configMayChangeAccount = env.mayChange, loadAccounts = env.load;
     const renderAccounts = () => {};
+    const accountAddChanged = env.wizard ? (...args) => env.wizardEvents.push(args) : undefined;
     let accountDetailsOwner = 'old-account';
     function selectLoadedAccount(id) {
       env.detailsAtSelection.push(accountDetailsOwner);
       env.selections.push(id);
     }
     ${script}
+    env.reset = resetAlipayLogin;
   `)(env);
   function descendants(element) {
     return element.children.flatMap(child => [child, ...descendants(child)]);
@@ -593,6 +595,68 @@ await test('页面模板与独立脚本接线完整', async () => {
   for (const id of ['flow', 'start', 'cancel', 'save', 'hint', 'qr', 'result', 'expiry', 'roles', 'roles-retry']) {
     assert.ok(template.includes('id="alipay-' + id + '"'), id);
   }
+});
+
+await test('弹窗关闭清理扫码和定时器，迟到的角色回复不能恢复内容', async () => {
+  const f = fixture({ wizard: true });
+  await f.click('alipay-start');
+  const pending = deferred();
+  const respond = f.env.respond;
+  f.env.respond = (route, payload) => route.includes('/status?id=') ? pending.promise : respond(route, payload);
+  await f.tick(1500);
+  assert.equal(await f.env.reset(), true);
+  assert.equal(f.calls('/cancel').length, 1);
+  assert.equal(f.node('alipay-qr').src, '');
+  assert.equal(f.timers.size, 0);
+  pending.resolve({ phase: 'captured', id: 'scan-1', choices: f.choices, expiresAt: fixedNow + 600_000 });
+  await settle();
+  assert.equal(f.roles().length, 0);
+  assert.equal(f.node('alipay-save').hidden, true);
+  assert.equal(f.env.wizardEvents.at(-1)[1], 'idle');
+  assert.equal(f.env.wizardEvents.at(-1)[2].busy, false);
+});
+
+await test('弹窗清理可找回丢失的生成响应，失败后保留重试', async () => {
+  const f = fixture();
+  const respond = f.env.respond;
+  let failCancel = true;
+  f.env.respond = (route, payload) => {
+    if (route.endsWith('/start')) throw new Error('模拟响应丢失');
+    if (route.endsWith('/cancel') && failCancel) throw new Error('模拟清理失败');
+    return respond(route, payload);
+  };
+  await f.click('alipay-start');
+  await assert.rejects(f.env.reset(), /临时扫码会话尚未结束/);
+  assert.equal(f.calls('/status').length, 1);
+  assert.equal(f.node('alipay-start').disabled, false);
+  failCancel = false;
+  assert.equal(await f.env.reset(), true);
+  assert.deepEqual(f.calls('/cancel').at(-1).payload, { id: 'scan-1' });
+  assert.equal(f.node('alipay-qr').hidden, true);
+});
+
+await test('生成和保存短请求在途时阻止弹窗清理，完成后发出成功状态', async () => {
+  const f = fixture({ wizard: true });
+  const respond = f.env.respond;
+  const starting = deferred();
+  f.env.respond = (route, payload) => route.endsWith('/start') ? starting.promise : respond(route, payload);
+  const start = f.click('alipay-start');
+  assert.equal(await f.env.reset(), false);
+  assert.equal(f.env.wizardEvents.at(-1)[2].busy, true);
+  starting.resolve(await respond(prefix + '/start'));
+  await start;
+  await f.captured();
+  const saving = deferred();
+  f.env.respond = (route, payload) => route.endsWith('/save') ? saving.promise : respond(route, payload);
+  const save = f.click('alipay-save');
+  await settle();
+  assert.equal(await f.env.reset(), false);
+  saving.resolve(await respond(prefix + '/save'));
+  await save;
+  assert.equal(f.env.wizardEvents.at(-1)[1], 'saved');
+  assert.equal(f.env.wizardEvents.at(-1)[2].busy, false);
+  assert.equal(await f.env.reset(), true);
+  assert.equal(f.calls('/cancel').length, 0, '已保存结果已由服务端消费');
 });
 
 console.log(`selftest-alipay-login-ui: ${passed} cases ok`);

@@ -1,8 +1,9 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, CircleUserRound, LayoutDashboard, LogIn, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
+import { Boxes, Building2, CircleUserRound, LayoutDashboard, LogIn, MoreHorizontal, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
+import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "./card"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
 import { NativeSelect } from "./native-select"
 import { Input } from "./input"
@@ -89,5 +90,33 @@ export function templates() {
     <template id="ui-number"><Input type="number" /></template>
     <template id="ui-delete"><Button variant="destructive" size="sm" /></template>
     <template id="ui-badge"><Badge variant="outline" /></template>
+    <template id="ui-account-card">
+      <Card className="account-card">
+        <CardHeader>
+          <div className="account-card-heading">
+            <div className="account-card-badges"><Badge data-account-field="status" className="chip" variant="outline" /><Badge data-account-field="current" variant="secondary" hidden>当前</Badge></div>
+            <details className="account-card-menu">
+              <summary aria-label="更多账号操作"><MoreHorizontal aria-hidden="true" /></summary>
+              <div className="account-menu-content">
+                <Button type="button" variant="ghost" size="sm" className="w-full justify-start" data-account-action="rename">修改备注</Button>
+                <Button type="button" variant="ghost" size="sm" className="w-full justify-start" data-account-action="export">导出账号</Button>
+                <Button type="button" variant="ghost" size="sm" className="w-full justify-start text-destructive" data-account-action="remove">移除账号</Button>
+              </div>
+            </details>
+          </div>
+          <CardTitle className="leading-normal" data-account-field="title" />
+          <p className="dim" data-account-field="channel" />
+        </CardHeader>
+        <CardContent>
+          <dl className="account-card-data">
+            <div><dt>角色</dt><dd data-account-field="role" /></div>
+            <div><dt>区服</dt><dd data-account-field="world" /></div>
+            <div><dt>等级</dt><dd data-account-field="level" /></div>
+            <div><dt>战力</dt><dd data-account-field="power" /></div>
+          </dl>
+        </CardContent>
+        <CardFooter className="account-card-footer items-stretch"><p className="dim" data-account-field="seen" /><div className="account-card-actions"><Button type="button" variant="outline" size="sm" data-account-action="details" aria-haspopup="dialog" aria-controls="account-info-dialog">查看详情</Button><Button type="button" size="sm" data-account-action="select">切换账号</Button></div></CardFooter>
+      </Card>
+    </template>
   </>)
 }

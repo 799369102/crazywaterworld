@@ -221,7 +221,13 @@
   td { @apply p-2 align-middle; }
 
   /* Card */
-  :is(.acct, .pirate-target, .config-sheet, .config-preview, .phone-role) { @apply rounded-xl border bg-card text-card-foreground shadow-sm; }
+  :is(#worlds .acct, .pirate-target, .config-sheet, .config-preview, .phone-role) { @apply rounded-xl border bg-card text-card-foreground shadow-sm; }
+  .account-card.on { @apply border-ring; }
+  .account-card-data dt,.account-channel > span > span { @apply text-muted-foreground; }
+  .account-menu-content { @apply rounded-md border bg-popover text-popover-foreground shadow-md; }
+  .account-card-menu > summary,.account-backup-menu > summary { @apply hover:bg-accent hover:no-underline; }
+  .account-empty { @apply rounded-xl border border-dashed bg-card; }
+  .account-add-body .phone-help { @apply border-t; }
   .phone-role:has(input:checked) { @apply border-ring bg-accent; }
   .phone-role:has(input:focus-visible) { @apply ring-[3px] ring-ring/50; }
   .cell { @apply rounded-lg border bg-card; }

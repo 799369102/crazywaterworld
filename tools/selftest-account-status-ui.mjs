@@ -36,10 +36,17 @@ async function settle() {
 
 function makeNode() {
   const listeners = new Map();
+  const classes = new Set();
   let text = '';
   return {
-    options: [], value: '', title: '', disabled: false, dataset: {}, writes: 0, replacements: 0,
-    classList: { contains: () => false },
+    options: [], value: '', title: '', disabled: false, dataset: {}, writes: 0, replacements: 0, open: false,
+    classList: {
+      contains: name => classes.has(name),
+      add: name => classes.add(name),
+      remove: name => classes.delete(name),
+    },
+    showModal() { this.open = true; },
+    close() { this.open = false; },
     get textContent() { return text; },
     set textContent(value) { text = String(value ?? ''); this.writes++; },
     replaceChildren(...children) { this.options = children; this.replacements++; },
@@ -63,6 +70,7 @@ function fixture(rows = [
     if (!nodes.has(id)) nodes.set(id, makeNode());
     return nodes.get(id);
   };
+  env.node('tab-account').classList.add('hidden');
   env.serverAccounts = structuredClone(rows);
   env.respond = async route => {
     if (route === '/api/accounts') return { accounts: structuredClone(env.serverAccounts), activeId: selected };
@@ -314,6 +322,22 @@ await test('旧总览响应保留较新的异地登录状态，同时继续展�
   assert.deepEqual(env.overviews[0].status, env.api.snapshot(), '角色概况使用较新的连接状态');
   assert.equal(env.overviews[0].player.nickname, '服务器最新角色名');
   assert.equal(env.overviews[0].resources[0].amount, 321);
+});
+
+await test('未连接的账号详情保持缓存，定时总览仅刷新已连接详情', async () => {
+  const env = fixture([{ id: 'account-a', title: '缓存角色', status: { connected: false } }],
+    'account-a', { overview: true });
+  env.node('tab-overview').classList.add('hidden');
+  env.node('tab-heroes').classList.add('hidden');
+  env.node('tab-account').classList.remove('hidden');
+  env.node('account-info-dialog').open = true;
+  await env.api.refreshOverview();
+  assert.equal(env.calls.length, 0, '打开未连接详情不会由定时刷新自动登录游戏');
+  env.api.setAccountStatus('account-a', { connected: true });
+  env.respond = async () => ({ status: { connected: true }, player: { nickname: '已连接角色' } });
+  await env.api.refreshOverview();
+  assert.deepEqual(env.calls.map(call => call.route), ['/api/overview']);
+  assert.equal(env.overviews[0].player.nickname, '已连接角色');
 });
 
 await test('账号列表重叠读取只采用最新响应并阻止同时状态轮询', async () => {

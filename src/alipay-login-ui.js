@@ -127,6 +127,39 @@ function renderAlipayLogin() {
   $('alipay-expiry').textContent = captured ? '请在本次登录结果过期前保存。' : '';
   $('alipay-flow').setAttribute('aria-busy', String(alipayBusy || ['starting', 'authorizing', 'reading-roles'].includes(state.phase)));
   renderAlipayRoles();
+  if (typeof accountAddChanged === 'function') {
+    accountAddChanged('alipay', state.phase, { busy: alipayBusy, account: state.account });
+  }
+}
+
+async function resetAlipayLogin() {
+  if (alipayBusy) return false;
+  const previous = alipayState;
+  ++alipayGeneration;
+  clearTimeout(alipayTimer);
+  alipayBusy = true;
+  alipayState = { ...previous, phase: 'cancelled', qrImage: null, error: null };
+  renderAlipayLogin();
+  try {
+    let id = previous?.id;
+    // 生成响应丢失时仍可能已经打开浏览器，先找回本次临时会话再结束。
+    if (!id && previous && !['idle', 'cancelled', 'saved'].includes(previous.phase)) {
+      const state = await call(alipayLoginPath + '/status');
+      id = state.id;
+    }
+    if (id) await call(alipayLoginPath + '/cancel', { method: 'POST', body: JSON.stringify({ id }) });
+    alipayState = null;
+    alipayChoiceId = '';
+    alipaySelectedRole = null;
+    alipayPollFailures = 0;
+    return true;
+  } catch {
+    alipayState = { ...previous, phase: 'error', qrImage: null, error: '临时扫码会话尚未结束，请重试关闭或返回。' };
+    throw new Error(alipayState.error);
+  } finally {
+    alipayBusy = false;
+    renderAlipayLogin();
+  }
 }
 
 function scheduleAlipayPoll(generation) {

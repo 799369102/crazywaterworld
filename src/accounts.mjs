@@ -154,7 +154,7 @@ export function pickAccount(store, selector = null) {
   return store.accounts[0] ?? null;
 }
 
-// 默认给网页看的就是打码版；要看全文得单独点一次「显示凭证」。
+// 控制台的账号描述只包含打码后的凭证信息。
 function mask(value) {
   const text = String(value ?? '');
   if (!text) return '';
@@ -176,6 +176,7 @@ export function describeAccount(account, { active = false } = {}) {
   return {
     id: account.id,
     title,
+    label: account.label ?? null,
     url: account.url,
     source: account.source,
     capturedAt: account.capturedAt,
