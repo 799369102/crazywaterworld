@@ -64,7 +64,7 @@ function fixture({ catalog = {} } = {}) {
     const call = (route, options) => env.call(current, route, options);
     const configRenderUsage = () => {}, configUpdateVisibility = () => env.updateVisibility?.();
     const configActivate = () => { env.focuses++; }, configActivateGroup = () => {};
-    const configRender = () => { env.renders++; };
+    const configRender = () => { env.renders++; env.onRender?.(); };
     const resetWorldMap = () => {};
     const clear = node => node, el = () => ({});
     return {
@@ -529,6 +529,216 @@ await test('攻守目标控件独立显示、校验和自动保存，刷新及�
   assert.equal(f.editor.draft.cityWar.defenceTargetMode, 'selected');
   assert.deepEqual(f.editor.draft.cityWar.defenceCityRefs, ['1:3', '1:4']);
   assert.deepEqual(f.editor.draft.cityWar.cityRefs, ['1:2']);
+});
+
+function lineupPickerFixture(f) {
+  const node = (tag, className = '', textContent = '') => ({
+    tag, className, textContent, children: [], attributes: {}, dataset: {}, value: '', disabled: false,
+    append(...items) { this.children.push(...items); },
+    setAttribute(key, value) { this.attributes[key] = value; },
+  });
+  const viewed = [];
+  const render = new Function('configEditor', 'configGet', 'configSet', 'el', 'configButton', 'openSavedLineupViewer', `
+    const current = configEditor.owner;
+    ${section('function configLineupPicker(', 'function configRenderUsage(')}
+    return configLineupPicker;
+  `)(f.editor, key => key.split('.').reduce((value, part) => value[part], f.editor.draft), f.set, node,
+    (text, onclick) => Object.assign(node('button', '', text), { onclick }),
+    (account, id) => viewed.push({ account, id }));
+  const fields = f.groups.find(group => group.id === 'progression').fields.filter(field => field.key.startsWith('lineups.'));
+  assert.deepEqual(fields.map(field => field.key), ['lineups.mainlinePresetId', 'lineups.trialPresets']);
+  assert.deepEqual(fields.map(field => field.parent), ['progression.mainline', 'progression.trials']);
+  const roots = fields.map(field => render(field, 'config-field-' + field.key.replaceAll('.', '-')));
+  const controls = roots.flatMap(root => root.children.flatMap(row => row.children));
+  const select = binding => controls.find(control => control.dataset.lineupBinding === binding);
+  const button = binding => controls.find(control => control.dataset.lineupView === binding);
+  return { roots, select, button, viewed, choose(binding, id) { const control = select(binding); control.value = id; control.onchange(); } };
+}
+
+const lineupPresets = [
+  { id: 'first', name: '主线队', formation: { presetId: 1, heroPositions: [{ heroId: 'a', pos: { x: 4, y: 4 } }], petUid: '0' } },
+  { id: 'second', name: '副本队', formation: { presetId: 7, heroPositions: [{ heroId: 'b', pos: { x: 5, y: 1 } }], petUid: '9007199254740993' } },
+];
+const lineupCatalog = { trialRaids: [{ value: '1', label: '金币副本' }, { value: '2', label: '强化石副本' }, { value: '3', label: '藏品副本' }] };
+
+await test('推关与试炼逐项选择阵容并查看，合并自动保存保留预设、其他副本和普通配置', async () => {
+  const f = fixture({ catalog: lineupCatalog });
+  const initial = f.view('a');
+  initial.settings.lineups = { presets: structuredClone(lineupPresets), mainlinePresetId: '',
+    trialPresets: [{ raidId: '2', presetId: 'second' }, { raidId: '3', presetId: 'first' }] };
+  saveAutomationSettings('a', initial.settings, { file: f.file, revision: initial.revision });
+  await f.load();
+  let controls = lineupPickerFixture(f);
+  assert.equal(controls.select('mainline').children[0].textContent, '使用游戏当前阵容');
+  assert.equal(controls.button('mainline').disabled, true);
+  controls.button('mainline').onclick();
+  assert.deepEqual(controls.viewed, []);
+  assert.equal(controls.select('trial:2').value, 'second');
+  assert.equal(controls.select('trial:3').value, 'first');
+  assert.equal(controls.button('trial:1').disabled, true);
+  controls.choose('mainline', 'first');
+  controls.choose('trial:1', 'second');
+  controls.choose('trial:2', '');
+  assert.equal(controls.button('mainline').disabled, false);
+  assert.equal(controls.button('trial:2').disabled, true);
+  controls.button('mainline').onclick();
+  controls.button('trial:1').onclick();
+  assert.deepEqual(controls.viewed, [{ account: 'a', id: 'first' }, { account: 'a', id: 'second' }]);
+  f.set('factory.keepStock', 123);
+  await f.tick(600);
+  assert.equal(f.posts().length, 1);
+  const saved = f.view('a').settings;
+  assert.equal(saved.factory.keepStock, 123);
+  assert.deepEqual(saved.lineups.presets, lineupPresets);
+  assert.equal(saved.lineups.mainlinePresetId, 'first');
+  assert.deepEqual(saved.lineups.trialPresets, [{ raidId: '3', presetId: 'first' }, { raidId: '1', presetId: 'second' }]);
+  assert(f.env.calls.every(call => ['/api/settings', '/api/loop'].includes(call.route)));
+  await f.load(true);
+  controls = lineupPickerFixture(f);
+  assert.equal(controls.select('mainline').value, 'first');
+  assert.equal(controls.select('trial:1').value, 'second');
+  assert.equal(controls.select('trial:2').value, '');
+  assert.equal(await f.mayChange('b'), true);
+  f.change('b'); await f.load();
+  controls = lineupPickerFixture(f);
+  assert.equal(controls.select('mainline').children.length, 1);
+  assert.equal(controls.button('mainline').disabled, true);
+  assert.equal(controls.button('trial:1').disabled, true);
+  assert.deepEqual(f.editor.draft.lineups.presets, []);
+});
+
+await test('阵容选择与在途普通设置共用串行保存，外部管理修改刷新后沿用版本冲突保护', async () => {
+  const f = fixture({ catalog: lineupCatalog });
+  const initial = f.view('a'); initial.settings.lineups.presets = structuredClone(lineupPresets);
+  saveAutomationSettings('a', initial.settings, { file: f.file, revision: initial.revision });
+  await f.load();
+  const controls = lineupPickerFixture(f), gate = deferred();
+  f.env.onPost = () => gate.promise;
+  f.set('factory.keepStock', 124); await f.tick(600);
+  controls.choose('mainline', 'second'); controls.choose('trial:2', 'first'); await f.tick(600);
+  assert.equal(f.posts().length, 1);
+  f.env.onPost = null; gate.resolve(); await settle(); await f.tick(600);
+  assert.equal(f.posts().length, 2); assert.equal(f.env.maxInFlight, 1);
+  assert.equal(f.view('a').settings.factory.keepStock, 124);
+  assert.equal(f.view('a').settings.lineups.mainlinePresetId, 'second');
+  assert.deepEqual(f.view('a').settings.lineups.trialPresets, [{ raidId: '2', presetId: 'first' }]);
+  const managed = f.view('a'); managed.settings.lineups.presets[0].name = '管理页改名';
+  saveAutomationSettings('a', managed.settings, { file: f.file, revision: managed.revision });
+  await f.load();
+  assert.equal(lineupPickerFixture(f).select('mainline').children[1].textContent, '管理页改名');
+  f.set('lineups.mainlinePresetId', 'first');
+  const newer = f.view('a'); newer.settings.lineups.presets[1].name = '另一页改名';
+  saveAutomationSettings('a', newer.settings, { file: f.file, revision: newer.revision });
+  await f.load();
+  assert.equal(f.editor.draft.lineups.mainlinePresetId, 'first');
+  await f.tick(600);
+  assert(f.editor.saveError?.fields?.revision);
+  assert.equal(f.view('a').settings.lineups.mainlinePresetId, 'second');
+  assert.equal(f.view('a').settings.lineups.presets[1].name, '另一页改名');
+});
+
+await test('配置曾打开后经真实管理保存流程新增、改名和删除，返回配置重绘选择且自动保存保留最新阵容', async () => {
+  const f = fixture({ catalog: lineupCatalog });
+  let controls;
+  f.env.onRender = () => { controls = lineupPickerFixture(f); };
+  await f.load();
+  assert.equal(controls.select('mainline').children.length, 1);
+  const managerSource = fs.readFileSync(new URL('../src/lineup-editor.js', import.meta.url), 'utf8');
+  const managerSection = (from, to) => {
+    const start = managerSource.indexOf(from), end = managerSource.indexOf(to, start);
+    assert(start >= 0 && end > start, from);
+    return managerSource.slice(start, end);
+  };
+  const managerView = () => { const view = f.view('a'); return { ...view.settings.lineups, revision: view.revision }; };
+  const state = { saved: managerView(), readSerial: 0, saving: false };
+  let nextId = 0;
+  const mutate = new Function('env', `
+    const current = 'a';
+    const savedLineupState = () => env.state;
+    const renderSavedLineups = () => {}, redrawLineupEditor = () => {}, updateManualLineupSelects = () => {};
+    const lineupRequest = env.request;
+    ${managerSection('function adoptSavedLineups(', 'async function refreshSavedLineups(')}
+    ${managerSection('async function mutateSavedLineups(', 'async function captureSavedLineup(')}
+    return mutateSavedLineups;
+  `)({ state, async request(route, account, payload) {
+    assert.equal(account, 'a');
+    const prior = f.view(account), settings = structuredClone(prior.settings);
+    if (route.endsWith('/save')) {
+      const preset = { id: payload.id || 'managed-' + ++nextId, name: payload.name, formation: payload.formation };
+      const index = settings.lineups.presets.findIndex(item => item.id === preset.id);
+      if (index < 0) settings.lineups.presets.push(preset); else settings.lineups.presets[index] = preset;
+    } else {
+      assert(route.endsWith('/delete'));
+      settings.lineups.presets = settings.lineups.presets.filter(item => item.id !== payload.id);
+      if (settings.lineups.mainlinePresetId === payload.id) settings.lineups.mainlinePresetId = '';
+      settings.lineups.trialPresets = settings.lineups.trialPresets.filter(item => item.presetId !== payload.id);
+    }
+    saveAutomationSettings(account, settings, { file: f.file, revision: payload.revision });
+    return managerView();
+  } });
+
+  assert.equal(await f.flush(), true);
+  assert(await mutate('a', '/api/lineup-presets/save', { name: '新建队伍', formation: lineupPresets[0].formation }));
+  await f.load();
+  assert.deepEqual(controls.select('mainline').children.map(option => option.textContent), ['使用游戏当前阵容', '新建队伍']);
+  controls.choose('mainline', 'managed-1'); controls.choose('trial:1', 'managed-1');
+  await f.tick(600);
+  assert.equal(f.view('a').settings.lineups.presets[0].name, '新建队伍');
+  assert.equal(f.view('a').settings.lineups.mainlinePresetId, 'managed-1');
+
+  state.saved = managerView();
+  assert.equal(await f.flush(), true);
+  assert(await mutate('a', '/api/lineup-presets/save', { id: 'managed-1', name: '重命名队伍', formation: lineupPresets[0].formation }));
+  await f.load();
+  assert.equal(controls.select('mainline').children[1].textContent, '重命名队伍');
+  assert.equal(controls.select('mainline').value, 'managed-1');
+  assert.equal(controls.select('trial:1').value, 'managed-1');
+  f.set('factory.keepStock', 125); await f.tick(600);
+  assert.equal(f.view('a').settings.lineups.presets[0].name, '重命名队伍');
+
+  state.saved = managerView();
+  assert.equal(await f.flush(), true);
+  assert(await mutate('a', '/api/lineup-presets/delete', { id: 'managed-1' }));
+  await f.load();
+  assert.equal(controls.select('mainline').children.length, 1);
+  assert.equal(controls.select('mainline').value, '');
+  assert.equal(controls.select('trial:1').value, '');
+  assert.equal(controls.button('mainline').disabled, true);
+  assert.equal(controls.button('trial:1').disabled, true);
+  f.set('factory.keepStock', 126); await f.tick(600);
+  assert.deepEqual(f.view('a').settings.lineups, { presets: [], mainlinePresetId: '', trialPresets: [] });
+  assert.equal(f.view('a').settings.factory.keepStock, 126);
+  assert.equal(f.env.maxInFlight, 1);
+  assert.equal(f.editor.saveError, null);
+});
+
+await test('管理自定义阵容入口等候全部在途草稿保存后再导航并刷新管理数据', async () => {
+  const f = fixture(); await f.load();
+  const gate = deferred(), actions = [], host = { append(button) { this.button = button; } };
+  const createLink = new Function('env', `
+    const current = 'a', group = { id: 'progression' }, section = env.host;
+    const el = () => ({}), configFlush = env.flush;
+    const document = { querySelector: () => ({}) };
+    const activateConsolePage = () => env.actions.push('navigate');
+    const refreshSavedLineups = async () => { env.actions.push('refresh'); env.refreshed(); };
+    const $ = () => ({ scrollIntoView() { env.actions.push('scroll'); } });
+    ${section("if (group.id === 'progression') {", 'groupHost.append(section);')}
+    return section.button;
+  `);
+  let refreshedRevision;
+  const button = createLink({ host, actions, flush: f.flush, refreshed: () => { refreshedRevision = f.view('a').revision; } });
+  f.env.onPost = () => gate.promise;
+  f.set('factory.keepStock', 127);
+  const opening = button.onclick(); await settle();
+  assert.deepEqual(actions, []);
+  f.set('factory.keepStock', 128);
+  f.env.onPost = null; gate.resolve();
+  await opening;
+  assert.deepEqual(actions, ['navigate', 'refresh', 'scroll']);
+  assert.equal(f.posts().length, 2);
+  assert.equal(f.view('a').settings.factory.keepStock, 128);
+  assert.equal(refreshedRevision, f.view('a').revision);
+  assert.equal(f.dirty(), false);
 });
 
 console.log('配置自动保存专项 ' + passed + '/' + passed + ' 通过');

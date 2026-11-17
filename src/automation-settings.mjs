@@ -8,6 +8,7 @@ import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, validat
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
 import { activityAutomationDefaults } from './activity-automation.mjs';
 import { DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
+import { validateLineupSettings } from './saved-lineups.mjs';
 
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
@@ -56,6 +57,7 @@ export const DEFAULT_SETTINGS = {
   dailies: { enabled: true, claimTasks: true, claimDailyChest: true, claimWeeklyChest: true, claimGift: true },
   tasks: { main: true, branch: true, achievements: true },
   progression: { enabled: true, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
+  lineups: { presets: [], mainlinePresetId: '', trialPresets: [] },
   trials: { paid: false, ads: false, raidIds: ['1','2','3'], paidPerRaidLimit: 1, dailyDiamondBudget: 450, maxSingleCost: 50 },
   fleetDispatch: { priority: ['cityWar','pirateHunt','worldBoss','follow','treasure','radar','silicon'] },
   worldBoss: { enabled: false, fleetIds: [], minDurabilityPercent: 80, petrolReserve: 0 },
@@ -232,6 +234,11 @@ export function validateSettings(input, { partial = false, catalog = null } = {}
   for (const [group, defaults] of Object.entries(DEFAULT_SETTINGS)) {
     if (!Object.hasOwn(input, group)) { if (!partial) errors[group] = `缺少设置分组：${group}`; continue; }
     if (!plain(input[group])) { errors[group] = `${group} 必须是对象`; continue; }
+    if (group === 'lineups') {
+      try { output.lineups = validateLineupSettings(input[group]); }
+      catch (error) { errors.lineups = error.message; }
+      continue;
+    }
     for (const key of Object.keys(input[group])) if (!Object.hasOwn(defaults, key)) errors[`${group}.${key}`] = `不支持的设置项：${group}.${key}`;
     for (const [key, initial] of Object.entries(defaults)) {
       const name = `${group}.${key}`;
@@ -427,7 +434,7 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   if (source === 'stored') return input;
 
   const addedGroups = ['login', 'treasure', 'cityWar', 'forge', 'antique', 'trials', 'pirateHunt',
-    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'activityAutomation', 'merchant', 'weekOrder', 'ads', 'appointments', ...Object.keys(EXTENDED_DEFAULTS)];
+    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'activityAutomation', 'merchant', 'weekOrder', 'ads', 'appointments', 'lineups', ...Object.keys(EXTENDED_DEFAULTS)];
   for (const group of addedGroups) {
     if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
   }

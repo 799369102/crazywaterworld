@@ -44,6 +44,10 @@ import { readTrialSweeps, executeTrialSweep } from './trial-sweeps.mjs';
 import { readHeroEquipment, equipHeroEmptySlots, enhanceHeroEquipment, uidText } from './hero-equipment.mjs';
 import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } from './equipment-crafting.mjs';
 import { readLineups, applyLineup } from './lineups.mjs';
+import { getLineupCatalog, readLineupEditor, validateLineupSettings } from './saved-lineups.mjs';
+import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
+import { createLineupExecutor, lineupRole, selectedSavedLineup } from './lineup-execution.mjs';
+import { lineupArt } from './lineup-art.mjs';
 import { pirateBoard } from './pirate-board.mjs';
 import { readGuild, readGuildMembers, claimGuildWelfare, claimMyGuildAid } from './guild.mjs';
 import { readGuildChat, watchGuildChat } from './guild-chat.mjs';
@@ -254,13 +258,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return pending;
   }
 
-  function saveAlipayRole(pending, choice) {
+  async function saveAlipayRole(pending, choice) {
     // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
     if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
       throw new Error('角色列表已变化，请重新选择角色');
     }
     pending.entry.credential = alipayLogin.takeCredential(pending.id);
-    const result = saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true });
+    const result = await saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true });
     pending.entry.credential = null;
     pending.entry.choices = [];
     cancelledAlipayLoginId = pending.id;
@@ -344,9 +348,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
   }
 
-  function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false } = {}) {
+  async function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false } = {}) {
     const idOfAccount = accountId(entry.credential);
     const session = sessions.get(idOfAccount);
+    if (session?.connectionDrain) await session.connectionDrain;
+    if (closing) throw new Error('控制台已关闭');
     const roleWorldId = choice.role.worldId || choice.worldId;
     const previous = loadStore().accounts.find(account => account.id === idOfAccount);
     const currentRoleId = uidText(session?.player?.playerId ?? session?.player?.id);
@@ -364,10 +370,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       session.stages.stop(reason);
       session.mutualAid.stop(reason);
       for (const task of session.trials.values()) task.stop(reason);
-      session.client?.stop();
-      session.worldClient?.stop();
-      session.connecting = session.client = session.player = null;
+      await closeSessionConnection(session, { includeWorld: true });
     }
+    if (closing) throw new Error('控制台已关闭');
     const store = loadStore();
     const existing = store.accounts.find(account => account.id === idOfAccount);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
@@ -391,8 +396,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
-  function savePhoneRole(pending, entry, choice) {
-    const result = saveSelectedRole(entry, choice);
+  async function savePhoneRole(pending, entry, choice) {
+    const result = await saveSelectedRole(entry, choice);
     pendingPhoneLogins.delete(pending.id);
     return result;
   }
@@ -456,11 +461,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     } catch { /* 诊断记录失败不得影响请求、调度与网页日志。 */ }
   }
 
-  function enqueue(session, work, label) {
+  function enqueue(session, work, label, { recoverFormation = true } = {}) {
+    if (closing || session.connectionDrain) return Promise.reject(new Error('账号正在结束当前挑战并恢复阵容，请稍后操作'));
     if (session.queueTail && label) emit(session, 'info', label + '已排队，当前操作结束后执行');
     const generation = session.generation;
-    const run = () => {
-      if (session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
+    const run = async () => {
+      if (closing || session.connectionDrain || session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
+      if (recoverFormation && !session.lineupJob && session.client?.connected && session.player
+        && readLineupRuntime(session.id).pending) {
+        await recoverSessionLineup(session);
+        if (session.paused || generation !== session.generation) throw new Error('账号已暂停，已完成阵容恢复');
+      }
       return work();
     };
     const job = (session.queueTail ?? Promise.resolve()).then(run, run);
@@ -492,6 +503,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       generation: 0,
       client: null,
       connecting: null,
+      connectionDrain: null,
       player: null,
       pirateAdvance: createPirateAdvanceTask(),
       stages: createStageTask(),
@@ -503,6 +515,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       reportClaim: null,
       heroJob: null,
       queueTail: null,
+      lineupJob: null,
+      lineupState: { phase: 'idle' },
       appointmentJob: null,
       residentJobs: new Map(),
       progressionJobs: new Map(),
@@ -535,11 +549,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   // Share identical clicks until this account's queued operation has finished.
   // 页面读取：队列空闲时照常排队；挂机一轮可持续一分钟以上，此时改在它两次请求之间读取，不等整轮结束。
   function readJob(session, work) {
+    if (closing || session.connectionDrain) return Promise.reject(new Error('账号正在结束当前挑战并恢复阵容，请稍后操作'));
     const client = session.client, generation = session.generation;
     if (!session.queueTail || !client?.connected || !client.interleaveRead
       || session.connecting || session.syncingProduction || session.productionSyncRequired) return enqueue(session, work);
     return client.interleaveRead(() => {
-      if (session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
+      if (closing || session.connectionDrain || session.paused || generation !== session.generation) throw new Error('账号已暂停，已取消排队操作');
       return work();
     });
   }
@@ -630,6 +645,133 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return { settings, revision: saved.revision, savedAt: saved.savedAt, baseRevision, catalog: settingsCatalog(loadConfigSafe()),
       tasks: automationTasks.filter(task => !availability.hiddenTasks.includes(task.key)), rules: { ...settingsUiRules(), hiddenFields: availability.hiddenFields },
       usage: usageFor(session).snapshot(), pendingUsage: usageFor(session).pendingCounters(), running: session.loop.running };
+  }
+
+  function lineupPresetsView(session) {
+    const current = settingsView(session);
+    const recovery = readLineupRuntime(session.id);
+    syncLineupRecoveryState(session, recovery);
+    return { ...current.settings.lineups, revision: current.revision,
+      trialRaids: current.catalog.trialRaids, catalog: getLineupCatalog(loadConfigSafe()),
+      recovery: session.lineupJob ? { ...recovery, ...session.lineupState } : recovery };
+  }
+
+  function observeLineup(session, event) {
+    session.lineupState = event;
+    const labels = { switching: '正在切换挑战阵容', battling: event.lineupId ? '使用所选阵容挑战' : '使用游戏当前阵容挑战', restoring: '正在恢复原阵容',
+      pending: '原阵容待恢复', conflict: '阵容恢复需要处理', idle: '阵容核对完成' };
+    emit(session, event.phase === 'pending' || event.phase === 'conflict' ? 'warn' : 'state',
+      labels[event.phase] + (event.reason ? ' · ' + event.reason : ''), { lineupChanged: true });
+  }
+
+  function syncLineupRecoveryState(session, recovery) {
+    const tasks = [session.stages, ...session.trials.values()];
+    const progress = [['stageAuto', session.loop.challengeRun?.mainline],
+      ...Object.entries(session.loop.challengeRun?.trials ?? {}).map(([id, state]) => ['trialAuto:' + id, state])];
+    if (!tasks.some(task => task.view().lineupRestorePending) && !progress.some(([, state]) => state?.lineupRestorePending)) return;
+    if (session.lineupJob || (recovery ?? readLineupRuntime(session.id)).pending) return;
+    for (const task of tasks) task.lineupRestored();
+    for (const [key, state] of progress) {
+      if (!state?.lineupRestorePending) continue;
+      state.lineupPhase = 'idle';
+      state.lineupRestorePending = false;
+      state.reason = '阵容核对已完成，请重新开始挂机以继续该挑战';
+      session.loop.controlStatus?.set(key, { text: state.reason, state: 'waiting', checkedAt: Math.floor(Date.now() / 1000) });
+    }
+  }
+
+  async function recoverSessionLineup(session, options = {}) {
+    const job = recoverLineup(session.client, { accountId: session.id, role: lineupRole(session.player),
+      ...options, onPhase: event => observeLineup(session, event) });
+    session.lineupJob = job;
+    try { return await job; }
+    finally { if (session.lineupJob === job) session.lineupJob = null; }
+  }
+
+  function sessionLineupExecutor(session, client, presetId) {
+    const generation = session.generation;
+    const execute = createLineupExecutor(client, {
+      accountId: session.id, presetId, getPlayer: () => session.player,
+      getConfig: loadConfigSafe, getSettings: () => settingsView(session).settings,
+      enabled: () => session.client === client && client.connected && !session.paused && session.generation === generation,
+      onPhase: event => observeLineup(session, event),
+    });
+    return async (work, context) => {
+      const job = execute(work, context);
+      session.lineupJob = job;
+      try { return await job; }
+      finally { if (session.lineupJob === job) session.lineupJob = null; }
+    };
+  }
+
+  async function finishSessionLineup(session, { client, player, lineupJob }) {
+    if (lineupJob) await lineupJob.catch(() => {});
+    if (!client?.connected || !player) return;
+    try {
+      if (readLineupRuntime(session.id).pending) {
+        await recoverLineup(client, { accountId: session.id, role: lineupRole(player),
+          onPhase: event => observeLineup(session, event) });
+      }
+    }
+    catch (error) { emit(session, 'warn', '已保留待恢复阵容，下一次连接时继续核对 · ' + error.message); }
+  }
+
+  function closeSessionConnection(session, { includeWorld = false } = {}) {
+    if (session.connectionDrain) return session.connectionDrain;
+    const { client, player, lineupJob, worldClient, connecting, generation } = session;
+    const drain = (async () => {
+      try { await finishSessionLineup(session, { client, player, lineupJob }); }
+      finally {
+        client?.stop();
+        if (includeWorld) worldClient?.stop();
+        if (session.generation === generation && session.client === client) {
+          session.client = session.player = null;
+          if (session.connecting === connecting) session.connecting = null;
+        }
+      }
+    })();
+    session.connectionDrain = drain;
+    const clear = () => { if (session.connectionDrain === drain) session.connectionDrain = null; };
+    drain.then(clear, clear);
+    return drain;
+  }
+
+  function saveLineupPreferences(session, payload, update) {
+    const current = settingsView(session);
+    if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision) {
+      throw new SettingsError({ revision: '阵容或游戏配置已更新，请刷新后再保存' });
+    }
+    const settings = structuredClone(current.settings);
+    update(settings.lineups);
+    settings.lineups = validateLineupSettings(settings.lineups);
+    const entry = saveAutomationSettings(session.id, settings, { revision: current.revision });
+    adoptPreferences(session, entry);
+    return lineupPresetsView(session);
+  }
+
+  function saveLineupPreset(session, payload, formation) {
+    const normalized = validateLineupSettings({ presets: [{ id: 'validation', name: payload.name, formation }] }).presets[0].formation;
+    const config = loadConfigSafe();
+    if (config?.tables?.FormationTypePositionCfg) {
+      const seats = new Set(config.tables.FormationTypePositionCfg.data.filter(row => row.id === normalized.presetId)
+        .map(row => row.position.join(',')));
+      const heroes = new Set(config.tables.HeroCfg?.data.map(hero => hero.id) ?? []);
+      const capacity = Math.max(0, ...(config.tables.FormationHeroNumCfg?.data ?? []).map(row => row.heroNum));
+      if (!seats.size || normalized.heroPositions.some(slot => !seats.has(slot.pos.x + ',' + slot.pos.y))) {
+        throw new Error('所选阵型或英雄站位无效');
+      }
+      if (normalized.heroPositions.some(slot => !heroes.has(slot.heroId))) throw new Error('阵容包含未知英雄');
+      if (capacity && normalized.heroPositions.length > capacity) throw new Error('上阵英雄超过人数上限');
+    }
+    const id = payload.id === undefined ? randomUUID() : payload.id;
+    const result = saveLineupPreferences(session, payload, lineups => {
+      const index = lineups.presets.findIndex(preset => preset.id === id);
+      if (payload.id !== undefined && index < 0) throw new Error('此阵容已删除，请刷新后重新选择');
+      const preset = { id, name: payload.name, formation: normalized };
+      if (index < 0) lineups.presets.push(preset);
+      else lineups.presets[index] = preset;
+    });
+    return { ...result, savedId: id };
   }
 
   function weekOrderSettingsView(session) {
@@ -1208,6 +1350,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     session.player = response.playerInfo || null;
     watchResidentRefreshes(client,usageFor(session),session.player);
     client.send('LoginFinishRequest', {});
+    if (readLineupRuntime(session.id).pending) {
+      try { await recoverSessionLineup(session); }
+      catch (error) { emit(session, 'warn', '登录后阵容仍待恢复 · ' + error.message, { lineupChanged: true }); }
+    }
     if (syncToken) {
       const player = session.player;
       const enabled = () => session.generation === generation && !session.paused && session.client === client
@@ -1294,6 +1440,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   async function connect(session, account, { backgroundRecovery = false, explicitLogin = false, loginRecoveryController = null } = {}) {
+    if (closing || session.connectionDrain) throw new Error('账号正在结束当前挑战并恢复阵容，请稍后连接');
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
     const authorizedRecovery = loginRecoveryController && loginRecoveryController === session.loginRecoveryController
       && !loginRecoveryController.signal.aborted && reconnectPolicy(session).autoReconnect;
@@ -1325,8 +1472,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   async function ensureConnected(session, account, options) {
+    if (closing || session.connectionDrain) throw new Error('账号正在结束当前挑战并恢复阵容，请稍后操作');
     if (session.paused) throw new Error('账号已暂停，请先恢复托管');
     if (session.connecting || !session.client?.connected || !session.player) await connect(session, account, options);
+    if (!options?.allowLineupPending && !session.lineupJob && readLineupRuntime(session.id).pending) await recoverSessionLineup(session);
     bridgeFleetReservations(session.client, () => session.preferences, usageFor(session), exactAutomationId(session.player?.worldId));
     return session.client;
   }
@@ -1350,6 +1499,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       state: session.client?.snapshot?.().state ?? 'IDLE',
       busy: session.busy,
       looping: session.loop.running,
+      loopStopping: Boolean(session.loop.running && session.loop.controller?.signal.aborted),
     };
   }
 
@@ -1634,7 +1784,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/loop/interval', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear',
+          '/api/lineup-presets/save', '/api/lineup-presets/delete', '/api/lineup-presets/bind'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -2100,6 +2251,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(iconIndex());
         return;
       }
+      if (route.startsWith('GET /api/lineups/art/') && route.endsWith('.png')) {
+        const name = decodeURIComponent(parsed.pathname.slice('/api/lineups/art/'.length, -4));
+        const image = await lineupArt(name);
+        if (!image) { json({ error: '布阵素材暂未同步' }, 404); return; }
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'public, max-age=3600' });
+        res.end(image);
+        return;
+      }
       if (route.startsWith('GET /api/art/icon/') && route.endsWith('.png')) {
         const name = decodeURIComponent(parsed.pathname.slice('/api/art/icon/'.length, -'.png'.length));
         const png = await iconThumb(name);
@@ -2227,7 +2386,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         removed?.loginRecoveryWait?.abort();
         removed?.loop.controller?.abort();
         removed?.pirateAdvance.stop('账号已删除'); removed?.stages.stop('账号已删除'); removed?.mutualAid.stop('账号已删除'); for (const task of removed?.trials.values() ?? []) task.stop('账号已删除');
-        removed?.client?.stop();
+        if (removed) await closeSessionConnection(removed, { includeWorld: true });
         sessions.delete(account.id);
         emit(null, 'info', `已删除账号 ${describeAccount(account).title}`);
         json({ ok: true });
@@ -2288,7 +2447,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         try {
           const session = sessions.get(accountId(pending.entry.credential));
           const save = () => saveAlipayRole(pending, choice);
-          const result = session && !session.paused ? await enqueue(session, save) : save();
+          const result = session && !session.paused ? await enqueue(session, save) : await save();
           // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
           try { await alipayLogin.cancel(payload.id); } catch {}
           json(result);
@@ -2421,7 +2580,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             }
             return savePhoneRole(pending, selected.entry, selected.choice);
           };
-          json(session && !session.paused ? await enqueue(session, save) : save());
+          json(session && !session.paused ? await enqueue(session, save) : await save());
         } finally {
           pending.busy = false;
         }
@@ -2442,6 +2601,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (typeof paused !== 'boolean') throw new Error('请选择暂停或恢复');
         if (typeof start !== 'boolean' || (start && paused)) throw new Error('开始托管需要先恢复账号');
         if (start) needConfirm(payload);
+        if (session.connectionDrain) await session.connectionDrain;
+        if (closing || sessions.get(session.id) !== session || !loadStore().accounts.some(entry => entry.id === account.id)) {
+          throw new Error('账号已移除或控制台已关闭');
+        }
         if (!paused && !session.paused && loginRecoveryActive(session) && (!start || session.loop.running)) {
           json(accountStatus(session));
           return;
@@ -2459,9 +2622,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             requireProductionSync(session);
             stopLoop(session, '账号暂停，结束挂机', { preserveAutoStart: true });
             session.stages.stop('账号已暂停'); session.mutualAid.stop('账号已暂停'); for (const task of session.trials.values()) task.stop('账号已暂停');
-            session.client?.stop();
-            session.worldClient?.stop();
-            session.connecting = session.client = session.player = null;
+            await closeSessionConnection(session, { includeWorld: true });
             emit(session, 'state', '账号已暂停，可以自行上号', { pauseChanged: true });
           } else {
             emit(session, 'state', '账号已恢复托管', { pauseChanged: true });
@@ -2488,14 +2649,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'POST /api/disconnect') {
         const { session } = scoped_(parsed);
+        if (session.connectionDrain) await session.connectionDrain;
         requireProductionSync(session);
         session.generation++;
         stopLoop(session, '账号已断开');
         session.stages.stop('账号已断开'); session.mutualAid.stop('账号已断开'); for (const task of session.trials.values()) task.stop('账号已断开');
-        session.client?.stop();
-        session.connecting = null;
-        session.client = null;
-        session.player = null;
+        await closeSessionConnection(session);
         json({ ok: true });
         return;
       }
@@ -2795,6 +2954,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (route === 'GET /api/fleets/formation') return readFleetFormations(client, config, player);
           if (route === 'GET /api/pirates/hunt') return pirateHuntOptions(client, config, player);
           const rows = await trialProgress(client, config, player.level);
+          syncLineupRecoveryState(session);
           for (const row of rows) {
             row.task = session.trials.get(row.raidId)?.view() ?? { running: false, reason: '尚未开启', wins: 0, failures: 0 };
           }
@@ -2848,6 +3008,66 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           emit(session, 'info', result.label);
           return result;
         }));
+        return;
+      }
+      if (route === 'GET /api/lineup-presets') {
+        json(lineupPresetsView(scoped_(parsed).session));
+        return;
+      }
+      if (route === 'GET /api/lineup-editor') {
+        const { session, account } = scoped_(parsed);
+        json(await progressionJob(session, account, route, '读取布阵信息', async client => ({
+          ...await readLineupEditor(client, loadConfigSafe(), session.player), ...lineupPresetsView(session),
+        })));
+        return;
+      }
+      if (route === 'POST /api/lineup-presets/save') {
+        const payload = jsonBody(); needConfirm(payload);
+        json(saveLineupPreset(scoped_(parsed).session, payload, payload.formation));
+        return;
+      }
+      if (route === 'POST /api/lineup-presets/capture') {
+        const payload = jsonBody(); needConfirm(payload);
+        const { session, account } = scoped_(parsed);
+        json(await progressionJob(session, account, route, '保存当前游戏阵容', async client => {
+          const editor = await readLineupEditor(client, loadConfigSafe(), session.player);
+          return saveLineupPreset(session, payload, editor.formation);
+        }));
+        return;
+      }
+      if (route === 'POST /api/lineup-presets/delete') {
+        const payload = jsonBody(); needConfirm(payload);
+        json(saveLineupPreferences(scoped_(parsed).session, payload, lineups => {
+          if (!lineups.presets.some(preset => preset.id === payload.id)) throw new Error('此阵容已删除，请刷新');
+          lineups.presets = lineups.presets.filter(preset => preset.id !== payload.id);
+          if (lineups.mainlinePresetId === payload.id) lineups.mainlinePresetId = '';
+          lineups.trialPresets = lineups.trialPresets.filter(binding => binding.presetId !== payload.id);
+        }));
+        return;
+      }
+      if (route === 'POST /api/lineup-presets/bind') {
+        const payload = jsonBody(); needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const raids = new Set(settingsCatalog(loadConfigSafe()).trialRaids.map(raid => String(raid.value)));
+        if (!Array.isArray(payload.trialPresets) || payload.trialPresets.some(binding => !raids.has(binding?.raidId))) {
+          throw new Error('请选择有效的试炼副本');
+        }
+        json(saveLineupPreferences(session, payload, lineups => {
+          lineups.mainlinePresetId = payload.mainlinePresetId;
+          lineups.trialPresets = payload.trialPresets;
+        }));
+        return;
+      }
+      if (route === 'POST /api/lineup-presets/recover') {
+        const payload = jsonBody(); needConfirm(payload);
+        const { session, account } = scoped_(parsed);
+        if (!['auto', 'restore', 'keep'].includes(payload.resolution)) throw new Error('请选择有效的阵容恢复方式');
+        if (typeof payload.expectedTransactionId !== 'string') throw new Error('请刷新待恢复阵容后再处理');
+        json(await enqueue(session, async () => {
+          await ensureConnected(session, account, { allowLineupPending: true });
+          await recoverSessionLineup(session, { resolution: payload.resolution, expectedTransactionId: payload.expectedTransactionId });
+          return lineupPresetsView(session);
+        }, '核对待恢复阵容', { recoverFormation: false }));
         return;
       }
       if (route === 'GET /api/lineups') {
@@ -3103,7 +3323,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         })); return;
       }
       if (route === 'GET /api/trials/tasks') {
-        json(Object.fromEntries([...scoped_(parsed).session.trials].map(([id, task]) => [id, task.view()]))); return;
+        const { session } = scoped_(parsed);
+        syncLineupRecoveryState(session);
+        json(Object.fromEntries([...session.trials].map(([id, task]) => [id, task.view()]))); return;
       }
       if (route === 'POST /api/trials/start' || route === 'POST /api/trials/stop') {
         const payload = jsonBody(); needConfirm(payload);
@@ -3112,6 +3334,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!raid) throw new Error('请选择有效试炼副本');
         if (route.endsWith('/stop')) { json(session.trials.get(payload.raidId)?.stop() ?? { running: false }); return; }
         if (session.paused) throw new Error('账号已暂停，请先恢复托管');
+        selectedSavedLineup(settingsView(session).settings, { presetId: payload.lineupId ?? '' });
         let task = session.trials.get(payload.raidId);
         if (!task) { task = createTrialTask(payload.raidId); session.trials.set(payload.raidId, task); }
         const generation = session.generation;
@@ -3120,16 +3343,19 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(task.start(payload, async () => {
           const client = await ensureConnected(session, account);
           return { client, player: session.player, config, schedule: work => enqueue(session, work),
+            executeBattle: sessionLineupExecutor(session, client, payload.lineupId ?? ''),
             enabled: () => !session.paused && session.generation === generation && session.client === client && client.connected };
         }, state => emit(session, state.failed ? 'error' : 'info', `试炼 · ${raid.title}：${state.reason}（通过${state.wins}关，连续失败${state.failures}次）`)));
         return;
       }
       if (route === 'POST /api/trials/challenge') {
         const { session, account } = scoped_(parsed);
-        const { raidId, stageId } = jsonBody();
+        const { raidId, stageId, lineupId = '' } = jsonBody();
+        selectedSavedLineup(settingsView(session).settings, { presetId: lineupId });
         if (session.trials.get(raidId)?.view().running) throw new Error('该试炼正在连续推关，请先停止再单次挑战');
-        const message = await progressionJob(session, account, JSON.stringify([route, raidId, stageId]), '试炼挑战', async (client, enabled) => {
-          const message = await challengeTrial(client, loadConfigSafe(), session.player?.level ?? 0, raidId, stageId, enabled);
+        const message = await progressionJob(session, account, JSON.stringify([route, raidId, stageId, lineupId]), '试炼挑战', async (client, enabled) => {
+          const message = await challengeTrial(client, loadConfigSafe(), session.player?.level ?? 0, raidId, stageId, enabled,
+            { executeBattle: sessionLineupExecutor(session, client, lineupId) });
           emit(session, 'info', message);
           return message;
         });
@@ -3321,7 +3547,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         return;
       }
       if (route === 'GET /api/stages') {
-        json(scoped_(parsed).session.stages.view());
+        const { session } = scoped_(parsed);
+        syncLineupRecoveryState(session);
+        json(session.stages.view());
         return;
       }
       if (route === 'POST /api/stages/start') {
@@ -3329,13 +3557,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         const { session, account } = scoped_(parsed);
         if (session.paused) throw new Error('账号已暂停，请先恢复托管');
+        selectedSavedLineup(settingsView(session).settings, { presetId: payload.lineupId ?? '' });
         const progression = settingsView(session).settings.progression;
         if (session.loop.running && progression.enabled && progression.mainline) throw new Error('主线已随挂机推关，请先暂停挂机再手动开始');
         json(session.stages.start(payload, async () => {
           const client = await ensureConnected(session, account);
           const config = loadConfigSafe();
           let nextCheck = 0;
-          return { client, player: session.player, config, schedule: work => enqueue(session, work), async beforeBattle(signal) {
+          return { client, player: session.player, config, schedule: work => enqueue(session, work),
+            executeBattle: sessionLineupExecutor(session, client, payload.lineupId ?? ''), async beforeBattle(signal) {
             const enabled = key => key === 'afk' && session.loop.tasks.afk && !session.loop.running && !signal.aborted;
             if (!enabled('afk') || Date.now() < nextCheck) return;
             nextCheck = Date.now() + 60_000;
@@ -3374,7 +3604,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         const { account, session } = scoped_(parsed);
         startLoop(session, account, { rounds: payload.rounds, everySeconds: payload.everySeconds, explicitLogin: true });
-        json(loopView(session));
+        json({ ...loopView(session), status: accountStatus(session) });
         return;
       }
       if (route === 'POST /api/loop/interval') {
@@ -3406,8 +3636,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const payload = jsonBody();
         needConfirm(payload);
         const { session } = scoped_(parsed);
-        stopLoop(session, '已暂停挂机');
-        json({ ok: true, running: session.loop.running });
+        stopLoop(session, '已暂停挂机', { stopManualTasks: false });
+        json({ ok: true, running: session.loop.running, status: accountStatus(session) });
         return;
       }
 
@@ -3505,9 +3735,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  function stopLoop(session, reason, { cancelRecovery = true, preserveAutoStart = false } = {}) {
+  function stopLoop(session, reason, { cancelRecovery = true, preserveAutoStart = false, stopManualTasks = true } = {}) {
     if (cancelRecovery) cancelLoginRecovery(session);
-    session.pirateAdvance?.stop(reason);
+    if (stopManualTasks) session.pirateAdvance?.stop(reason);
     const loop = session.loop;
     if (!session.paused || !preserveAutoStart) saveAutomation(session.id, { enabled: false, ...(!preserveAutoStart ? { autoStart: false } : {}) });
     if (!loop.running || loop.controller?.signal.aborted) return;
@@ -3585,6 +3815,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           isTrialBusy: id => session.trials.get(id)?.view().running === true,
           isPirateBusy: () => session.pirateAdvance.view().running,
           challengeRun: loop.challengeRun,
+          executeBattle: sessionLineupExecutor(session, client),
           getSettings: () => session.preferences,
           onFishBookComplete: () => {
             const saved=loadAutomationSettings(session.id);
@@ -3723,6 +3954,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return manual.running?manual:session.loop.running?(session.loop.challengeRun?.pirate?.state??{}):{};
   }
   function loopView(session) {
+    syncLineupRecoveryState(session);
     const loop = session.loop;
     const rewards = session.client ? rewardSchedule(session.client) : null;
     const displayUsage=usageFor(session).snapshot();
@@ -3830,14 +4062,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       await resources?.stop();
       for (const stream of streams) stream.destroy();
       streams.clear();
+      const drains = [];
       for (const session of sessions.values()) {
         session.generation++;
         session.loginRecoveryController?.abort();
         session.loginRecoveryWait?.abort();
         session.loop.controller?.abort();
         session.pirateAdvance.stop('控制台已关闭'); session.stages.stop('控制台已关闭'); session.mutualAid.stop('控制台已关闭'); for (const task of session.trials.values()) task.stop('控制台已关闭');
-        session.client?.stop();
+        drains.push(closeSessionConnection(session, { includeWorld: true }));
       }
+      await Promise.all(drains);
       return new Promise((resolve) => server.close(() => { traceLog.close().then(resolve); }));
     },
     emit,

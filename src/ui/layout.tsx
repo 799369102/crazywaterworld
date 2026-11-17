@@ -41,7 +41,8 @@ export function chrome() {
         </div>
         <Button id="connect" size="sm">连接</Button>
         <div className="hosting-controls">
-          <label className="hosting-interval" htmlFor="loop-every">间隔<Input id="loop-every" className="h-8 w-20 max-sm:w-16" type="number" min="1" max="86400" step="1" required defaultValue="60" disabled aria-label="托管间隔（秒）" aria-describedby="loop-interval-status" title="按账号自动保存，下一轮使用新间隔" /><span>秒</span></label>
+          <label className="hosting-interval" htmlFor="loop-every">间隔<Input id="loop-every" className="h-8 w-20 max-sm:w-16" type="number" min="1" max="86400" step="1" required defaultValue="60" disabled aria-label="挂机间隔（秒）" aria-describedby="loop-interval-status" title="按账号自动保存，下一轮使用新间隔" /><span>秒</span></label>
+          <Button id="loop-toggle" size="sm" variant="outline" disabled title="按已保存的任务和轮数开始挂机">开始挂机</Button>
           <Button id="account-pause" size="sm" variant="outline" disabled title="按已保存的任务和轮数开始托管">开始托管</Button>
           <span id="loop-interval-status" className="sr-only" role="status" />
           <span id="loop-hint" className="sr-only" role="status" />

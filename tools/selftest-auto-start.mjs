@@ -19,7 +19,7 @@ const { loadAutomationSettings, saveAutomationSettings, settingsFromNative } = a
 
 const live = new Set();
 const states = new Map();
-const protocol = Object.fromEntries(['OnWaterRequest', 'OnWaterResponse', 'AllItemRequest', 'AllItemResponse']
+const protocol = Object.fromEntries(['OnWaterRequest', 'OnWaterResponse', 'AllItemRequest', 'AllItemResponse', 'GotAchievementRewardRequest']
   .map(name => [name, true]));
 const tasks = Object.fromEntries(automationTasks.map(task => [task.key, task.key === 'mail']));
 let app, root, capturedLogin, sequence = 0, passed = 0;
@@ -42,7 +42,13 @@ GameClient.prototype.connect = async function (login) {
   return { result: 0, playerInfo: state.player };
 };
 GameClient.prototype.send = () => {};
-GameClient.prototype.sendWatch = async () => ({});
+GameClient.prototype.sendWatch = async function (name, body) {
+  if (name === 'GotAchievementRewardRequest') {
+    assert.equal(body.id, this.fixture.achievement.id);
+    this.fixture.achievement.rewardClaimed = true;
+  }
+  return {};
+};
 GameClient.prototype.request = async function (name) {
   this.fixture.requests.push(name);
   if (name === 'EmailBoxRequest') {
@@ -51,6 +57,7 @@ GameClient.prototype.request = async function (name) {
   }
   if (name === 'OnWaterRequest') return { building: [] };
   if (name === 'AllItemRequest') return { items: [] };
+  if (name === 'AchievementInfoRequest') return { task: this.fixture.achievement ? [this.fixture.achievement] : [] };
   return {};
 };
 GameClient.prototype.stop = function () { this.stopping = true; live.delete(this); };
@@ -251,6 +258,68 @@ try {
     await api(f.id, 'accounts/pause', { paused: false });
     await running(f.id);
     assert.equal(f.state.logins, 2);
+  });
+
+  await test('暂停挂机保留连接和手动操作，暂停托管断开连接，重启保持挂机停止', async () => {
+    const f = account({ autoStart: false });
+    await launch([f]);
+    const started = await api(f.id, 'loop/start', {});
+    assert.equal(started.running, true);
+    assert.equal(started.status.looping, true);
+    assert.equal(started.status.paused, false);
+    assert.equal(started.status.loopStopping, false);
+    await running(f.id);
+    const active = session(f.id), client = active.client, generation = active.generation;
+    const job = active.loop.job;
+    let releaseManual;
+    const manualGate = new Promise((resolve, reject) => { releaseManual = () => reject(new Error('离线手动任务结束')); });
+    active.pirateAdvance.start({ fleetIds: ['1'] }, () => manualGate);
+    try {
+      const stopped = await api(f.id, 'loop/stop', {});
+      assert.equal(stopped.ok, true);
+      assert.equal(stopped.status.paused, false);
+      assert.equal(stopped.status.connected, true);
+      assert.equal(stopped.status.looping, stopped.running);
+      assert.equal(stopped.status.loopStopping, stopped.running);
+      await job;
+      assert.equal(active.loop.running, false);
+      assert.equal(active.paused, false);
+      assert.equal(active.client, client);
+      assert.equal(client.connected, true);
+      assert.equal(active.generation, generation);
+      assert.equal(active.pirateAdvance.view().running, true);
+      assert.equal(active.pirateAdvance.view().stopping, false);
+      assert.equal(saved(f.id).enabled, false);
+      assert.equal(saved(f.id).autoStart, false);
+
+      f.state.achievement = { id: 123, progress: 1, targetProgress: 1, rewardClaimed: false };
+      const manual = await api(f.id, 'tasks/run', {});
+      assert.equal(manual.results.length, 1);
+      assert.equal(manual.results[0].ok, true);
+      assert.equal(f.state.achievement.rewardClaimed, true);
+      assert.equal(active.loop.running, false);
+      assert.equal(f.state.logins, 1);
+
+      const paused = await api(f.id, 'accounts/pause', { paused: true });
+      assert.equal(paused.paused, true);
+      assert.equal(paused.connected, false);
+      assert.equal(paused.loopStopping, false);
+      assert.equal(client.connected, false);
+      assert.equal(active.pirateAdvance.view().stopping, true);
+      const blocked = await response(f.id, 'tasks/run', {});
+      assert.equal(blocked.status, 400);
+      assert.match(blocked.data.error, /账号已暂停/);
+      await api(f.id, 'accounts/pause', { paused: false });
+      assert.equal(active.loop.running, false);
+      await shutdown();
+      await launch();
+      assert.equal((await api(f.id, 'loop')).running, false);
+      assert.equal(saved(f.id).autoStart, false);
+      assert.equal(f.state.logins, 1);
+    } finally {
+      releaseManual();
+      await waitFor(() => !active.pirateAdvance.view().running, '手动海盗任务退出');
+    }
   });
 
   await test('未运行时手动停止也保存关闭，暂停账号中开启配置等待恢复托管', async () => {

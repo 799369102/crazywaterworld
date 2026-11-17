@@ -76,7 +76,8 @@ export function stageRetryWait(loss, player, now) {
   return loss.at + RETRY_AFTER_SECONDS;
 }
 
-export async function serviceStageAuto(client, config, { player, enabled = () => false, report = () => {}, scheduler, isBusy = () => false, wait = sleep } = {}) {
+export async function serviceStageAuto(client, config, { player, enabled = () => false, report = () => {}, scheduler,
+  isBusy = () => false, wait = sleep, executeBattle = work => work() } = {}) {
   const key = 'stageAuto';
   const finish = entry => { report({ key, label: stageLabel, ...entry }); };
   const later = seconds => scheduler?.defer(key, scheduler.now() + seconds);
@@ -91,7 +92,8 @@ export async function serviceStageAuto(client, config, { player, enabled = () =>
   const passed = [];
   try {
     const result = await runStages(client, player, config, {
-      allowMutate: true, maxFailures: 1, maxWins: maxStagesPerRound, wait,
+      allowMutate: true, maxFailures: 1, maxWins: maxStagesPerRound, wait, executeBattle,
+      enabled: () => enabled() && !isBusy(),
       onBattle({ stage, won }) {
         if (won) {
           player.mainlineStage = stage + 1;

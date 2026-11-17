@@ -35,6 +35,7 @@ export const BUNDLES = [
   'ui_iconchip',
   'ui_iconaccess',
   'ui_preset',
+  'ui_formation',
   'ui_chat_iframe',
   'ui_iconworker',
 ];
@@ -244,6 +245,7 @@ async function main() {
     const pageFiles = new Map();
     for (const item of pkg.items) {
       if (item.type !== ITEM_TYPE.IMAGE || !item.name) continue;
+      if (bundle === 'ui_formation' && !['bg_formation', 'bg_position', 'bg_pos_2'].includes(item.name)) continue;
       if (ITEM_BUNDLES.includes(bundle) && (!itemNames.has(item.name) || icons[item.name])) continue;
       const sprite = pkg.sprites.get(item.id);
       if (!sprite) continue;
@@ -261,7 +263,8 @@ async function main() {
         incomplete.add(bundle);
         continue;
       }
-      icons[item.name] = { bundle, page, x: sprite.rect.x, y: sprite.rect.y, w: sprite.rect.width, h: sprite.rect.height, rotated: sprite.rotated };
+      const iconName = bundle === 'ui_formation' ? bundle + '/' + item.name : item.name;
+      icons[iconName] = { bundle, page, x: sprite.rect.x, y: sprite.rect.y, w: sprite.rect.width, h: sprite.rect.height, rotated: sprite.rotated };
       pages[`${bundle}/${page}`] = true;
       withRect += 1;
     }

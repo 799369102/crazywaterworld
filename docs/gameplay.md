@@ -635,7 +635,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 ### 13.4 网页控制台
 
 - 控制台有总览、挂机、游戏配置、建筑一览、挑战、资源与玩法、账号七个页签。资源与玩法下分日常、联盟、仓库、英雄与装备、材料与订单、礼包兑换；原活动入口保留在材料与订单中，按限时、周期、常驻分类。运行日志显示操作结果和跳过原因，可筛选警告与错误。
-- 账号页支持从电脑微信或抖音添加账号，以及导出、暂停和恢复托管。开始采集前有勾选和倒计时确认。
+- 账号页支持从电脑微信或抖音添加账号，以及导出账号。开始采集前有勾选和倒计时确认。页头分别提供挂机与托管控制，**暂停挂机** 停止自动循环并保留连接，控制台手动操作继续可用。**暂停托管** 停止任务并断开连接，退出游戏后可点击 **恢复托管** 按已保存的轮数和间隔运行。
 - 手动交居民订单、装备强化、试炼挑战和海盗出征等操作按账号排队，点击后可在主日志查看结果。
 - 挂机页展示模块开关，旁边的“配置”跳到游戏配置对应项目；游戏配置分基地、世界、英雄、日常与活动四类。保存只更新当前账号设置，不会启动挂机；已在运行的挂机在后续检查时使用新设置。首杀连续推进、主线自动挑战和联盟互助仍需单独启动。
 
@@ -671,6 +671,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 | --- | --- |
 | 保存远征舰队首次编队 | 发送 `FleetSaveFormationRequest` 后，从海面建筑重读每个站位的英雄，再用 `MyFleetsRequest` 单独检查世界地图是否列出该队。 |
 | 应用推荐阵容 | 主线、远征和积分赛分别走 `SaveFormationRequest{module:1}`、`ExpeditionSaveFormationRequest`、`LeagueSaveFormationRequest`，用回包核对站位。舰队走 `FleetSaveFormationRequest`，从海面建筑重读确认。海兽保持原值，舰队与客户端一样不发 `petUid`。这些写操作只有离线测试，尚未在真实账号验证。 |
+| 保存阵容与临时挑战 | V76 的主线、普通试炼和竞技场防守共用 `FormationModule.MAINLINE=1`。`GetFormationRequest` 读取完整 `Formation{presetId,heroPositions,petUid}`，`SaveFormationRequest` 切换后再次读取确认。每场挑战持久保存原阵容，确认战果后恢复并回读。`petUid` 以十进制字符串保存，编码时转换为精确 low/high。待恢复记录带角色和原区服，第三套阵容进入人工处理。写入路径已做离线回归，真实账号验证待补。 |
 | 联动活动签到 | `ClaimActivityDailyCheckInRewardRequest{activityId, checkId}`。客户端按开放日算当天，`signDay` 早于当天的是补签，服务端扣钻石（`dailyActive.checkRuby`）。工具只发当天的 `rewardId`，两个开放时间不在同一天时跳过，用回包 `checkId` 核对。 |
 | 联动活动活跃 | `ClaimActivityDailyActiveRewardRequest`，每次领下一档，回包 `claimedId` 递增。分数来自 `SCAllActivity` 和 `SCActivityActiveScoreUpdate`。 |
 | 联动每日免费礼包 | `ClaimDailyCombGiftRequest`、`ClaimFreeSelectGiftRequest` 只发 `price` 为 0 的礼包。没有响应类型，靠 `sendWatch` 和道具推送确认。服务端只在登录时下发状态，跨天按客户端 `dailyReset` 在本地清空。 |

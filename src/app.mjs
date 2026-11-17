@@ -17,6 +17,9 @@ import { surveyTasks, runTasks, formatTaskPlan } from './tasks.mjs';
 import { surveyWorld, planWorld, runWorld, runWorldRound, formatWorldPlan, formatFieldReport, loadMapAsset, planFieldOccupy, planFieldGiveUp, SPEED_UP_ITEM, makeTypeResolver as resolveBuildingType, upgradeRow } from './world.mjs';
 import { runLoop, formatLoopRound, formatLoopStep } from './loop.mjs';
 import { runStages, stageFailureLimit } from './stages.mjs';
+import { loadAutomationSettings } from './automation-settings.mjs';
+import { createLineupExecutor, lineupRole } from './lineup-execution.mjs';
+import { readLineupRuntime, recoverLineup } from './lineup-runtime.mjs';
 import { createPhoneLogin } from './phone-login.mjs';
 import { worldName } from './world-name.mjs';
 import { createConsoleOutput } from './console-output.mjs';
@@ -603,7 +606,7 @@ async function field({ sub, gridIdx, fleets, allowMutate }) {
 
 // 自动循环：任务 → 日常 → 海面，每轮之间睡 --every 秒。必须显式开，Ctrl-C 收尾后退出。
 async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowReroll, allowPaid }) {
-  const { url, login } = loadCredentials();
+  const { url, login, account } = loadCredentials();
   const protocol = loadProtocol();
   const client = new GameClient({ url, protocol });
   client.on('warn', (message) => console.log(`warn: ${message}`));
@@ -622,6 +625,14 @@ async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowR
     const response = await client.connect(login);
     const config = loadConfigSafe();
     const player = response.playerInfo;
+    if (allowMutate && readLineupRuntime(account.id).pending) {
+      await recoverLineup(client, { accountId: account.id, role: lineupRole(player) });
+    }
+    const executeBattle = createLineupExecutor(client, {
+      accountId: account.id, getPlayer: () => player,
+      getSettings: () => loadAutomationSettings(account.id).settings,
+      getConfig: loadConfigSafe, enabled: () => client.connected && !stop.aborted,
+    });
     console.log(`login ok: ${describeRole(player)?.nickname} lv${describeRole(player)?.level}，${rounds > 0 ? `共 ${rounds} 轮` : '一直跑（Ctrl-C 停）'}，间隔 ${everySeconds}s`);
     console.log(`开关: 加速=${allowSpeedUp ? '开(只花' + SPEED_UP_ITEM + ')' : '关'} 拒绝重刷=${allowReroll ? '开' : '关'}`);
     await runLoop(client, protocol, {
@@ -635,6 +646,7 @@ async function loopCli({ allowMutate, rounds, everySeconds, allowSpeedUp, allowR
       allowSpeedUp,
       allowReroll,
       stop,
+      executeBattle,
       onRound: (summary) => console.log(`\n${formatLoopRound(summary)}`),
       onStep: entry => console.log('  ' + formatLoopStep(entry)),
     });
@@ -915,22 +927,47 @@ async function main() {
       return;
     }
     const maxFailures = stageFailureLimit(values['max-failures']);
-    const { url, login } = loadCredentials(values.account ?? process.env.CW_ACCOUNT ?? null);
+    const { url, login, account } = loadCredentials(values.account ?? process.env.CW_ACCOUNT ?? null);
     const config = getConfig();
     const client = new GameClient({ url, protocol: loadProtocol() });
     const controller = new AbortController();
     client.on('fatal', ({ reason }) => controller.abort(new Error(`连接中断：${reason}`)));
     client.on('close', () => controller.abort(new Error('游戏连接已断开')));
     client.on('error', (error) => controller.abort(error));
+    const allowMutate = !values.dry && (values.yes || process.env.CW_ALLOW_MUTATE === '1');
+    let stopRequested = false;
+    const onStop = () => {
+      if (stopRequested) return;
+      stopRequested = true;
+      controller.abort(new Error('已停止主线推关'));
+      console.log('\n正在停止主线推关，等待当前挑战与阵容还原');
+    };
+    const signals = shutdownSignals();
+    for (const signal of signals) process.on(signal, onStop);
     try {
       const { playerInfo } = await client.connect(login);
+      if (allowMutate && readLineupRuntime(account.id).pending) {
+        await recoverLineup(client, { accountId: account.id, role: lineupRole(playerInfo) });
+      }
+      const executeBattle = createLineupExecutor(client, {
+        accountId: account.id, getPlayer: () => playerInfo,
+        getSettings: () => loadAutomationSettings(account.id).settings,
+        getConfig: () => config, enabled: () => client.connected && !controller.signal.aborted,
+      });
       const result = await runStages(client, playerInfo, config, {
-        maxFailures, signal: controller.signal,
-        allowMutate: !values.dry && (values.yes || process.env.CW_ALLOW_MUTATE === '1'),
-        onBattle: ({ stage, won, failures }) => console.log(won ? `主线第 ${stage} 关胜利` : `第 ${stage} 关连续失败 ${failures} 次`),
+        maxFailures, signal: controller.signal, allowMutate, executeBattle,
+        onBattle: ({ stage, won, failures }) => {
+          if (won) playerInfo.mainlineStage = stage + 1;
+          console.log(won ? `主线第 ${stage} 关胜利` : `第 ${stage} 关连续失败 ${failures} 次`);
+        },
       });
       console.log(`本次通过 ${result.wins} 关。${result.reason}`);
+    } catch (error) {
+      if (!stopRequested || error.lineupRestorePending) throw error;
+      console.log(error.message);
+      process.exitCode = 130;
     } finally {
+      for (const signal of signals) process.off(signal, onStop);
       client.stop();
     }
     return;

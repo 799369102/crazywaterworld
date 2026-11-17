@@ -5,6 +5,8 @@ import { chrome, journal, dialogs, templates, giftCodesPage, overviewPage, manua
 const componentCss = readFileSync(new URL('./ui/dist/theme.css', import.meta.url), 'utf8');
 const consoleCss = readFileSync(new URL('./console.css', import.meta.url), 'utf8');
 const progressionScript = readFileSync(new URL('./ui/progression.js', import.meta.url), 'utf8');
+const lineupScript = readFileSync(new URL('./lineup-editor.js', import.meta.url), 'utf8');
+const lineupCss = readFileSync(new URL('./lineup-editor.css', import.meta.url), 'utf8');
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
@@ -32,7 +34,7 @@ export const PAGE = `<!doctype html>
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <script id="theme-init">${themeScript}</script>
-<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} } ${componentCss}</style>
+<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} ${lineupCss} } ${componentCss}</style>
 </head>
 <body>
 ${chrome()}
@@ -447,6 +449,7 @@ function subscribe() {
     appendLog(entry);
     if ((entry.extra?.pauseChanged || entry.extra?.loginBlocked) && entry.account === current) void loadAccounts(false);
     if (entry.extra?.worldUpdated && entry.account === current && Date.now() - entry.t < 10_000) refreshManualWorld();
+    if (entry.extra?.lineupChanged && entry.account === current && Date.now() - entry.t < 10_000) void refreshSavedLineups();
   };
 }
 
@@ -554,9 +557,14 @@ const hostingActions = new Set();
 function renderHostingControl() {
   const resume = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting);
   const running = snapshot.looping || snapshot.reconnecting;
-  $('account-pause').disabled = !current || hostingActions.has(current) || !!snapshot.loopStopping || (!(running && !resume) && loopAccount !== current);
-  $('account-pause').textContent = resume ? '恢复托管' : running ? '暂停托管' : '开始托管';
-  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : running ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
+  const hosting = running || snapshot.connected || snapshot.state === 'CONNECTING' || connectingAccounts.has(current);
+  const pending = !current || hostingActions.has(current);
+  $('loop-toggle').disabled = pending || !!snapshot.paused || !!snapshot.loopStopping || (!running && loopAccount !== current);
+  $('loop-toggle').textContent = snapshot.loopStopping ? '暂停中…' : running ? '暂停挂机' : '开始挂机';
+  $('loop-toggle').title = snapshot.paused ? '请先恢复托管' : running ? '停止自动循环，保留游戏连接和手动操作' : '按已保存的任务和轮数开始挂机';
+  $('account-pause').disabled = pending || ((resume || !hosting) && (!!snapshot.loopStopping || loopAccount !== current));
+  $('account-pause').textContent = resume ? '恢复托管' : hosting ? '暂停托管' : '开始托管';
+  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : hosting ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
 }
 function renderAccountSelect() {
   appointmentsAccountChanged();
@@ -610,6 +618,7 @@ async function loadAccounts(reload) {
   snapshot = accounts.find(a => a.id === current)?.status ?? {};
   renderAccountSelect();
   if (previous !== current || reload) refreshProgression();
+  if (previous !== current || reload) void refreshSavedLineups();
   if (previous !== current) refreshManualWorld();
   if (previous !== current) {configAccountChanged();giftAccountChanged();loginSettingsAccountChanged();}
   if (reload) {
@@ -628,6 +637,7 @@ function selectLoadedAccount(next) {
   snapshot = accounts.find(a => a.id === current)?.status ?? {};
   renderAccountSelect();
   refreshProgression();
+  void refreshSavedLineups();
   refreshManualWorld();
   refreshActivities();
   refreshStages();
@@ -647,10 +657,12 @@ $('account').onchange = async () => {
 };
 $('account-pause').onclick = async () => {
   const account = current;
-  if (!account || hostingActions.has(account) || snapshot.loopStopping) return;
-  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting) && !!(snapshot.looping || snapshot.reconnecting);
+  if (!account || $('account-pause').disabled) return;
+  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting)
+    && !!(snapshot.looping || snapshot.reconnecting || snapshot.connected || snapshot.state === 'CONNECTING' || connectingAccounts.has(account));
   hostingActions.add(account);
   accountStatusRevision++;
+  loopVersion++;
   renderHostingControl();
   try {
     if (!paused) {
@@ -659,15 +671,52 @@ $('account-pause').onclick = async () => {
     }
     if (current !== account) return;
     const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify(paused ? { paused: true } : { paused: false, start: true, confirm: true }) });
+    if (current === account) loopVersion++;
     setAccountStatus(account, status);
-    if (current !== account) return;
     if (!status.paused) disconnected.delete(account);
+    if (current !== account) return;
     renderAccountSelect();
     refreshProgression();
     refreshManualWorld();
     refreshOverview();
     refreshLoop();
     refreshActivities();
+  } catch (error) {
+    if (current === account) reportError(error);
+  } finally {
+    hostingActions.delete(account);
+    if (current === account) {
+      renderAccountSelect();
+      refreshAccountStatuses();
+      refreshLoop();
+    }
+  }
+};
+
+$('loop-toggle').onclick = async () => {
+  const account = current;
+  if (!account || $('loop-toggle').disabled) return;
+  const stop = !!(snapshot.looping || snapshot.reconnecting);
+  hostingActions.add(account);
+  accountStatusRevision++;
+  loopVersion++;
+  renderHostingControl();
+  try {
+    if (!stop) {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (current !== account || !await saveLoopInterval()) return;
+    }
+    if (current !== account) return;
+    const data = await call('/api/loop/' + (stop ? 'stop' : 'start'), {
+      method: 'POST', body: JSON.stringify({ confirm: true }),
+    });
+    if (current === account) loopVersion++;
+    setAccountStatus(account, data.status);
+    if (!stop) disconnected.delete(account);
+    if (current !== account) return;
+    renderAccountSelect();
+    refreshStages();
+    refreshProgression();
   } catch (error) {
     if (current === account) reportError(error);
   } finally {
@@ -773,15 +822,26 @@ const HERO_STATUS = { ready: '可做', done: '已完成', blocked: '不可做' }
 let stageVersion = 0;
 let stageAccount = null;
 function stagePreferences() {
-  return { maxFailures: Number($('stage-failures').value) };
+  return { maxFailures: Number($('stage-failures').value), lineupId: selectedLineupId('mainline') };
 }
 function renderStages(data) {
   $('stage-start').disabled = data.running || !current;
   $('stage-stop').disabled = !data.running || data.stopping;
   $('stage-failures').disabled = data.running;
+  const lineupControl = $('stage-lineup-control');
+  let lineupSelect = lineupControl.querySelector('select');
+  if (!lineupSelect || lineupSelect.dataset.lineupAccount !== current) {
+    lineupSelect?.remove();
+    lineupControl.querySelector('button')?.remove();
+    lineupSelect = createLineupSelect(current, 'mainline');
+    lineupControl.appendChild(lineupSelect);
+    lineupControl.appendChild(createLineupPreviewButton(current, lineupSelect));
+  }
+  lineupSelect.disabled = data.running || !current;
   if (data.running) $('stage-failures').value = data.maxFailures;
   const details = data.stage ? '第 ' + data.stage + ' 关 · 已过 ' + data.wins + ' 关 · 连续失败 ' + data.failures + ' 次' : '';
-  $('stage-view').textContent = [data.stopping ? '正在停止，等待在途战报' : data.running ? '自动挑战中' : data.stage ? '已停止' : '未开启', details, data.reason==='尚未开启'?'':data.reason].filter(Boolean).join('　');
+  const lineupPhase = { switching: '正在切换阵容', restoring: '正在恢复原阵容', pending: '阵容待恢复', conflict: '阵容变化待确认' }[data.lineupPhase];
+  $('stage-view').textContent = [data.stopping ? '正在停止，等待战报和阵容恢复' : data.running ? '自动挑战中' : data.stage ? '已停止' : '未开启', details, lineupPhase, data.reason==='尚未开启'?'':data.reason].filter(Boolean).join('　');
 }
 async function refreshStages() {
   if(document.hidden)return;
@@ -790,6 +850,13 @@ async function refreshStages() {
   const account = current;
   if (stageAccount !== account) {
     stageAccount = account;
+    const lineupControl = $('stage-lineup-control');
+    lineupControl.querySelector('select')?.remove();
+    lineupControl.querySelector('button')?.remove();
+    const lineupSelect = createLineupSelect(account, 'mainline');
+    lineupSelect.disabled = true;
+    lineupControl.appendChild(lineupSelect);
+    lineupControl.appendChild(createLineupPreviewButton(account, lineupSelect));
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('stages:' + account)) || {}; } catch {}
     $('stage-failures').value = saved.maxFailures || 3;
@@ -2032,6 +2099,7 @@ ${accountAddScript}
 ${accountPickerScript}
 
 // ---- 启动 ------------------------------------------------------------------
+${lineupScript}
 ${progressionScript}
 ${helpTipsScript}
 ${mapMotionPosition.toString()}
@@ -2156,7 +2224,7 @@ function activateConsolePage(button, resource = selectedResource) {
     refreshProgression();
     if (button.dataset.tab === 'overview') {refreshOverview();refreshLoop();}
     if(isResource&&resource==='inventory')refreshManualWorld();
-    if(isResource&&resource==='heroes')void appointmentsLoad(true);
+    if(isResource&&resource==='heroes'){void appointmentsLoad(true);void refreshSavedLineups();}
     if (button.dataset.tab === 'account') {
       renderAccounts();
       pollCapture();
@@ -2168,7 +2236,7 @@ function activateConsolePage(button, resource = selectedResource) {
     if (button.dataset.tab === 'guild-role') loadGuildRoleFrame();
     if(target==='giftcodes')void refreshGiftCodes();
     if (target === 'activities') refreshActivities();
-    if (button.dataset.tab === 'stages') refreshStages();
+    if (button.dataset.tab === 'stages') {refreshStages();void refreshSavedLineups();}
 }
 document.querySelectorAll('#tabs button').forEach(button => { button.onclick = () => activateConsolePage(button); });
 for(const link of document.querySelectorAll('a[href^="#config-group-"]'))link.onclick=event=>{if(location.hash===link.getAttribute('href')){event.preventDefault();activateConsolePage(document.querySelector('#tabs [data-tab="settings"]'));configApplyHash();}};
