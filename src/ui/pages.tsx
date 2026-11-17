@@ -177,14 +177,15 @@ export function accountPage() {
 
     </div></div></Panel>
     <Panel title="支付宝扫码登录">
-      <p className="dim">使用支付宝扫一扫登录《疯狂水世界》，扫码确认后自动读取游戏登录信息。</p>
+      <p className="dim">使用支付宝扫一扫登录《疯狂水世界》，扫码确认后选择区服和游戏角色。</p>
       <div id="alipay-flow" className="alipay-flow">
         <div className="bar"><Button id="alipay-start" type="button">生成二维码</Button><Button id="alipay-cancel" type="button" variant="outline" hidden>取消</Button></div>
         <img id="alipay-qr" className="alipay-qr" alt="支付宝扫码登录二维码" width="256" height="256" hidden />
         <p id="alipay-hint" className="phone-feedback dim" role="status" aria-live="polite" aria-atomic="true">点击「生成二维码」，然后使用支付宝扫一扫。</p>
+        <div id="alipay-roles" hidden />
         <p id="alipay-result" hidden />
         <p id="alipay-expiry" className="dim" />
-        <div className="bar"><Button id="alipay-save" type="button" hidden disabled>保存并切换账号</Button></div>
+        <div className="bar"><Button id="alipay-save" type="button" hidden disabled>保存所选角色</Button><Button id="alipay-roles-retry" type="button" variant="outline" hidden>重新读取角色</Button></div>
       </div>
       <p className="dim">本机需安装 Edge 或 Chrome。扫码后会进入游戏，可能让同账号的游戏客户端下线。</p>
     </Panel>

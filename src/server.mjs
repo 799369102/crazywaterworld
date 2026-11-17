@@ -140,6 +140,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   const protocol = protocolOverride ?? loadProtocol();
   const alipayLogin = alipayLoginController ?? createAlipayLogin({ protocol });
   let alipaySaving = false;
+  let pendingAlipayLogin = null;
+  let cancelledAlipayLoginId = null;
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const globalLog = [];
   const streams = new Set();
@@ -174,53 +176,97 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
+  function clearAlipayRoles() {
+    pendingAlipayLogin?.controller?.abort();
+    clearTimeout(pendingAlipayLogin?.expiryTimer);
+    pendingAlipayLogin = null;
+  }
+
+  function readAlipayRoles(pending) {
+    if (pending.reading) return pending.reading;
+    pending.entry.choices = [];
+    pending.entry.roleError = null;
+    pending.controller = new AbortController();
+    const reading = readPhoneRoles(pending.entry, { signal: pending.controller.signal }).finally(() => {
+      if (pending.reading === reading) pending.reading = null;
+    });
+    pending.reading = reading;
+    return reading;
+  }
+
   function alipayLoginStatus(id) {
     const state = alipayLogin.status(id);
-    if (state.phase !== 'captured') return state;
-    const credential = alipayLogin.takeCredential(state.id);
-    const idOfAccount = accountId(credential);
-    const existing = loadStore().accounts.find(account => account.id === idOfAccount);
-    return { ...state, account: {
-      id: idOfAccount,
-      title: existing ? describeAccount(existing).title : `支付宝账号 ${credential.login.eworldParams.openId.slice(-6)}`,
-    } };
-  }
-
-  function saveAlipayAccount(id) {
-    if (closing) throw new Error('控制台已关闭');
-    // 排队期间二维码可能被取消或过期，落盘前重新取出有效凭证。
-    const credential = alipayLogin.takeCredential(id);
-    const idOfAccount = accountId(credential);
-    if (!idOfAccount || credential.source !== 'alipay') throw new Error('支付宝游戏登录凭证无效，请重新扫码');
-    const session = sessions.get(idOfAccount);
-    if (session) {
-      requireProductionSync(session);
-      session.generation++;
-      stopLoop(session, '支付宝账号已重新扫码，请重新连接');
-      saveAutomation(session.id, { enabled: false });
-      session.stages.stop('支付宝账号已重新扫码');
-      session.mutualAid.stop('支付宝账号已重新扫码');
-      for (const task of session.trials.values()) task.stop('支付宝账号已重新扫码');
-      session.client?.stop();
-      session.worldClient?.stop();
-      session.connecting = session.client = session.player = null;
+    if (cancelledAlipayLoginId !== state.id) cancelledAlipayLoginId = null;
+    if (state.id && state.id === cancelledAlipayLoginId) {
+      clearAlipayRoles();
+      return { ...state, phase: 'cancelled', qrImage: null };
     }
+    if (state.phase !== 'captured') {
+      clearAlipayRoles();
+      return state;
+    }
+    if (pendingAlipayLogin?.id !== state.id) {
+      clearAlipayRoles();
+      const credential = alipayLogin.takeCredential(state.id);
+      if (!accountId(credential) || credential.source !== 'alipay') throw new Error('支付宝游戏登录凭证无效，请重新扫码');
+      pendingAlipayLogin = {
+        id: state.id, reading: null, controller: null,
+        entry: { credential, userName: '支付宝账号', choices: [], roleError: null },
+      };
+      const pending = pendingAlipayLogin;
+      pending.expiryTimer = setTimeout(() => {
+        if (pendingAlipayLogin === pending) clearAlipayRoles();
+      }, Math.max(0, state.expiresAt - Date.now()));
+      pending.expiryTimer.unref?.();
+      void readAlipayRoles(pendingAlipayLogin);
+    }
+    const pending = pendingAlipayLogin;
     const store = loadStore();
-    const { account, created } = upsertAccount(store, credential);
-    setActive(store, account.id);
-    saveStore(store);
-    emit(null, 'info', `${created ? '支付宝扫码已新增' : '支付宝扫码已更新'}账号 ${describeAccount(account).title}，可连接游戏`);
-    return { ok: true, account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) } };
+    const idOfAccount = accountId(pending.entry.credential);
+    const existing = store.accounts.find(account => account.id === idOfAccount);
+    return {
+      ...state,
+      phase: pending.reading ? 'reading-roles' : 'captured',
+      choices: roleChoices(pending.entry, store),
+      roleError: pending.entry.roleError,
+      account: { id: idOfAccount, title: existing ? describeAccount(existing).title : '支付宝账号' },
+    };
   }
 
-  async function readPhoneWorlds(credential) {
+  function requireAlipayRoles(id) {
     if (closing) throw new Error('控制台已关闭');
-    const session = sessions.get(credential.login.eworldParams.openId);
+    const state = alipayLoginStatus(id);
+    const pending = pendingAlipayLogin;
+    if (!pending || pending.id !== id || !['captured', 'reading-roles'].includes(state.phase)
+      || state.expiresAt <= Date.now()) throw new Error('扫码结果已过期或已保存，请重新扫码');
+    return pending;
+  }
+
+  function saveAlipayRole(pending, choice) {
+    // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
+    if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
+      throw new Error('角色列表已变化，请重新选择角色');
+    }
+    pending.entry.credential = alipayLogin.takeCredential(pending.id);
+    const result = saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true });
+    pending.entry.credential = null;
+    pending.entry.choices = [];
+    cancelledAlipayLoginId = pending.id;
+    clearAlipayRoles();
+    return result;
+  }
+
+  async function readPhoneWorlds(credential, { signal } = {}) {
+    if (closing) throw new Error('控制台已关闭');
+    signal?.throwIfAborted();
+    const session = sessions.get(accountId(credential));
     if (session?.connecting) await session.connecting.catch(() => {});
+    signal?.throwIfAborted();
     const activeClient = session?.client;
     if (activeClient?.connected && !session.paused) {
       const generation = session.generation;
       return readJob(session, () => {
+        signal?.throwIfAborted();
         if (closing || session.client !== activeClient || !activeClient.connected || session.generation !== generation || session.paused) {
           throw new Error('账号连接已变化，请重新读取角色列表');
         }
@@ -229,20 +275,24 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
     const client = new GameClient({ url: credential.url, protocol });
     phonePreviewClients.add(client);
+    const stop = () => client.stop();
+    signal?.addEventListener('abort', stop, { once: true });
     try {
       // 只登录最近区服并查询列表，选择阶段不逐个进入其他区服。
       await client.connect({ ...credential.login, worldId: 0 });
+      signal?.throwIfAborted();
       if (closing) throw new Error('控制台已关闭');
       return await listWorlds(client);
     } finally {
+      signal?.removeEventListener('abort', stop);
       client.stop();
       phonePreviewClients.delete(client);
     }
   }
 
-  async function readPhoneRoles(entry) {
+  async function readPhoneRoles(entry, options) {
     try {
-      const worlds = await readPhoneWorlds(entry.credential);
+      const worlds = await readPhoneWorlds(entry.credential, options);
       const previous = new Map(entry.choices.map(choice => [choice.worldId, choice.id]));
       const seen = new Set();
       entry.choices = worlds.recentWorlds.filter(world => {
@@ -256,68 +306,77 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
+  function roleChoices(entry, store) {
+    const idOfAccount = accountId(entry.credential);
+    const existing = store.accounts.find(account => account.id === idOfAccount);
+    return entry.choices.map(choice => ({
+      id: choice.id, accountId: idOfAccount, userName: entry.userName,
+      nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
+      worldId: choice.worldId, worldName: choice.worldName,
+      roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
+      matched: Boolean(existing), existingTitle: existing ? describeAccount(existing).title : null,
+    }));
+  }
+
   function phonePreview(pending) {
     const store = loadStore();
     const choices = [];
     const failures = [...pending.authenticationFailures];
     const emptyAccounts = [];
     for (const entry of pending.entries) {
-      const accountId = entry.credential.login.eworldParams.openId;
-      const existing = store.accounts.find(account => account.id === accountId);
       if (entry.roleError) failures.push({ userName: entry.userName, error: entry.roleError, retryable: true });
       else if (!entry.choices.length) emptyAccounts.push({ userName: entry.userName });
-      for (const choice of entry.choices) {
-        choices.push({
-          id: choice.id, accountId, userName: entry.userName,
-          nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
-          worldId: choice.worldId, worldName: choice.worldName,
-          roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
-          matched: Boolean(existing), existingTitle: existing ? describeAccount(existing).title : null,
-        });
-      }
+      choices.push(...roleChoices(entry, store));
     }
     return { ok: true, id: pending.id, phone: maskPhone(pending.phone), choices, failures, emptyAccounts,
       linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
   }
 
-  function savePhoneRole(pending, entry, choice) {
-    const openId = entry.credential.login.eworldParams.openId;
-    const session = sessions.get(openId);
+  function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false } = {}) {
+    const idOfAccount = accountId(entry.credential);
+    const session = sessions.get(idOfAccount);
     const roleWorldId = choice.role.worldId || choice.worldId;
-    const previous = loadStore().accounts.find(account => account.id === openId);
+    const previous = loadStore().accounts.find(account => account.id === idOfAccount);
     const currentRoleId = uidText(session?.player?.playerId ?? session?.player?.id);
     const selectedRoleId = uidText(choice.role.id);
     const sameRole = currentRoleId && selectedRoleId ? currentRoleId === selectedRoleId
       : toNumber(session?.player?.worldId) === roleWorldId
         && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
-    if (session && !sameRole) {
+    if (session && (stopExisting || !sameRole)) {
+      const reason = stopExisting ? '支付宝账号已重新扫码，请重新连接' : '已选择其他角色，停止旧角色任务';
       requireProductionSync(session);
       session.generation++;
-      stopLoop(session, '已选择其他角色，停止旧角色任务');
+      stopLoop(session, reason);
       saveAutomation(session.id, { enabled: false });
-      session.stages.stop('已切换角色');
-      session.mutualAid.stop('已切换角色');
-      for (const task of session.trials.values()) task.stop('已切换角色');
+      session.stages.stop(reason);
+      session.mutualAid.stop(reason);
+      for (const task of session.trials.values()) task.stop(reason);
       session.client?.stop();
       session.worldClient?.stop();
       session.connecting = session.client = session.player = null;
     }
     const store = loadStore();
-    const existing = store.accounts.find(account => account.id === openId);
+    const existing = store.accounts.find(account => account.id === idOfAccount);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
-    const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || entry.userName;
+    const fallbackLabel = entry.credential.source === 'alipay' ? '未命名角色' : entry.userName;
+    const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
     const { account, created } = upsertAccount(store, credential, { label });
-    rememberSeen(account, { ...choice.role, worldId: roleWorldId });
+    rememberSeen(account, { ...choice.role, nickname: choice.role.nickname || '未命名角色', worldId: roleWorldId });
     setActive(store, account.id);
     saveStore(store);
-    pendingPhoneLogins.delete(pending.id);
-    emit(null, 'info', `${created ? 'APP 登录已新增' : 'APP 登录已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
+    emit(null, 'info', `${sourceLabel}${created ? '已新增' : '已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
     return {
       ok: true,
       account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) },
       selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
         roleWorldId, roleWorldName: choice.role.worldName || choice.worldName },
     };
+  }
+
+  function savePhoneRole(pending, entry, choice) {
+    const result = saveSelectedRole(entry, choice);
+    pendingPhoneLogins.delete(pending.id);
+    return result;
   }
   let logId = 0;
   trace(null, 'runtime', { startedAt: RUN_VERSION, node: process.version });
@@ -2050,7 +2109,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(jsonBody());
         if (closing) throw new Error('控制台已关闭');
         if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
-        const state = await alipayLogin.start();
+        const previous = alipayLogin.status();
+        if (previous.id && previous.id === cancelledAlipayLoginId) await alipayLogin.cancel(previous.id);
+        const starting = alipayLogin.start();
+        const currentState = alipayLogin.status();
+        if (pendingAlipayLogin && (pendingAlipayLogin.id !== currentState.id || currentState.phase !== 'captured')) clearAlipayRoles();
+        const state = await starting;
         json(alipayLoginStatus(state.id));
         return;
       }
@@ -2061,8 +2125,21 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/accounts/alipay-login/cancel') {
         const { id } = jsonBody();
         if (typeof id !== 'string' || !id) throw new Error('请选择要取消的扫码会话');
+        alipayLogin.status(id);
+        cancelledAlipayLoginId = id;
+        clearAlipayRoles();
         await alipayLogin.cancel(id);
         json({ ok: true });
+        return;
+      }
+      if (route === 'POST /api/accounts/alipay-login/roles') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
+        if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
+        const pending = requireAlipayRoles(payload.id);
+        void readAlipayRoles(pending);
+        json(alipayLoginStatus(payload.id));
         return;
       }
       if (route === 'POST /api/accounts/alipay-login/save') {
@@ -2070,11 +2147,17 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
         if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
+        const pending = requireAlipayRoles(payload.id);
+        if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
+        if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
+        const choices = pending.entry.choices;
+        const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
+          : choices.length === 1 ? choices[0] : null;
+        if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
         alipaySaving = true;
         try {
-          const credential = alipayLogin.takeCredential(payload.id);
-          const session = sessions.get(accountId(credential));
-          const save = () => saveAlipayAccount(payload.id);
+          const session = sessions.get(accountId(pending.entry.credential));
+          const save = () => saveAlipayRole(pending, choice);
           const result = session && !session.paused ? await enqueue(session, save) : save();
           // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
           try { await alipayLogin.cancel(payload.id); } catch {}
@@ -2200,7 +2283,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!selected) throw new Error('请选择列表中的区服和角色后再保存');
         pending.busy = true;
         try {
-          const session = sessions.get(selected.entry.credential.login.eworldParams.openId);
+          const session = sessions.get(accountId(selected.entry.credential));
           const save = () => {
             if (closing) throw new Error('控制台已关闭');
             if (pendingPhoneLogins.get(pending.id) !== pending || Date.now() - pending.createdAt >= PHONE_PENDING_MS) {
@@ -3458,6 +3541,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     close: async () => {
       closing = true;
+      clearAlipayRoles();
       await alipayLogin.close();
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();

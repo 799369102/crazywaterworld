@@ -31,6 +31,7 @@ export const operationLabels = {
   '/api/accounts/phone-login/roles': '重新读取 APP 区服角色',
   '/api/accounts/alipay-login/start': '生成支付宝登录二维码',
   '/api/accounts/alipay-login/status': '读取支付宝扫码状态',
+  '/api/accounts/alipay-login/roles': '读取支付宝区服和角色',
   '/api/accounts/alipay-login/cancel': '取消支付宝扫码登录',
   '/api/accounts/alipay-login/save': '保存支付宝账号',
   '/api/accounts/pause': '切换账号托管状态',
