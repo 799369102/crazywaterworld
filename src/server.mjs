@@ -1796,7 +1796,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const task = settings.treasure.follow ? 'follow' : 'treasure';
             const unavailableFleets = Object.fromEntries(settings.treasure.fleetIds.map(id => [id,
               dispatchReservationReason(client, settings, task, id, { ignoreOwners: ['cityWar'] })]));
-            const plan = planTreasureLoot(snapshot, config, settings, { usage, keys: ledger.keyRecords(), pendingFuel, reservedFleetIds, unavailableFleets });
+            const plan = planTreasureLoot(snapshot, config, settings, { usage, keys: ledger.keyRecords(), pendingFuel,
+              pendingDiamonds: ledger.pendingCounters().diamonds ?? 0, reservedFleetIds, unavailableFleets });
             return { ...output(plan, plan.counts, '万吨巨轮'), treasure: { targets: plan.targets, fleets: plan.fleets, fuel: snapshot.fuel,
               fuelPerFleet: snapshot.fuelPerFleet, todayRewardTimes: snapshot.todayRewardTimes, rewardLimit: snapshot.rewardLimit,
               participationMode: settings.treasure.participationMode, nextRefreshTime: snapshot.nextRefreshTime } };

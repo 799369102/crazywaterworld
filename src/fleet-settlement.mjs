@@ -3,7 +3,7 @@ import { normalize } from './worlds.mjs';
 import { reconcilePirateFlights } from './pirates.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 
-const fleetKey = /^(?:radar-send|world-boss|pirate-first|cityWar|treasureRepair|treasureFollow|treasure|silicon|silicon-repair|silicon-retreat|silicon-speed):(\d+):/;
+const fleetKey = /^(?:radar-send|world-boss|pirate-first|cityWar|treasureRepair|treasureFollow|treasureSpeed|treasure|silicon|silicon-repair|silicon-retreat|silicon-speed):(\d+):/;
 const repairKinds = new Set(['cityRepair', 'treasureRepair']);
 const integer = Number.isSafeInteger;
 const dayOf = (seconds) => Math.floor((seconds + 28800) / 86400);
@@ -48,6 +48,13 @@ export function fleetAtHome(fleet) {
   return (
     fleet?.state === 1 && fleet.curGridIdx === 0 && zeroId(fleet.treasureLootUid) && !fleet.chipWar?.rewardTs
   );
+}
+
+export function treasureSpeedConfirmed(fleet, details) {
+  return integer(details.moveStartTs) && details.moveStartTs > 0 &&
+    fleet?.treasureLootUid === details.uid && fleet.targetGridIdx === details.targetGridIdx &&
+    fleet.moveStartTs === details.moveStartTs && integer(fleet.moveEndTs) &&
+    fleet.moveEndTs >= details.moveStartTs && fleet.moveEndTs < details.beforeEnd;
 }
 
 export function radarEvents(info) {
@@ -111,6 +118,7 @@ export function outstandingFleets(records, worldId) {
     if (d.kind === 'pirateFirst') return !['won', 'lost'].includes(d.outcome);
     return (
       repairKinds.has(d.kind) ||
+      d.kind === 'treasureSpeed' ||
       d.kind === 'citySlot' ||
       d.kind === 'cityDispatch' ||
       (d.kind === 'treasureDispatch' && !r.confirmed)
@@ -160,6 +168,18 @@ export function settleFleetSnapshot(
     if (own.length !== 1) continue;
     const fleet = own[0],
       home = fleetAtHome(fleet);
+    if (d.kind === 'treasureSpeed') {
+      if (treasureSpeedConfirmed(fleet, d)) {
+        ledger.resolveKey(key, true);
+        ledger.releaseCompletedKey(key);
+        changes.push({ key, reason: '确认巨轮行军加速' });
+      } else if (home) {
+        // 回港只证明原航程结束，未知钻石费用继续预留，舰队可执行后续任务。
+        ledger.resolveKey(key, false);
+        changes.push({ key, reason: '巨轮航程已结束，保留未知加速费用并释放舰队' });
+      }
+      continue;
+    }
     if (d.kind === 'radarSend') {
       if (!Array.isArray(events) || !d.eventKey || key !== 'radar-send:' + worldId + ':' + d.eventKey)
         continue;

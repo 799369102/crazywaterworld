@@ -66,6 +66,7 @@ export const DEFAULT_SETTINGS = {
     rewardItems: [], avoidNames: [], allowHostile: false, minDurabilityPercent: 80, petrolReserve: 0,
     maxProgress: 90, personalProgressLimit: 20, dailyDispatchLimit: 0, checkEverySeconds: 15, participationMode: 'untilFull', repeatAttack: true,
     autoRepair: true, maxRepairCost: 15000, dailyRepairPetrolLimit: 20000,
+    marchSpeedUp: false, marchTargetSeconds: 60, dailyDiamondLimit: 0,
     fallbackEnabled: false, fallbackAfter: '21:00', fallbackTargetRewards: 3,
     fallbackQualities: ['PURPLE', 'BLUE'], fallbackMediumRewardPriority: [], fallbackSmallRewardPriority: [] },
   // 原目标字段用于进攻，防守单独保存；旧共享设置通过版本迁移复制到防守侧。
@@ -132,6 +133,7 @@ const constraints = {
   'treasure.dailyDispatchLimit': int(1000), 'treasure.checkEverySeconds': int(300, 5),
   'treasure.avoidPlayerIds': strings(100), 'treasure.participationMode': { kind: 'choice', values: ['untilFull', 'always'] },
   'treasure.maxRepairCost': int(10000000), 'treasure.dailyRepairPetrolLimit': int(100000000),
+  'treasure.marchTargetSeconds': int(3600), 'treasure.dailyDiamondLimit': int(100000000),
   'treasure.fallbackAfter': { kind: 'time' }, 'treasure.fallbackTargetRewards': int(100, 1),
   'treasure.fallbackQualities': { ...strings(2), values: ['PURPLE', 'BLUE'] },
   'treasure.fallbackMediumRewardPriority': strings(100), 'treasure.fallbackSmallRewardPriority': strings(100),
@@ -434,7 +436,8 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   }
   const addedFields = {
     treasure: ['onlyTenThousand', 'avoidPlayerIds', 'participationMode', 'repeatAttack', 'autoRepair',
-      'maxRepairCost', 'dailyRepairPetrolLimit', 'personalProgressLimit', 'fallbackEnabled', 'fallbackAfter',
+      'maxRepairCost', 'dailyRepairPetrolLimit', 'marchSpeedUp', 'marchTargetSeconds', 'dailyDiamondLimit',
+      'personalProgressLimit', 'fallbackEnabled', 'fallbackAfter',
       'fallbackTargetRewards', 'fallbackQualities', 'fallbackMediumRewardPriority', 'fallbackSmallRewardPriority'],
     cityWar: ['targetPriority', 'nativeCommissionLimit', 'defenceFleetIds'],
     events: ['otherOption'],

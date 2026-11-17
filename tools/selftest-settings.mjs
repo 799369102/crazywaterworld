@@ -231,6 +231,52 @@ try {
     assert.throws(() => loadAutomationSettings('a', { file: broken }), /停止/); assert.equal(fs.readFileSync(broken, 'utf8'), '{bad');
   });
 
+  await check('巨轮行军加速默认关闭、严格校验、旧版迁移和持久化', () => {
+    const initial = defaultSettings();
+    const added = ['marchSpeedUp', 'marchTargetSeconds', 'dailyDiamondLimit'];
+    assert.equal(initial.treasure.marchSpeedUp, false);
+    assert.equal(initial.treasure.marchTargetSeconds, 60);
+    assert.equal(initial.treasure.dailyDiamondLimit, 0);
+    assert.deepEqual(settingsUiRules().numbers['treasure.marchTargetSeconds'], { min: 0, max: 3600 });
+    const file = path.join(directory, 'treasure-speed-settings.json');
+    const custom = defaultSettings();
+    Object.assign(custom.treasure, { marchSpeedUp: true, marchTargetSeconds: 120, dailyDiamondLimit: 300 });
+    saveAutomationSettings('custom', custom, { file, revision: 0 });
+    assert.deepEqual(loadAutomationSettings('custom', { file }).settings.treasure, custom.treasure);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(custom)).treasure, custom.treasure);
+    const disabled = structuredClone(custom); disabled.treasure.marchSpeedUp = false;
+    saveAutomationSettings('custom', disabled, { file, revision: 1 });
+    assert.deepEqual(loadAutomationSettings('custom', { file }).settings.treasure, disabled.treasure);
+    const old = exportAutomationSettings(custom);
+    for (const key of added) delete old.settings.treasure[key];
+    fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { old: { revision: 7, settings: old.settings } } }));
+    const bytes = fs.readFileSync(file);
+    for (const migrated of [loadAutomationSettings('old', { file }).settings, importAutomationSettings(old)]) {
+      for (const key of added) assert.equal(migrated.treasure[key], initial.treasure[key]);
+      for (const key of added) delete migrated.treasure[key];
+      assert.deepEqual(migrated.treasure, old.settings.treasure);
+    }
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    for (const seconds of [0, 3600]) {
+      const valid = defaultSettings(); valid.treasure.marchTargetSeconds = seconds;
+      assert.equal(validateSettings(valid).treasure.marchTargetSeconds, seconds);
+    }
+    for (const [field, values] of [
+      ['marchSpeedUp', ['true', 1, null]],
+      ['marchTargetSeconds', [-1, 3601, 0.5, '60', null]],
+      ['dailyDiamondLimit', [-1, 100000001, 0.5, '300', null]],
+    ]) {
+      for (const value of values) {
+        const invalid = structuredClone(custom); invalid.treasure[field] = value;
+        const invalidField = error => !!error.fields?.['treasure.' + field];
+        assert.throws(() => validateSettings(invalid), invalidField);
+        assert.throws(() => importAutomationSettings({ ...old, settings: invalid }), invalidField);
+        assert.throws(() => saveAutomationSettings('old', invalid, { file, revision: 7 }), invalidField);
+        assert.deepEqual(fs.readFileSync(file), bytes);
+      }
+    }
+  });
+
   await check('中小货轮兜底设置校验、旧版迁移和奖励顺序持久化', () => {
     const initial = defaultSettings();
     assert.equal(initial.treasure.fallbackEnabled, false);
@@ -683,7 +729,8 @@ try {
       const before = fs.readFileSync(path.join(directory, 'accounts.json'));
       const a = (await api('qa-a', '/api/settings')).body; a.settings.building.keepBlueprints = 123;
       const rewardIds = a.catalog.treasureRewards.slice(0, 2).map(item => item.value);
-      Object.assign(a.settings.treasure, { fallbackEnabled: true, fallbackAfter: '23:10', fallbackTargetRewards: 2,
+      Object.assign(a.settings.treasure, { marchSpeedUp: true, marchTargetSeconds: 90, dailyDiamondLimit: 180,
+        fallbackEnabled: true, fallbackAfter: '23:10', fallbackTargetRewards: 2,
         fallbackQualities: ['BLUE'], fallbackMediumRewardPriority: rewardIds, fallbackSmallRewardPriority: [...rewardIds].reverse() });
       const save = await api('qa-a', '/api/settings', { settings: a.settings, revision: a.revision, baseRevision: a.baseRevision }); assert.equal(save.status, 200); assert.equal(save.body.revision, 1);
       assert.deepEqual((await api('qa-a', '/api/settings')).body.settings.treasure, a.settings.treasure);
@@ -691,6 +738,7 @@ try {
       assert.equal(app.sessions.get('qa-a').client, null); assert.equal(app.sessions.get('qa-a').loop.running, false);
       assert.equal((await api('qa-b', '/api/settings')).body.settings.building.keepBlueprints, 0);
       assert.equal((await api('qa-b', '/api/settings')).body.settings.treasure.fallbackEnabled, false);
+      assert.equal((await api('qa-b', '/api/settings')).body.settings.treasure.marchSpeedUp, false);
       const exported = (await api('qa-a', '/api/settings/export')).body; assert.deepEqual(Object.keys(exported), ['format', 'version', 'settings']);
       assert.deepEqual(exported.settings.treasure, a.settings.treasure);
       exported.settings.building.keepBlueprints = 200;

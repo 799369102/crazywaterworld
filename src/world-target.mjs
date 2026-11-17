@@ -45,7 +45,7 @@ export async function readWorldTarget(client,protocol,config,player,settings,led
   if(!state.targets.length&&state.allUids.includes(uid))view.notes.push('此货轮未满足当前万吨或中小货轮兜底的类型、时间和领奖条件');
   const task=settings.treasure.follow?'follow':'treasure';
   const unavailableFleets=Object.fromEntries(settings.treasure.fleetIds.map(id=>[id,blocked(task,id)]));
-  const plan=planTreasureLoot(state,config,settings,{usage:ledger.snapshot(),keys:ledger.keyRecords(),pendingFuel:pendingPetrol(ledger),reservedFleetIds:reserved,unavailableFleets});
+  const plan=planTreasureLoot(state,config,settings,{usage:ledger.snapshot(),keys:ledger.keyRecords(),pendingFuel:pendingPetrol(ledger),pendingDiamonds:ledger.pendingCounters().diamonds??0,reservedFleetIds:reserved,unavailableFleets});
   return {...view,...plan,notes:[...view.notes,...plan.notes],cost:state.fuelPerFleet};
  }
  const state=await readCityWar(client,protocol,config,player,settings.cityWar),id=Number(key.replace(/^city-/,''));

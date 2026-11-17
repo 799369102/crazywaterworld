@@ -200,6 +200,7 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
     ['merchant.autoBuyPointers', 'merchant.autoSpeedUp'], ['merchant.pointerDailyDiamondLimit', 'merchant.autoBuyPointers'],
     ['silicon.fleets.0.huntPlayers', 'silicon.fleets.0.huntEnabled'],
     ['antique.targetStar', 'antique.star'], ['treasure.maxRepairCost', 'treasure.autoRepair'],
+    ['treasure.marchTargetSeconds', 'treasure.marchSpeedUp'], ['treasure.dailyDiamondLimit', 'treasure.marchSpeedUp'],
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
 
@@ -243,6 +244,26 @@ test('三级开关关闭隐藏全部后代，重新启用保留子开关与预�
   assert.equal(f.editor.draft.merchant.pointerDailyDiamondLimit, 300);
   f.set('merchant.autoSpeedUp', true);
   assert(visible(budget.node)); assert.equal(parent.disclosure.getAttribute('aria-expanded'), 'true');
+});
+
+test('巨轮加速开关控制秒数与预算显隐，关闭后保留配置', () => {
+  const f = fixture();
+  Object.assign(f.editor.draft.treasure, { marchTargetSeconds: 90, dailyDiamondLimit: 300 });
+  f.mount(f.groups.find(group => group.id === 'treasure').fields.filter(field => [
+    'treasure.marchSpeedUp', 'treasure.marchTargetSeconds', 'treasure.dailyDiamondLimit',
+  ].includes(field.key)));
+  const speed = f.widget('treasure.marchSpeedUp'), seconds = f.widget('treasure.marchTargetSeconds');
+  const budget = f.widget('treasure.dailyDiamondLimit');
+  assert.equal(speed.spec.kind, 'switch'); assert.equal(seconds.spec.unit, '秒'); assert.equal(budget.spec.unit, '钻石');
+  assert(!visible(seconds.node)); assert(!visible(budget.node));
+  f.set('treasure.marchSpeedUp', true);
+  assert(visible(seconds.node)); assert(visible(budget.node));
+  f.set('treasure.marchSpeedUp', false);
+  assert(!visible(seconds.node)); assert(!visible(budget.node));
+  assert.equal(f.editor.draft.treasure.marchTargetSeconds, 90);
+  assert.equal(f.editor.draft.treasure.dailyDiamondLimit, 300);
+  f.set('treasure.marchSpeedUp', true);
+  assert(visible(seconds.node)); assert(visible(budget.node));
 });
 
 test('手动收起只改变展示状态，重新启用自动展开所属设置', () => {
