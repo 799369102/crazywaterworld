@@ -318,8 +318,10 @@ const configGroups = [
   { id: 'progression', title: '推关与试炼', category: 'world', fields: [
     configField('progression.enabled','推关与试炼总开关'),
     configField('progression.mainline','主线 / 闯关自动挑战','switch',{help:'主线推关与闯关是同一个玩法。随挂机每轮挑战当前关卡一次，胜利后下一轮继续推进。'}),
+    configField('lineups.mainlinePresetId','自动主线挑战阵容','lineup',{parent:'progression.mainline',help:'挑战时临时使用所选阵容，每场结束后恢复挑战前的游戏阵容。'}),
     configField('progression.trials','试炼自动推关','switch',{help:'每轮依次挑战所选副本的下一关，无需每轮手动开始。达到停止上限只暂停对应副本，其他玩法继续。'}),
     configField('progression.raidIds','自动推关副本','multi',{ parent: 'progression.trials',catalog:'trialRaids',empty:'请选择自动推关副本'}),
+    configField('lineups.trialPresets','各副本自动挑战阵容','trialLineups',{parent:'progression.trials',help:'分别设置每个副本使用的阵容。只在已开启自动推关的副本中生效，每场结束后恢复挑战前的游戏阵容。'}),
     configField('progression.maxFailures','失败停止次数','number',{unit:'次',help:'主线与每个试炼分别累计同一关的连续战败，通关清零。跨挂机轮次和断线重连保留；达到上限后本次挂机不再重试，暂停后重新开始挂机可重试。不是挑战总次数，也不统计网络错误。仅用于挂机，挑战页手动参数独立。'}),
     configField('schedule.trialSweep','试炼首轮免费扫荡','switch',{help:'只使用免费档位，扫荡与自动推关分别控制，不计入失败停止次数。'}),
   ] },
@@ -569,6 +571,7 @@ function configUpdateVisibility() {
     widget.node.hidden = widget.row.hidden;
     if (widget.spec.kind === 'switch') configPaintSwitch(widget.control, !!configGet(key));
     if (widget.spec.kind === 'cityWarRoles') widget.control?.refresh?.();
+    if (widget.spec.kind === 'lineup' || widget.spec.kind === 'trialLineups') widget.control?.refresh?.();
     if (widget.childPanel) {
       if (hasError) configCollapsed.delete(key);
       const available = children.some(child => !child.node.hidden);
@@ -732,6 +735,18 @@ function configRender() {
         const note=el('div','config-help',group.id==='runtime'?'每轮间隔在页头修改，任务开关在挂机页设置。':'是否自动运行由挂机页控制。执行细项、策略、权限和参数在这里设置。');note.append(jump);section.append(note);
       }
       configRenderFields(group.fields.map(spec => ({ ...spec, category, groupId: group.id })), section);
+      if (group.id === 'progression') {
+        const lineups = el('button', 'config-small-button', '管理自定义阵容'); lineups.type = 'button';
+        lineups.onclick = async () => {
+          const account = current;
+          if (!await configFlush() || account !== current) return;
+          const page = document.querySelector('#tabs [data-tab="resources"]');
+          if (page) activateConsolePage(page, 'heroes');
+          await refreshSavedLineups();
+          if (account === current) $('saved-lineup-view')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+        section.append(lineups);
+      }
       groupHost.append(section);
     }
     root.append(panel);
@@ -779,6 +794,8 @@ function configRenderField(spec) {
     control = el('select', 'config-select'); control.id = id;
     for (const [value, text] of spec.options) { const option = el('option', '', text); option.value = value; control.append(option); }
     control.value = configGet(spec.key); control.onchange = () => configSet(spec.key, spec.numeric ? Number(control.value) : control.value); box.append(control);
+  } else if (spec.kind === 'lineup' || spec.kind === 'trialLineups') {
+    control = configLineupPicker(spec, id); box.append(control);
   } else if (spec.kind === 'radio') {
     control = el('div', 'config-radio'); control.id = id; control.setAttribute('role', 'radiogroup'); control.setAttribute('aria-label', spec.label); control.tabIndex = -1;
     for (const [value, text] of spec.options) {
@@ -811,6 +828,54 @@ function configRenderField(spec) {
   const widget = { row, node: row, control, error, spec, clearError() { error.hidden = true; error.textContent = ''; control?.removeAttribute('aria-invalid'); } };
   configEditor.widgets.set(spec.key, widget);
   return row;
+}
+
+function configLineupPicker(spec, id) {
+  const root = el('div'); root.id = id; root.tabIndex = -1;
+  root.setAttribute('role', 'group'); root.setAttribute('aria-label', spec.label);
+  const presets = configGet('lineups.presets') ?? [];
+  const entries = spec.kind === 'trialLineups'
+    ? (configEditor.data.catalog?.trialRaids ?? []).map(raid => ({ raidId: String(raid.value), label: raid.label }))
+    : [{ raidId: null, label: spec.label }];
+  const controls = [];
+  for (const entry of entries) {
+    const line = el('div', 'config-add');
+    const select = el('select', 'config-select'); select.id = id + (entry.raidId ? '-' + entry.raidId : '-select');
+    select.dataset.lineupBinding = entry.raidId ? 'trial:' + entry.raidId : 'mainline';
+    select.setAttribute('aria-label', entry.label + (entry.raidId ? '自动挑战阵容' : ''));
+    const empty = el('option', '', '使用游戏当前阵容'); empty.value = ''; select.append(empty);
+    for (const preset of presets) {
+      const option = el('option', '', preset.name); option.value = preset.id; select.append(option);
+    }
+    const view = configButton('查看', () => {
+      if (select.value) void openSavedLineupViewer(current, select.value);
+    });
+    view.dataset.lineupView = select.dataset.lineupBinding;
+    view.setAttribute('aria-label', '查看' + entry.label + (entry.raidId ? '阵容' : ''));
+    select.onchange = () => {
+      if (entry.raidId === null) configSet(spec.key, select.value);
+      else {
+        const bindings = configGet(spec.key).filter(binding => binding.raidId !== entry.raidId);
+        if (select.value) bindings.push({ raidId: entry.raidId, presetId: select.value });
+        configSet(spec.key, bindings);
+      }
+      root.refresh();
+    };
+    if (entry.raidId) {
+      const label = el('label', 'config-label', entry.label); label.htmlFor = select.id; root.append(label);
+    }
+    line.append(select, view); root.append(line);
+    controls.push({ ...entry, select, view });
+  }
+  if (!entries.length) root.append(el('p', 'config-help', '副本列表暂未载入，请刷新游戏配置。'));
+  root.refresh = () => {
+    for (const { raidId, select, view } of controls) {
+      select.value = raidId === null ? configGet(spec.key) : configGet(spec.key).find(binding => binding.raidId === raidId)?.presetId ?? '';
+      view.disabled = !select.value;
+    }
+  };
+  root.refresh();
+  return root;
 }
 
 function configRenderUsage() {

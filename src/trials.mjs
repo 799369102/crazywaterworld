@@ -59,22 +59,52 @@ export async function trialProgress(client, config, level) {
   return rows;
 }
 
-export async function challengeTrial(client, config, level, raidId, expectedStage, enabled = () => true) {
+export async function challengeTrial(client, config, level, raidId, expectedStage, enabled = () => true, options = {}) {
+  if (typeof enabled !== 'function') {
+    options = enabled ?? {};
+    enabled = options.enabled ?? (() => true);
+  }
+  const { executeBattle = work => work(), schedule = work => work(), signal, wait = sleep,
+    beforeBattle, onBattle = () => {}, onLineupPhase } = options;
   const raid = config?.tables.TrialRaidCfg.data.find(row => row.raidId === raidId);
   if (!raid) throw new Error('未知试炼副本');
   const stages = raidStages(config, raidId);
   if (!stages.length) throw new Error(raid.title + '缺少关卡配置');
   if (level < stages[0].openLevel) throw new Error(raid.title + '需要角色 ' + stages[0].openLevel + ' 级');
-  const info = await readRaid(client, raidId);
-  const next = stages.find(row => row.stageId > (info.passedStage ?? 0));
-  if (!next) return raid.title + '已全部通关';
-  if (expectedStage != null && next.stageId !== expectedStage) throw new Error('试炼进度已变化，请刷新后再挑战');
-  if (level < next.openLevel) throw new Error(raid.title + '第 ' + next.stageLevel + ' 关需要角色 ' + next.openLevel + ' 级');
-  await waitForChallenge(client);
-  if (!enabled()) throw new Error('账号状态已变化，取消挑战试炼副本');
-  await client.request('TrialRaidChallengeRequest', { raidId, stageId: next.stageId });
-  const after = await readRaid(client, raidId);
-  return raid.title + '第 ' + next.stageLevel + ' 关' + (after.passedStage >= next.stageId ? '已通关' : '未通关');
+  return schedule(async () => {
+    signal?.throwIfAborted();
+    if (!enabled() || client.connected === false) throw new Error('账号状态已变化，取消挑战试炼副本');
+    const info = await readRaid(client, raidId);
+    const next = stages.find(row => row.stageId > (info.passedStage ?? 0));
+    if (!next) return raid.title + '已全部通关';
+    if (expectedStage != null && next.stageId !== expectedStage) throw new Error('试炼进度已变化，请刷新后再挑战');
+    if (level < next.openLevel) throw new Error(raid.title + '第 ' + next.stageLevel + ' 关需要角色 ' + next.openLevel + ' 级');
+    signal?.throwIfAborted();
+    if (!enabled() || client.connected === false) throw new Error('账号状态已变化，取消挑战试炼副本');
+    return executeBattle(async () => {
+      try {
+        await waitForChallenge(client, { signal, wait, beforeSend: async () => {
+          if (!enabled() || client.connected === false) throw new Error('账号状态已变化，取消挑战试炼副本');
+          await beforeBattle?.(next.stageId);
+          signal?.throwIfAborted();
+          if (!enabled() || client.connected === false) throw new Error('账号状态已变化，取消挑战试炼副本');
+        } });
+        signal?.throwIfAborted();
+        if (!enabled() || client.connected === false) throw new Error('账号状态已变化，取消挑战试炼副本');
+      } catch (error) {
+        error.notSent = true;
+        throw error;
+      }
+      const reply = await client.request('TrialRaidChallengeRequest', { raidId, stageId: next.stageId }, 'TrialRaidChallengeResponse');
+      if (reply?.raidId !== raidId || reply?.stageId !== next.stageId) throw new Error('试炼挑战回包不匹配，结果待核对，已停止');
+      const after = await readRaid(client, raidId);
+      if (!Number.isSafeInteger(after.passedStage) || after.passedStage < (info.passedStage ?? 0)
+        || (after.passedStage && !stages.some(row => row.stageId === after.passedStage))) throw new Error('试炼挑战后进度无法确认，已停止');
+      const won = after.passedStage >= next.stageId;
+      onBattle({ stage: next.stageId, level: next.stageLevel, won, wins: won ? 1 : 0, failures: won ? 0 : 1 });
+      return raid.title + '第 ' + next.stageLevel + ' 关' + (won ? '已通关' : '未通关');
+    }, { mode: 'trial', raidId, stage: next.stageId, signal, enabled, onLineupPhase });
+  });
 }
 
 export async function sweepTrials(client, config, level, enabled, log, scheduler) {
@@ -104,7 +134,7 @@ export async function sweepTrials(client, config, level, enabled, log, scheduler
 }
 
 export async function runTrialStages(client, player, config, raidId, { maxFailures = 3, maxWins = Infinity, beforeBattle, signal, enabled = () => true,
-  schedule = work => work(), wait = sleep, onBattle = () => {} } = {}) {
+  schedule = work => work(), wait = sleep, onBattle = () => {}, executeBattle = work => work(), onLineupPhase } = {}) {
   maxFailures = stageFailureLimit(maxFailures);
   const definition = config?.tables?.TrialRaidCfg?.data?.find(r => r.raidId === raidId);
   if (!definition) throw new Error('未知试炼副本');
@@ -121,21 +151,35 @@ export async function runTrialStages(client, player, config, raidId, { maxFailur
       const next = stages.find(r => r.stageId > before.passedStage);
       if (!next) return { done: true, reason: '该试炼已全部通关' };
       if (!(player?.level >= next.openLevel)) return { done: true, reason: `下一关需要角色 ${next.openLevel} 级` };
-      await waitForChallenge(client, { signal, wait });
       signal?.throwIfAborted();
       if (!enabled()) throw new Error('账号已暂停，未发送试炼挑战');
-      await beforeBattle?.(next.stageId);
-      const reply = await client.request('TrialRaidChallengeRequest', { raidId, stageId: next.stageId }, 'TrialRaidChallengeResponse');
-      if (reply?.raidId !== raidId || reply?.stageId !== next.stageId) throw new Error('试炼挑战回包不匹配，结果待核对，已停止');
-      const after = await readRaid(client, raidId);
-      if (!Number.isSafeInteger(after.passedStage) || after.passedStage < before.passedStage || (after.passedStage && !stages.some(r => r.stageId === after.passedStage))) throw new Error('试炼挑战后进度无法确认，已停止');
-      return { stage: next.stageId, level: next.stageLevel, won: after.passedStage >= next.stageId };
+      return executeBattle(async () => {
+        try {
+          await waitForChallenge(client, { signal, wait, beforeSend: async () => {
+            if (!enabled() || client.connected === false) throw new Error('账号已暂停，未发送试炼挑战');
+            await beforeBattle?.(next.stageId);
+            signal?.throwIfAborted();
+            if (!enabled() || client.connected === false) throw new Error('账号已暂停，未发送试炼挑战');
+          } });
+          signal?.throwIfAborted();
+          if (!enabled() || client.connected === false) throw new Error('账号已暂停，未发送试炼挑战');
+        } catch (error) {
+          error.notSent = true;
+          throw error;
+        }
+        const reply = await client.request('TrialRaidChallengeRequest', { raidId, stageId: next.stageId }, 'TrialRaidChallengeResponse');
+        if (reply?.raidId !== raidId || reply?.stageId !== next.stageId) throw new Error('试炼挑战回包不匹配，结果待核对，已停止');
+        const after = await readRaid(client, raidId);
+        if (!Number.isSafeInteger(after.passedStage) || after.passedStage < before.passedStage || (after.passedStage && !stages.some(r => r.stageId === after.passedStage))) throw new Error('试炼挑战后进度无法确认，已停止');
+        const battle = { stage: next.stageId, level: next.stageLevel, won: after.passedStage >= next.stageId };
+        if (lastStage !== battle.stage) failures = 0;
+        lastStage = battle.stage;
+        if (battle.won) { wins++; failures = 0; } else failures++;
+        onBattle({ ...battle, wins, failures });
+        return battle;
+      }, { mode: 'trial', raidId, stage: next.stageId, signal, enabled, onLineupPhase });
     });
     if (result.done) return { wins, failures, reason: result.reason };
-    if (lastStage !== result.stage) failures = 0;
-    lastStage = result.stage;
-    if (result.won) { wins++; failures = 0; } else failures++;
-    onBattle({ ...result, wins, failures });
     if (wins >= maxWins) return { wins, failures, reason: `本轮已通过 ${wins} 关，下轮继续` };
     if (failures >= maxFailures) return { wins, failures, reason: `第 ${result.level} 关连续失败 ${failures} 次，已停止` };
   }
@@ -143,23 +187,50 @@ export async function runTrialStages(client, player, config, raidId, { maxFailur
 
 export function createTrialTask(raidId) {
   let controller = null;
-  let state = { raidId, running: false, stopping: false, wins: 0, failures: 0, stage: null, reason: '尚未开启' };
+  let state = { raidId, running: false, stopping: false, wins: 0, failures: 0, stage: null, reason: '尚未开启',
+    lineupPhase: 'idle', lineupRestorePending: false };
   const view = () => ({ ...state });
   return {
     view,
+    lineupRestored() {
+      if (state.lineupRestorePending) {
+        state.lineupPhase = 'idle';
+        state.lineupRestorePending = false;
+        state.reason = '阵容核对已完成，请重新开始挑战';
+      }
+      return view();
+    },
     start(options, open, report) {
       if (controller) throw new Error('该试炼已在推关');
       const maxFailures = stageFailureLimit(options.maxFailures);
       controller = new AbortController(); const { signal } = controller;
-      state = { raidId, running: true, stopping: false, wins: 0, failures: 0, stage: null, maxFailures, reason: '正在准备' };
+      state = { raidId, running: true, stopping: false, wins: 0, failures: 0, stage: null, maxFailures, reason: '正在准备',
+        lineupPhase: 'idle', lineupRestorePending: false };
       (async () => {
         try {
           const context = await open(); signal.throwIfAborted();
           const result = await runTrialStages(context.client, context.player, context.config, raidId, { ...context, signal, maxFailures,
+            onLineupPhase({ phase }) {
+              state.lineupPhase = phase;
+              state.lineupRestorePending = phase === 'pending' || phase === 'conflict';
+              report?.(view());
+            },
             onBattle(info) { Object.assign(state, { stage: info.level, wins: info.wins, failures: info.failures, reason: `第 ${info.level} 关${info.won ? '已通关' : '未通关'}` }); report?.(view()); } });
           Object.assign(state, result);
-        } catch (error) { state.reason = error.message; state.failed = !signal.aborted; }
-        finally { if (signal.aborted) state.reason = signal.reason.message; controller = null; state.running = state.stopping = false; report?.(view()); }
+        } catch (error) {
+          state.reason = error.message;
+          if (error.lineupRestorePending) {
+            state.reason = error.lineupRecovery?.reason || error.lineupRestoreError?.message || error.message;
+            state.lineupRestorePending = true;
+            if (state.lineupPhase !== 'conflict') state.lineupPhase = 'pending';
+          }
+          state.failed = !signal.aborted || state.lineupRestorePending;
+        } finally {
+          if (signal.aborted && !state.lineupRestorePending) state.reason = signal.reason.message;
+          controller = null;
+          state.running = state.stopping = false;
+          report?.(view());
+        }
       })();
       return view();
     },

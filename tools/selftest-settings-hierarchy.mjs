@@ -204,6 +204,27 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
 
+test('自动挑战阵容位于推关与试炼对应开关下，挂机迁移后仍可配置并保留管理入口', () => {
+  const f = fixture({ navigation: true });
+  const fields = f.groups.find(group => group.id === 'progression').fields;
+  const mainline = fields.findIndex(field => field.key === 'progression.mainline');
+  const trials = fields.findIndex(field => field.key === 'progression.raidIds');
+  assert.equal(fields[mainline + 1].key, 'lineups.mainlinePresetId');
+  assert.equal(fields[mainline + 1].parent, 'progression.mainline');
+  assert.equal(fields[trials + 1].key, 'lineups.trialPresets');
+  assert.equal(fields[trials + 1].parent, 'progression.trials');
+  f.editor.draft.progression.mainline = true;
+  f.editor.draft.progression.trials = true;
+  f.renderPage(); f.activate('world'); f.activateGroup('progression');
+  const section = f.env.node('config-group-progression');
+  for (const key of ['lineups.mainlinePresetId', 'lineups.trialPresets']) {
+    assert(section.contains(f.widget(key).node));
+    assert(visible(f.widget(key).node));
+  }
+  assert(section.querySelectorAll('button').some(button => button.textContent === '管理自定义阵容'));
+  assert.equal(f.env.saves, 0);
+});
+
 test('商人、海商王与超凡英雄配置集中在活动页，游戏配置没有重复字段或分组', () => {
   const f = fixture();
   assert(!f.groups.some(group => group.id === 'rich-merchant'));

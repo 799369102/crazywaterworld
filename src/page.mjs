@@ -5,6 +5,8 @@ import { chrome, journal, dialogs, templates, giftCodesPage, overviewPage, manua
 const componentCss = readFileSync(new URL('./ui/dist/theme.css', import.meta.url), 'utf8');
 const consoleCss = readFileSync(new URL('./console.css', import.meta.url), 'utf8');
 const progressionScript = readFileSync(new URL('./ui/progression.js', import.meta.url), 'utf8');
+const lineupScript = readFileSync(new URL('./lineup-editor.js', import.meta.url), 'utf8');
+const lineupCss = readFileSync(new URL('./lineup-editor.css', import.meta.url), 'utf8');
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
@@ -32,7 +34,7 @@ export const PAGE = `<!doctype html>
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
 <script id="theme-init">${themeScript}</script>
-<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} } ${componentCss}</style>
+<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} ${lineupCss} } ${componentCss}</style>
 </head>
 <body>
 ${chrome()}
@@ -435,6 +437,7 @@ function subscribe() {
     appendLog(entry);
     if ((entry.extra?.pauseChanged || entry.extra?.loginBlocked) && entry.account === current) void loadAccounts(false);
     if (entry.extra?.worldUpdated && entry.account === current && Date.now() - entry.t < 10_000) refreshManualWorld();
+    if (entry.extra?.lineupChanged && entry.account === current && Date.now() - entry.t < 10_000) void refreshSavedLineups();
   };
 }
 
@@ -602,6 +605,7 @@ async function loadAccounts(reload) {
   snapshot = accounts.find(a => a.id === current)?.status ?? {};
   renderAccountSelect();
   if (previous !== current || reload) refreshProgression();
+  if (previous !== current || reload) void refreshSavedLineups();
   if (previous !== current) refreshManualWorld();
   if (previous !== current) {configAccountChanged();giftAccountChanged();loginSettingsAccountChanged();}
   if (reload) {
@@ -619,6 +623,7 @@ function selectLoadedAccount(next) {
   snapshot = accounts.find(a => a.id === current)?.status ?? {};
   renderAccountSelect();
   refreshProgression();
+  void refreshSavedLineups();
   refreshManualWorld();
   refreshActivities();
   refreshStages();
@@ -803,15 +808,26 @@ const HERO_STATUS = { ready: '可做', done: '已完成', blocked: '不可做' }
 let stageVersion = 0;
 let stageAccount = null;
 function stagePreferences() {
-  return { maxFailures: Number($('stage-failures').value) };
+  return { maxFailures: Number($('stage-failures').value), lineupId: selectedLineupId('mainline') };
 }
 function renderStages(data) {
   $('stage-start').disabled = data.running || !current;
   $('stage-stop').disabled = !data.running || data.stopping;
   $('stage-failures').disabled = data.running;
+  const lineupControl = $('stage-lineup-control');
+  let lineupSelect = lineupControl.querySelector('select');
+  if (!lineupSelect || lineupSelect.dataset.lineupAccount !== current) {
+    lineupSelect?.remove();
+    lineupControl.querySelector('button')?.remove();
+    lineupSelect = createLineupSelect(current, 'mainline');
+    lineupControl.appendChild(lineupSelect);
+    lineupControl.appendChild(createLineupPreviewButton(current, lineupSelect));
+  }
+  lineupSelect.disabled = data.running || !current;
   if (data.running) $('stage-failures').value = data.maxFailures;
   const details = data.stage ? '第 ' + data.stage + ' 关 · 已过 ' + data.wins + ' 关 · 连续失败 ' + data.failures + ' 次' : '';
-  $('stage-view').textContent = [data.stopping ? '正在停止，等待在途战报' : data.running ? '自动挑战中' : data.stage ? '已停止' : '未开启', details, data.reason==='尚未开启'?'':data.reason].filter(Boolean).join('　');
+  const lineupPhase = { switching: '正在切换阵容', restoring: '正在恢复原阵容', pending: '阵容待恢复', conflict: '阵容变化待确认' }[data.lineupPhase];
+  $('stage-view').textContent = [data.stopping ? '正在停止，等待战报和阵容恢复' : data.running ? '自动挑战中' : data.stage ? '已停止' : '未开启', details, lineupPhase, data.reason==='尚未开启'?'':data.reason].filter(Boolean).join('　');
 }
 async function refreshStages() {
   if(document.hidden)return;
@@ -820,6 +836,13 @@ async function refreshStages() {
   const account = current;
   if (stageAccount !== account) {
     stageAccount = account;
+    const lineupControl = $('stage-lineup-control');
+    lineupControl.querySelector('select')?.remove();
+    lineupControl.querySelector('button')?.remove();
+    const lineupSelect = createLineupSelect(account, 'mainline');
+    lineupSelect.disabled = true;
+    lineupControl.appendChild(lineupSelect);
+    lineupControl.appendChild(createLineupPreviewButton(account, lineupSelect));
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('stages:' + account)) || {}; } catch {}
     $('stage-failures').value = saved.maxFailures || 3;
@@ -2062,6 +2085,7 @@ ${accountAddScript}
 ${accountPickerScript}
 
 // ---- 启动 ------------------------------------------------------------------
+${lineupScript}
 ${progressionScript}
 ${helpTipsScript}
 ${mapMotionPosition.toString()}
@@ -2186,7 +2210,7 @@ function activateConsolePage(button, resource = selectedResource) {
     refreshProgression();
     if (button.dataset.tab === 'overview') {refreshOverview();refreshLoop();}
     if(isResource&&resource==='inventory')refreshManualWorld();
-    if(isResource&&resource==='heroes')void appointmentsLoad(true);
+    if(isResource&&resource==='heroes'){void appointmentsLoad(true);void refreshSavedLineups();}
     if (button.dataset.tab === 'account') {
       renderAccounts();
       pollCapture();
@@ -2197,7 +2221,7 @@ function activateConsolePage(button, resource = selectedResource) {
     if (button.dataset.tab === 'login-settings') void loginSettingsLoad();
     if(target==='giftcodes')void refreshGiftCodes();
     if (target === 'activities') refreshActivities();
-    if (button.dataset.tab === 'stages') refreshStages();
+    if (button.dataset.tab === 'stages') {refreshStages();void refreshSavedLineups();}
 }
 document.querySelectorAll('#tabs button').forEach(button => { button.onclick = () => activateConsolePage(button); });
 for(const link of document.querySelectorAll('a[href^="#config-group-"]'))link.onclick=event=>{if(location.hash===link.getAttribute('href')){event.preventDefault();activateConsolePage(document.querySelector('#tabs [data-tab="settings"]'));configApplyHash();}};

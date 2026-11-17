@@ -123,6 +123,10 @@ export function heroesPage() {
       <div id="equipment-view" className="progression-view" aria-live="polite" />
     </Panel>
     <Panel title="装备制造"><div className="bar"><Button id="crafting-refresh" variant="outline">刷新装备厂</Button></div><div id="crafting-view" className="progression-view" aria-live="polite" /></Panel>
+    <Panel title="我的阵容" help="管理已保存的自定义阵容，点击查看或在弹窗中编辑。主线和试炼可在各自入口选择阵容，挑战结束后自动还原到挑战前的搭配。">
+      <div className="bar"><Button id="saved-lineup-refresh" variant="outline">刷新已保存阵容</Button></div>
+      <div id="saved-lineup-view" className="progression-view" />
+    </Panel>
     <Panel title="推荐阵容"><div className="bar"><Button id="lineup-refresh" variant="outline">刷新推荐</Button></div><div id="lineup-view" className="progression-view" aria-live="polite" /></Panel>
     <Panel title="远征舰队编队" help="保留空编队的初始化入口。已有编队不会自动重排；舰队状态在总览查看，首杀连续推进在挂机页开启。"><div id="formation-view" className="progression-view" aria-live="polite" /></Panel>
   </div>)

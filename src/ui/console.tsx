@@ -41,6 +41,7 @@ export function stagePanel() {
       </CardHeader>
       <CardContent>
         <div className="bar">
+          <div id="stage-lineup-control" className="bar"><span>挑战阵容</span></div>
           <label htmlFor="stage-failures">失败停止次数</label>
           <Input id="stage-failures" aria-label="主线手动挑战失败停止次数" className="w-20" type="number" min="1" defaultValue="3" />
           <Button id="stage-start" disabled>开始连续挑战</Button>

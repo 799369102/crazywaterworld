@@ -74,7 +74,9 @@ function progressionAction(label, path, payload, account, reason, group) {
     button.disabled = true;
     button.textContent = '执行中…';
     try {
-      await call(path, { method: 'POST', body: JSON.stringify({ ...payload, confirm: true }) });
+      const lineup = path === '/api/trials/challenge' && typeof selectedLineupId === 'function'
+        ? { lineupId: selectedLineupId('trial', payload.raidId) } : {};
+      await call(path, { method: 'POST', body: JSON.stringify({ ...payload, ...lineup, confirm: true }) });
     } catch (error) { if (account === current) reportError(error); }
     finally {
       pendingProgression.delete(key);
@@ -142,6 +144,12 @@ function renderTrialProgress(box, rows, account) {
     }
     const content=el('div');content.append(body);
     const bar = el('div', 'bar trial-run-controls');
+    let lineupSelect;
+    if (typeof createLineupSelect === 'function') {
+      const lineupLabel = el('label', 'choice-field'); lineupLabel.append(el('span', '', '挑战阵容'));
+      lineupSelect = createLineupSelect(account, 'trial', row.raidId); lineupLabel.append(lineupSelect); bar.append(lineupLabel);
+      bar.append(createLineupPreviewButton(account, lineupSelect));
+    }
     const label = el('label', '', '失败停止次数');
     const input = el('input', 'config-input'); input.type = 'number'; input.min = '1'; input.step = '1'; input.value = trialFailureOptions.get(account + ':' + row.raidId) || '3';
     input.setAttribute('aria-label', row.name + '手动挑战失败停止次数'); input.oninput = () => trialFailureOptions.set(account + ':' + row.raidId, input.value); label.append(input);
@@ -156,7 +164,8 @@ function renderTrialProgress(box, rows, account) {
       const wasRunning=!!controls.row.task?.running;let refreshProgress=false;
       ++trialTaskVersion;controls.pending=true;paintTrialTask(controls,controls.row.task??{});
       try{
-        const state=await call('/api/trials/'+(run?'start':'stop'),{method:'POST',body:JSON.stringify({confirm:true,raidId:row.raidId,...(run?{maxFailures:Number(input.value)}:{})})});
+        const lineup = run && typeof selectedLineupId === 'function' ? { lineupId: selectedLineupId('trial', row.raidId) } : {};
+        const state=await call('/api/trials/'+(run?'start':'stop'),{method:'POST',body:JSON.stringify({confirm:true,raidId:row.raidId,...(run?{maxFailures:Number(input.value)}:{}),...lineup})});
         if(account===current&&item.isConnected){refreshProgress=wasRunning&&!state.running;controls.row.task=state;paintTrialTask(controls,state);}
       }catch(error){if(account===current)reportError(error);}
       finally{controls.pending=false;if(account===current&&item.isConnected){paintTrialTask(controls,controls.row.task??{});await refreshTrialTasks();if(refreshProgress&&account===current)await refreshProgression('trial');}}
@@ -164,7 +173,7 @@ function renderTrialProgress(box, rows, account) {
     start.onclick=()=>command(true);stop.onclick=()=>command(false);
     status.dataset.trialTask = row.raidId;
     status.textContent = (row.task?.running ? '推关中 · ' : '未推关 · ') + (row.task?.reason || '尚未开启');
-    item.trialControls = { start, stop, input, row, account,status,details:body,manual,pending:false };
+    item.trialControls = { start, stop, input, lineupSelect, row, account,status,details:body,manual,pending:false };
     bar.append(label,start,manual,stop);content.append(bar);item.append(content);
     paintTrialTask(item.trialControls,row.task??{});box.appendChild(item);
   }
@@ -176,6 +185,7 @@ function paintTrialTask(controls,state){
   controls.start.disabled=controls.pending||!!state.running||!controls.row.next||!!controls.row.reason;
   controls.stop.disabled=controls.pending||!state.running||!!state.stopping;
   controls.input.disabled=controls.pending||!!state.running;
+  if (controls.lineupSelect) controls.lineupSelect.disabled = controls.pending || !!state.running;
   if(state.running&&Number.isSafeInteger(state.maxFailures))controls.input.value=String(state.maxFailures);
   controls.status.textContent=(controls.pending?'正在提交':state.running?state.stopping?'正在停止':'自动挑战中':state.reason&&state.reason!=='尚未开启'?state.reason:'未开启')+(state.running||state.wins||state.failures?' · 已过 '+(state.wins??0)+' 关 / 连败 '+(state.failures??0)+' 次':'');
 }

@@ -101,6 +101,7 @@ export async function runLoop(client, protocol, {
   usageLedger = null,
   getEveryMs = () => everyMs,
   schedule = work => work(),
+  executeBattle = work => work(),
   onRound,
   onStep,
   onMaintenance,
@@ -366,7 +367,7 @@ export async function runLoop(client, protocol, {
       if (entry.skipped) serviceWait.set(key, entry.reason); else serviceWait.delete(key);
     };
     let pirateChecked = false;
-    const challengeOptions = { player, getSettings, state: challengeRun, ledger: usageLedger,
+    const challengeOptions = { player, getSettings, state: challengeRun, ledger: usageLedger, executeBattle,
       enabled: () => !stop.aborted && client.connected !== false, isStageBusy, isTrialBusy, isPirateBusy,
       prepareDispatch: () => refreshCityWarReservations(client, protocol, config, player, getSettings),
       wait: (ms, _value, { signal } = {}) => sleep(ms, signal),
@@ -785,7 +786,8 @@ export async function runLoop(client, protocol, {
       await runChallengeRound(client, config, { ...challengeOptions, mode: 'progression', report: serviceReport('dailies', '推关与试炼') });
       await checkFactoryDue({ checkpoint: true });
       if (!getSettings()?.progression && isEnabled && legacyEnabled('stageAuto')) {
-        try { await serviceStageAuto(client, config, { player, enabled: () => legacyActive('stageAuto'), scheduler: rewards, isBusy: isStageBusy, report: serviceReport('dailies', '成长') }); }
+        try { await serviceStageAuto(client, config, { player, enabled: () => legacyActive('stageAuto'), scheduler: rewards, isBusy: isStageBusy,
+          executeBattle, report: serviceReport('dailies', '成长') }); }
         catch (error) { phaseFailure('dailies', '主线推关检查', error); }
       }
       if (isEnabled && groupEnabled('藏品')) {

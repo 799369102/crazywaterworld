@@ -172,6 +172,7 @@ function fixture(initial = sampleAccounts()) {
     const accountDialog = async (...args) => {env.dialogs.push(args);return env.dialogResult;};
     const exportAccounts = id => env.exports.push(id);
     const refreshProgression = () => {};
+    const refreshSavedLineups = async () => {};
     const refreshManualWorld = () => {};
     const refreshActivities = () => {};
     const refreshStages = () => {};

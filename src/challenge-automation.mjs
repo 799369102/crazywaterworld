@@ -7,7 +7,7 @@ export function createChallengeRun() { return { mainline: {}, trials: {}, pirate
 
 export async function runChallengeRound(client, config, { player, getSettings, state, ledger,
   enabled = () => true, isStageBusy = () => false, isTrialBusy = () => false, isPirateBusy = () => false,
-  report = () => {}, signal, wait, prepareDispatch = async () => {}, mode = 'all' } = {}) {
+  report = () => {}, signal, wait, executeBattle = work => work(), prepareDispatch = async () => {}, mode = 'all' } = {}) {
   const current = () => enabled() && !signal?.aborted && client.connected !== false;
   const prefs = getSettings()?.progression;
   const battle = async (key, label, progress, allowed, busy, run) => {
@@ -21,6 +21,10 @@ export async function runChallengeRound(client, config, { player, getSettings, s
     let sent = false, settled = false;
     const live = () => current() && allowed() && !busy();
     const beforeBattle = () => { if (!live()) throw new Error('推关已暂停，未发送挑战'); sent = true; };
+    const onLineupPhase = ({ phase }) => {
+      progress.lineupPhase = phase;
+      progress.lineupRestorePending = phase === 'pending' || phase === 'conflict';
+    };
     const onBattle = ({ stage, level = stage, won }) => {
       settled = true;
       if (progress.stage !== stage) progress.failures = 0;
@@ -34,25 +38,34 @@ export async function runChallengeRound(client, config, { player, getSettings, s
       finish({ ok: won, skipped: !won, reason: progress.reason });
     };
     try {
-      const result = await run({ beforeBattle, onBattle, enabled: live });
+      const result = await run({ beforeBattle, onBattle, enabled: live, onLineupPhase, executeBattle });
       if (!settled) { progress.reason = result.reason; finish({ skipped: true, reason: result.reason }); }
     } catch (error) {
+      if (error.lineupRestorePending) {
+        progress.lineupRestorePending = true;
+        if (progress.lineupPhase !== 'conflict') progress.lineupPhase = 'pending';
+        progress.halted = true;
+        const reason = error.lineupRecovery?.reason || error.lineupRestoreError?.message || error.message;
+        progress.reason = reason + '；阵容待恢复，恢复后请重新开始挂机';
+        return finish({ ok: false, error: progress.reason });
+      }
       const rejected = error.prompt && error.request === (key === 'stageAuto' ? 'ChallengeStageRequest' : 'TrialRaidChallengeRequest');
       if (rejected) {
         progress.reason = error.message + '；服务器明确拒绝，本次不计战败，下轮再检查';
         return finish({ skipped: true, reason: progress.reason });
       }
       // 超时和不匹配战报不能当作战败，也不能下一轮盲目重试。
-      if (sent && !settled && !error.notSent) progress.halted = true;
-      progress.reason = error.message + (progress.halted ? '；结果未确认，本次挂机停止该挑战' : '');
+      const unknown = sent && !settled && !error.notSent;
+      if (unknown) progress.halted = true;
+      progress.reason = error.message + (unknown ? '；结果未确认，本次挂机停止该挑战' : '');
       finish({ skipped: !live(), ok: false, error: progress.reason });
     }
   };
   if (mode !== 'pirate' && prefs?.enabled) {
     await battle('stageAuto', '主线 / 闯关', state.mainline,
       () => getSettings()?.progression?.enabled && getSettings().progression.mainline, isStageBusy,
-      ({ beforeBattle, onBattle }) => runStages(client, player, config, { allowMutate: true, maxFailures: 1, maxWins: 1,
-        signal, wait, beforeBattle, onBattle: event => { if (event.won) player.mainlineStage = event.stage + 1; onBattle(event); } }));
+      options => runStages(client, player, config, { ...options, allowMutate: true, maxFailures: 1, maxWins: 1,
+        signal, wait, onBattle: event => { if (event.won) player.mainlineStage = event.stage + 1; options.onBattle(event); } }));
     for (const id of prefs.raidIds) {
       const raidId = Number(id), name = config?.tables?.TrialRaidCfg?.data?.find(row => row.raidId === raidId)?.title ?? '试炼 ' + id;
       await battle('trialAuto:' + id, name, state.trials[id] ??= {},

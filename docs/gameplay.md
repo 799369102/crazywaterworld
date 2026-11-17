@@ -671,6 +671,7 @@ node tools/selftest-describe.mjs    # 字段布局还原自检
 | --- | --- |
 | 保存远征舰队首次编队 | 发送 `FleetSaveFormationRequest` 后，从海面建筑重读每个站位的英雄，再用 `MyFleetsRequest` 单独检查世界地图是否列出该队。 |
 | 应用推荐阵容 | 主线、远征和积分赛分别走 `SaveFormationRequest{module:1}`、`ExpeditionSaveFormationRequest`、`LeagueSaveFormationRequest`，用回包核对站位。舰队走 `FleetSaveFormationRequest`，从海面建筑重读确认。海兽保持原值，舰队与客户端一样不发 `petUid`。这些写操作只有离线测试，尚未在真实账号验证。 |
+| 保存阵容与临时挑战 | V76 的主线、普通试炼和竞技场防守共用 `FormationModule.MAINLINE=1`。`GetFormationRequest` 读取完整 `Formation{presetId,heroPositions,petUid}`，`SaveFormationRequest` 切换后再次读取确认。每场挑战持久保存原阵容，确认战果后恢复并回读。`petUid` 以十进制字符串保存，编码时转换为精确 low/high。待恢复记录带角色和原区服，第三套阵容进入人工处理。写入路径已做离线回归，真实账号验证待补。 |
 | 联动活动签到 | `ClaimActivityDailyCheckInRewardRequest{activityId, checkId}`。客户端按开放日算当天，`signDay` 早于当天的是补签，服务端扣钻石（`dailyActive.checkRuby`）。工具只发当天的 `rewardId`，两个开放时间不在同一天时跳过，用回包 `checkId` 核对。 |
 | 联动活动活跃 | `ClaimActivityDailyActiveRewardRequest`，每次领下一档，回包 `claimedId` 递增。分数来自 `SCAllActivity` 和 `SCActivityActiveScoreUpdate`。 |
 | 联动每日免费礼包 | `ClaimDailyCombGiftRequest`、`ClaimFreeSelectGiftRequest` 只发 `price` 为 0 的礼包。没有响应类型，靠 `sendWatch` 和道具推送确认。服务端只在登录时下发状态，跨天按客户端 `dailyReset` 在本地清空。 |
