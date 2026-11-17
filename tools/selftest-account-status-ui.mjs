@@ -113,7 +113,7 @@ function fixture(rows = [
     const resetProductionPlan = () => env.effects.push('clear-production');
     let accounts = [], current = null, dailyAccount = null, dailyVersion = 0;
     let worldMapOwner = null, productionPlanOwner = null;
-    let productionPlanBusy = false, loopReads = 0, loopAccount = null;
+    let productionPlanBusy = false, loopReads = 0, loopAccount = null, loopVersion = 0;
     ${accountScript}
     ${pollingScript}
     env.api = {
@@ -184,6 +184,7 @@ await test('每项显示自己的状态，空列表和旧账号都可渲染', as
   assert.doesNotMatch(PAGE, /id="disconnect"/, '页面移除独立断开按钮');
   assert.doesNotMatch(pageScript, /\$\('disconnect'\)/, '页面逻辑没有引用已移除的按钮');
   assert.match(PAGE, /id="account-pause"/, '页面保留暂停托管入口');
+  assert.match(PAGE, /id="loop-toggle"/, '页面提供独立的挂机启停入口');
   assert.match(PAGE, /id="logs-open"/, '页面保留日志入口');
 });
 
@@ -445,23 +446,29 @@ await test('暂停和恢复在切号后仍更新原账号，不影响新账号�
   }
 });
 
-await test('统一托管按钮覆盖空闲、运行、暂停、顶号和恢复中的状态', async () => {
-  for (const [status, label] of [
-    [{ connected: false }, '开始托管'],
-    [{ connected: true, looping: false }, '开始托管'],
-    [{ connected: true, looping: true }, '暂停托管'],
-    [{ paused: true, looping: true }, '恢复托管'],
-    [{ loginBlocked: true }, '恢复托管'],
-    [{ loginBlocked: true, reconnecting: true }, '暂停托管'],
+await test('挂机和托管按钮分别覆盖空闲、运行、暂停、顶号和恢复状态', async () => {
+  for (const [status, hostingLabel, loopLabel] of [
+    [{ connected: false }, '开始托管', '开始挂机'],
+    [{ connected: true, looping: false }, '暂停托管', '开始挂机'],
+    [{ connected: true, looping: true }, '暂停托管', '暂停挂机'],
+    [{ paused: true, looping: true }, '恢复托管', '暂停挂机'],
+    [{ loginBlocked: true }, '恢复托管', '开始挂机'],
+    [{ loginBlocked: true, reconnecting: true }, '暂停托管', '暂停挂机'],
+    [{ state: 'CONNECTING' }, '暂停托管', '开始挂机'],
   ]) {
     const env = fixture([{ id: 'a', title: '甲', status }]);
-    assert.equal(env.node('account-pause').textContent, label);
+    assert.equal(env.node('account-pause').textContent, hostingLabel);
     assert.equal(env.node('account-pause').disabled, false);
+    assert.equal(env.node('loop-toggle').textContent, loopLabel);
+    assert.equal(env.node('loop-toggle').disabled, !!status.paused);
   }
   assert.equal(fixture([]).node('account-pause').disabled, true);
+  assert.equal(fixture([]).node('loop-toggle').disabled, true);
   const stopping = fixture([{ id: 'a', title: '甲', status: { looping: true, loopStopping: true } }]);
-  assert.equal(stopping.node('account-pause').disabled, true);
-  await stopping.node('account-pause').onclick();
+  assert.equal(stopping.node('account-pause').disabled, false, '挂机退出中仍可断开托管');
+  assert.equal(stopping.node('loop-toggle').disabled, true);
+  assert.equal(stopping.node('loop-toggle').textContent, '暂停中…');
+  await stopping.node('loop-toggle').onclick();
   assert.equal(stopping.calls.length, 0);
 });
 
@@ -480,8 +487,10 @@ await test('开始托管先保存草稿和间隔，重复点击与轮询保持�
   };
   const request = env.node('account-pause').onclick();
   await env.node('account-pause').onclick();
+  await env.node('loop-toggle').onclick();
   env.api.renderHostingControl();
   assert.equal(env.node('account-pause').disabled, true);
+  assert.equal(env.node('loop-toggle').disabled, true);
   assert.equal(env.calls.length, 0);
   gate.resolve();
   await request; await settle();
@@ -491,13 +500,15 @@ await test('开始托管先保存草稿和间隔，重复点击与轮询保持�
   assert.equal(env.node('account-pause').disabled, false);
 });
 
-await test('间隔加载前等待开始和恢复，正在运行时仍可暂停', async () => {
-  for (const status of [{}, { paused: true }, { looping: true }]) {
+await test('间隔加载前等待开始和恢复，已连接或运行时仍可暂停托管', async () => {
+  for (const status of [{}, { paused: true }, { looping: true }, { connected: true }]) {
     const env = fixture([{ id: 'a', title: '甲', status }]);
     env.api.loopReady(false);
-    assert.equal(env.node('account-pause').disabled, !status.looping);
+    assert.equal(env.node('account-pause').disabled, !(status.looping || status.connected));
+    assert.equal(env.node('loop-toggle').disabled, !status.looping);
     env.api.loopReady(true);
     assert.equal(env.node('account-pause').disabled, false);
+    assert.equal(env.node('loop-toggle').disabled, !!status.paused);
   }
 });
 
@@ -545,6 +556,171 @@ await test('开始前保存失败或切号均取消启动，错误后可以重�
     assert.equal(env.api.current(), 'account-b');
     assert.equal(env.node('account-pause').disabled, false);
   }
+});
+
+await test('暂停挂机立即提交，连接和手动操作入口保持可用', async () => {
+  const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: true, paused: false } }]);
+  env.onFlush = env.onIntervalSave = async () => { throw new Error('暂停挂机不应等待设置'); };
+  env.respond = async (route, record) => {
+    if (route === '/api/loop/stop') {
+      assert.deepEqual(record.payload, { confirm: true });
+      env.serverAccounts[0].status = { connected: true, looping: false, loopStopping: false, paused: false };
+      return { ok: true, running: false, status: env.serverAccounts[0].status };
+    }
+    return { accounts: env.serverAccounts };
+  };
+  await env.node('loop-toggle').onclick(); await settle();
+  assert.equal(env.errors.length, 0);
+  assert.deepEqual(env.calls.filter(call => call.payload).map(call => call.route), ['/api/loop/stop']);
+  assert.equal(env.api.snapshot().connected, true);
+  assert.equal(env.api.snapshot().paused, false);
+  assert.equal(env.node('loop-toggle').textContent, '开始挂机');
+  assert.equal(env.node('loop-toggle').disabled, false);
+  assert.equal(env.node('account-pause').textContent, '暂停托管');
+  assert.equal(env.node('account-info-refresh').disabled, false);
+  assert.equal(env.node('production-plan-refresh').disabled, false);
+  assert.equal(env.api.disconnected.has('a'), false);
+});
+
+await test('暂停挂机后空闲连接仍可暂停托管，退出中也可断开', async () => {
+  for (const loopStopping of [false, true]) {
+    const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: loopStopping, loopStopping, paused: false } }]);
+    env.onFlush = env.onIntervalSave = async () => { throw new Error('暂停托管不应等待设置'); };
+    env.respond = async (route, record) => {
+      if (route === '/api/accounts/pause') {
+        assert.deepEqual(record.payload, { paused: true });
+        env.serverAccounts[0].status = { connected: false, looping: false, paused: true };
+        return env.serverAccounts[0].status;
+      }
+      return { accounts: env.serverAccounts };
+    };
+    await env.node('account-pause').onclick(); await settle();
+    assert.equal(env.errors.length, 0);
+    assert.equal(env.api.snapshot().connected, false);
+    assert.equal(env.node('account-pause').textContent, '恢复托管');
+    assert.equal(env.node('loop-toggle').disabled, true);
+    assert.equal(env.node('account-info-refresh').disabled, true);
+  }
+});
+
+await test('挂机停止中的状态禁止重启，轮询完成后恢复按钮', async () => {
+  const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: true, paused: false } }]);
+  env.respond = async route => {
+    if (route === '/api/loop/stop') {
+      env.serverAccounts[0].status = { connected: true, looping: true, loopStopping: true, paused: false };
+      return { ok: true, running: true, status: env.serverAccounts[0].status };
+    }
+    return { accounts: env.serverAccounts };
+  };
+  await env.node('loop-toggle').onclick(); await settle();
+  assert.equal(env.node('loop-toggle').textContent, '暂停中…');
+  assert.equal(env.node('loop-toggle').disabled, true);
+  assert.equal(env.node('account-pause').disabled, false);
+  await env.node('loop-toggle').onclick();
+  assert.equal(env.calls.filter(call => call.payload).length, 1);
+  env.serverAccounts[0].status = { connected: true, looping: false, loopStopping: false, paused: false };
+  await env.api.refreshAccountStatuses();
+  assert.equal(env.node('loop-toggle').textContent, '开始挂机');
+  assert.equal(env.node('loop-toggle').disabled, false);
+});
+
+await test('开始挂机先保存草稿和间隔，并阻止两种控制重复提交', async () => {
+  const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: false, paused: false } }]);
+  const gate = deferred(), order = [];
+  env.onFlush = async () => { order.push('draft'); await gate.promise; return true; };
+  env.onIntervalSave = async () => { order.push('interval'); return true; };
+  env.respond = async (route, record) => {
+    if (route === '/api/loop/start') {
+      order.push('start');
+      assert.deepEqual(record.payload, { confirm: true });
+      env.serverAccounts[0].status = { connected: true, looping: true, paused: false };
+      return { running: true, status: env.serverAccounts[0].status };
+    }
+    return { accounts: env.serverAccounts };
+  };
+  const request = env.node('loop-toggle').onclick();
+  await env.node('loop-toggle').onclick();
+  await env.node('account-pause').onclick();
+  env.api.renderHostingControl();
+  assert.equal(env.node('loop-toggle').disabled, true);
+  assert.equal(env.node('account-pause').disabled, true);
+  assert.equal(env.calls.length, 0);
+  gate.resolve();
+  await request; await settle();
+  assert.deepEqual(order, ['draft', 'interval', 'start']);
+  assert.deepEqual(env.calls.filter(call => call.payload).map(call => call.route), ['/api/loop/start']);
+  assert.equal(env.node('loop-toggle').textContent, '暂停挂机');
+  assert.equal(env.node('loop-toggle').disabled, false);
+  assert.equal(env.node('account-pause').disabled, false);
+});
+
+await test('挂机启停响应在切号后归属原账号', async () => {
+  for (const running of [false, true]) {
+    const env = fixture([
+      { id: 'account-a', title: '甲', status: { connected: true, looping: running, paused: false } },
+      { id: 'account-b', title: '乙', status: { connected: false, paused: true } },
+    ]);
+    const gate = deferred();
+    env.respond = () => gate.promise;
+    const request = env.node('loop-toggle').onclick();
+    await settle();
+    env.select('account-b');
+    gate.resolve({ running: !running, status: { connected: true, looping: !running, paused: false } });
+    await request;
+    assert.equal(env.calls[0].route, '/api/loop/' + (running ? 'stop' : 'start'));
+    assert.equal(env.calls[0].owner, 'account-a');
+    assert.equal(env.row('account-a').status.looping, !running);
+    assert.equal(env.row('account-a').status.connected, true);
+    assert.equal(env.api.current(), 'account-b');
+    assert.equal(env.api.snapshot().paused, true);
+    assert.equal(env.node('loop-toggle').disabled, true);
+    assert.deepEqual(env.effects, []);
+  }
+});
+
+await test('挂机启动保存失败或切号取消请求，错误后可重新操作', async () => {
+  for (const failure of ['draft', 'interval', 'request']) {
+    const env = fixture();
+    env.onFlush = async () => failure !== 'draft';
+    env.onIntervalSave = async () => failure !== 'interval';
+    env.respond = async route => {
+      if (route === '/api/loop/start') throw new Error('启动挂机失败');
+      return { accounts: env.serverAccounts };
+    };
+    await env.node('loop-toggle').onclick(); await settle();
+    assert.equal(env.calls.filter(call => call.route === '/api/loop/start').length, failure === 'request' ? 1 : 0);
+    assert.equal(env.node('loop-toggle').disabled, false);
+    assert.equal(env.node('account-pause').disabled, false);
+    assert.equal(env.node('loop-toggle').textContent, '开始挂机');
+  }
+  for (const phase of ['draft', 'interval']) {
+    const env = fixture(), gate = deferred();
+    if (phase === 'draft') env.onFlush = () => gate.promise;
+    else env.onIntervalSave = () => gate.promise;
+    const request = env.node('loop-toggle').onclick();
+    await settle();
+    env.select('account-b');
+    gate.resolve(true);
+    await request;
+    assert.equal(env.calls.filter(call => call.route === '/api/loop/start').length, 0);
+    assert.equal(env.node('loop-toggle').disabled, false);
+    assert.equal(env.api.current(), 'account-b');
+  }
+});
+
+await test('暂停挂机请求失败后保留运行状态并允许重试', async () => {
+  const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: true, paused: false } }]);
+  env.respond = async route => {
+    if (route === '/api/loop/stop') throw new Error('暂时无法暂停');
+    return { accounts: env.serverAccounts };
+  };
+  await env.node('loop-toggle').onclick(); await settle();
+  assert.equal(env.errors.length, 1);
+  assert.equal(env.node('loop-toggle').textContent, '暂停挂机');
+  assert.equal(env.node('loop-toggle').disabled, false);
+  assert.equal(env.node('account-pause').disabled, false);
+  await env.node('loop-toggle').onclick();
+  assert.equal(env.calls.filter(call => call.route === '/api/loop/stop').length, 2);
 });
 
 console.log(`账号下拉状态自检通过 ${passed} 项`);

@@ -1249,6 +1249,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       state: session.client?.snapshot?.().state ?? 'IDLE',
       busy: session.busy,
       looping: session.loop.running,
+      loopStopping: Boolean(session.loop.running && session.loop.controller?.signal.aborted),
     };
   }
 
@@ -3162,7 +3163,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         const { account, session } = scoped_(parsed);
         startLoop(session, account, { rounds: payload.rounds, everySeconds: payload.everySeconds, explicitLogin: true });
-        json(loopView(session));
+        json({ ...loopView(session), status: accountStatus(session) });
         return;
       }
       if (route === 'POST /api/loop/interval') {
@@ -3194,8 +3195,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const payload = jsonBody();
         needConfirm(payload);
         const { session } = scoped_(parsed);
-        stopLoop(session, '已暂停挂机');
-        json({ ok: true, running: session.loop.running });
+        stopLoop(session, '已暂停挂机', { stopManualTasks: false });
+        json({ ok: true, running: session.loop.running, status: accountStatus(session) });
         return;
       }
 
@@ -3293,9 +3294,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  function stopLoop(session, reason, { cancelRecovery = true, preserveAutoStart = false } = {}) {
+  function stopLoop(session, reason, { cancelRecovery = true, preserveAutoStart = false, stopManualTasks = true } = {}) {
     if (cancelRecovery) cancelLoginRecovery(session);
-    session.pirateAdvance?.stop(reason);
+    if (stopManualTasks) session.pirateAdvance?.stop(reason);
     const loop = session.loop;
     if (!session.paused || !preserveAutoStart) saveAutomation(session.id, { enabled: false, ...(!preserveAutoStart ? { autoStart: false } : {}) });
     if (!loop.running || loop.controller?.signal.aborted) return;

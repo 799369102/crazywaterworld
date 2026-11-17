@@ -542,9 +542,14 @@ const hostingActions = new Set();
 function renderHostingControl() {
   const resume = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting);
   const running = snapshot.looping || snapshot.reconnecting;
-  $('account-pause').disabled = !current || hostingActions.has(current) || !!snapshot.loopStopping || (!(running && !resume) && loopAccount !== current);
-  $('account-pause').textContent = resume ? '恢复托管' : running ? '暂停托管' : '开始托管';
-  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : running ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
+  const hosting = running || snapshot.connected || snapshot.state === 'CONNECTING' || connectingAccounts.has(current);
+  const pending = !current || hostingActions.has(current);
+  $('loop-toggle').disabled = pending || !!snapshot.paused || !!snapshot.loopStopping || (!running && loopAccount !== current);
+  $('loop-toggle').textContent = snapshot.loopStopping ? '暂停中…' : running ? '暂停挂机' : '开始挂机';
+  $('loop-toggle').title = snapshot.paused ? '请先恢复托管' : running ? '停止自动循环，保留游戏连接和手动操作' : '按已保存的任务和轮数开始挂机';
+  $('account-pause').disabled = pending || ((resume || !hosting) && (!!snapshot.loopStopping || loopAccount !== current));
+  $('account-pause').textContent = resume ? '恢复托管' : hosting ? '暂停托管' : '开始托管';
+  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : hosting ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
 }
 function renderAccountSelect() {
   appointmentsAccountChanged();
@@ -633,10 +638,12 @@ $('account').onchange = async () => {
 };
 $('account-pause').onclick = async () => {
   const account = current;
-  if (!account || hostingActions.has(account) || snapshot.loopStopping) return;
-  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting) && !!(snapshot.looping || snapshot.reconnecting);
+  if (!account || $('account-pause').disabled) return;
+  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting)
+    && !!(snapshot.looping || snapshot.reconnecting || snapshot.connected || snapshot.state === 'CONNECTING' || connectingAccounts.has(account));
   hostingActions.add(account);
   accountStatusRevision++;
+  loopVersion++;
   renderHostingControl();
   try {
     if (!paused) {
@@ -645,15 +652,52 @@ $('account-pause').onclick = async () => {
     }
     if (current !== account) return;
     const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify(paused ? { paused: true } : { paused: false, start: true, confirm: true }) });
+    if (current === account) loopVersion++;
     setAccountStatus(account, status);
-    if (current !== account) return;
     if (!status.paused) disconnected.delete(account);
+    if (current !== account) return;
     renderAccountSelect();
     refreshProgression();
     refreshManualWorld();
     refreshOverview();
     refreshLoop();
     refreshActivities();
+  } catch (error) {
+    if (current === account) reportError(error);
+  } finally {
+    hostingActions.delete(account);
+    if (current === account) {
+      renderAccountSelect();
+      refreshAccountStatuses();
+      refreshLoop();
+    }
+  }
+};
+
+$('loop-toggle').onclick = async () => {
+  const account = current;
+  if (!account || $('loop-toggle').disabled) return;
+  const stop = !!(snapshot.looping || snapshot.reconnecting);
+  hostingActions.add(account);
+  accountStatusRevision++;
+  loopVersion++;
+  renderHostingControl();
+  try {
+    if (!stop) {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (current !== account || !await saveLoopInterval()) return;
+    }
+    if (current !== account) return;
+    const data = await call('/api/loop/' + (stop ? 'stop' : 'start'), {
+      method: 'POST', body: JSON.stringify({ confirm: true }),
+    });
+    if (current === account) loopVersion++;
+    setAccountStatus(account, data.status);
+    if (!stop) disconnected.delete(account);
+    if (current !== account) return;
+    renderAccountSelect();
+    refreshStages();
+    refreshProgression();
   } catch (error) {
     if (current === account) reportError(error);
   } finally {

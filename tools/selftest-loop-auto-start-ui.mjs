@@ -61,7 +61,7 @@ function fixture() {
   const api = new Function('env', `
     let current = 'a', loopAccount = null, loopVersion = 0, loopFieldDefaults = null, loopSettingsRevision = null;
     let overviewLoopOwner = null, overviewLoopData = null, overviewRenderKey = '', snapshot = {};
-    const savingTasks = new Set(), loopIntervalSaves = new Map(), taskInputs = [], pirateFailureOptions = new Map(), hostingActions = new Set();
+    const savingTasks = new Set(), loopIntervalSaves = new Map(), taskInputs = [], pirateFailureOptions = new Map(), hostingActions = new Set(), connectingAccounts = new Set();
     const $ = env.node, document = { hidden: false }, configFlush = env.flush;
     const call = (route, options) => env.call(current, route, options);
     const reportError = error => env.errors.push(error);
@@ -81,15 +81,16 @@ function fixture() {
 let passed = 0;
 async function test(name, run) { await run(); passed++; console.log('通过：' + name); }
 
-await test('页头仅有一个间隔输入，位于统一托管按钮左侧', () => {
+await test('页头间隔输入与挂机、托管两个独立按钮依次排列', () => {
   const header = PAGE.match(/<header>[\s\S]*?<\/header>/)?.[0];
   assert.ok(header);
-  for (const id of ['loop-every', 'account-pause', 'loop-hint', 'loop-interval-status']) {
+  for (const id of ['loop-every', 'loop-toggle', 'account-pause', 'loop-hint', 'loop-interval-status']) {
     assert.equal([...PAGE.matchAll(new RegExp('id="' + id + '"', 'g'))].length, 1, id);
     assert.ok(header.includes('id="' + id + '"'), id);
   }
-  assert.ok(header.indexOf('id="loop-every"') < header.indexOf('id="account-pause"'));
-  assert.match(header, /aria-label="托管间隔（秒）"/);
+  assert.ok(header.indexOf('id="loop-every"') < header.indexOf('id="loop-toggle"'));
+  assert.ok(header.indexOf('id="loop-toggle"') < header.indexOf('id="account-pause"'));
+  assert.match(header, /aria-label="挂机间隔（秒）"/);
   assert.match(header, /aria-describedby="loop-interval-status"/);
 });
 
@@ -111,6 +112,7 @@ await test('任意页签读取当前账号间隔，运行中修改先保存草�
   assert.equal(f.node('loop-every').value, '60');
   assert.equal(f.node('loop-every').disabled, false);
   assert.equal(f.node('account-pause').textContent, '暂停托管');
+  assert.equal(f.node('loop-toggle').textContent, '暂停挂机');
   f.node('loop-every').value = '120';
   assert.equal(await f.save(), true); await settle();
   assert.equal(f.env.flushes, 1);
