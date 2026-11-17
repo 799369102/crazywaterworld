@@ -159,14 +159,129 @@ test('月卡位到期后现有排队任务转入常驻位，已启动任务保�
   assert.equal(model.input.machines[1].availableUntil, 30);
 });
 
-test('依赖未解锁给出对应订单的真实阻塞', () => {
+test('其他配方限制继续给出对应订单的真实阻塞', () => {
   const { snapshot, plan } = fixture();
   snapshot.recipes[0].available = false;
-  snapshot.recipes[0].reason = '食品厂等级不足';
+  snapshot.recipes[0].reason = '配方活动未开放';
   const result = plan();
   assert.equal(result.status, 'infeasible');
   assert.equal(result.completionAt, null);
-  assert.match(result.orders[0].reason, /食品厂等级不足/);
+  assert.match(result.orders[0].reason, /配方活动未开放/);
+});
+
+test('等级不足的商人整单跳过，已有材料可供其他订单齐套', () => {
+  const { snapshot, settings } = fixture();
+  const extendedConfig = { ...config, tables: { ...config.tables,
+    BuildingProduceCfg: table([...config.tables.BuildingProduceCfg.data,
+      { itemId: '电路板', buildType: '电子厂', unlockLevel: 2, produceTime: 60, costItem: [['小麦', 1]] }]),
+  } };
+  snapshot.buildings.push({ id: '1电子厂', buildingId: '1电子厂', type: '电子厂', level: 1, factory: { factoryQ: [] } });
+  snapshot.factories.push({ id: '1电子厂', type: '电子厂', level: 1, capacity: 6, enabled: true, queue: [], finished: [] });
+  snapshot.recipes.push({ id: '电路板', productId: '电路板', facilityType: '电子厂', costs: [{ id: '小麦', num: 1 }],
+    output: 1, durationSeconds: 60, unlockLevel: 2, available: false });
+  snapshot.inventory = [{ id: '面包', num: 1 }];
+  snapshot.orders[0].requirements[0].num = 1;
+  snapshot.orders.push({ id: 'merchant:1', source: 'merchant', kind: 'order',
+    requirements: [{ id: '面包', num: 1 }, { id: '电路板', num: 1 }], metadata: {} });
+  settings.factory.demandPriority = ['merchant', 'resident'];
+  const model = buildProductionModel(snapshot, extendedConfig, settings);
+  assert.deepEqual(model.input.orders.map(order => order.id), ['resident:1']);
+  assert.equal(model.skippedOrders.size, 1);
+  const result = planProduction(snapshot, extendedConfig, settings);
+  assert.equal(result.status, 'optimal');
+  assert.equal(result.scope, 'feasible-orders');
+  assert.equal(result.completionAt, snapshot.serverNow);
+  assert.equal(result.orders.find(order => order.source === 'resident').completionAt, snapshot.serverNow);
+  const merchant = result.orders.find(order => order.source === 'merchant');
+  assert.equal(merchant.skipped, true);
+  assert.equal(merchant.statusLabel, '已跳过排产');
+  assert.match(merchant.reason, /电路板/);
+  assert.equal(result.timeline.filter(job => job.kind === 'production').length, 0);
+});
+
+test('禁用工厂但库存、在产或待收已覆盖需求时保留订单', () => {
+  for (const source of ['inventory', 'queue', 'finished']) {
+    const { snapshot, settings, plan } = fixture();
+    settings.factory.disabledTypes = ['食品厂'];
+    snapshot.factories[0].enabled = false;
+    snapshot.recipes[0].available = false;
+    if (source === 'inventory') snapshot.inventory.push({ id: '面包', num: 2 });
+    if (source === 'finished') snapshot.factories[0].finished.push({ id: '面包', num: 2 });
+    if (source === 'queue') {
+      snapshot.factories[0].queue = [1, 2].map(index => ({ id: 'q' + index, productId: '面包', num: 1, finishTime: 1000 + index * 60 }));
+      snapshot.buildings[0].factory.factoryQ = snapshot.factories[0].queue;
+    }
+    const result = plan();
+    assert.equal(result.status, 'optimal', source);
+    assert.equal(result.orders[0].skipped, false, source);
+    assert.equal(result.timeline.filter(job => job.kind === 'production').length, 0, source);
+    assert.equal(result.completionAt, source === 'queue' ? 1120 : 1000, source);
+  }
+});
+
+test('上游加工品等级不足跳过整单，普通原料短缺继续保留阻塞', () => {
+  const { snapshot, settings } = fixture();
+  snapshot.inventory = [];
+  const extendedConfig = { ...config, tables: { ...config.tables,
+    BuildingProduceCfg: table([...config.tables.BuildingProduceCfg.data,
+      { itemId: '小麦种子', buildType: '种子厂', unlockLevel: 2, produceTime: 10, costItem: [] }]),
+  } };
+  snapshot.buildings.push({ id: '1种子厂', buildingId: '1种子厂', type: '种子厂', level: 1, factory: { factoryQ: [] } });
+  snapshot.factories.push({ id: '1种子厂', type: '种子厂', level: 1, capacity: 6, enabled: true, queue: [], finished: [] });
+  snapshot.recipes.push({ id: '小麦种子', productId: '小麦种子', facilityType: '种子厂', costs: [],
+    output: 1, durationSeconds: 10, unlockLevel: 2, available: false });
+  const result = planProduction(snapshot, extendedConfig, settings);
+  assert.equal(result.orders[0].skipped, true);
+  assert.match(result.orders[0].reason, /小麦种子/);
+  const ordinary = fixture();
+  ordinary.snapshot.inventory = [];
+  const blocked = ordinary.plan();
+  assert.equal(blocked.status, 'infeasible');
+  assert.equal(blocked.orders[0].skipped, false);
+});
+
+test('全部跳过明确展示，恢复工厂后自动重新纳入排产', () => {
+  const { snapshot, settings, plan } = fixture();
+  settings.factory.disabledTypes = ['1食品厂'];
+  snapshot.factories[0].enabled = false;
+  snapshot.recipes[0].available = false;
+  const skipped = plan();
+  assert.equal(skipped.orders[0].skipped, true);
+  assert.match(skipped.statusLabel, /全部跳过排产/);
+  assert.equal(skipped.completionAt, null);
+  settings.factory.disabledTypes = [];
+  snapshot.factories[0].enabled = true;
+  snapshot.recipes[0].available = true;
+  const restored = plan();
+  assert.equal(restored.status, 'optimal');
+  assert.equal(restored.orders[0].skipped, false);
+  assert.equal(restored.completionAt, 1120);
+});
+
+test('禁用配方的有限库存按优先级只分配一次，跳过后续不足订单', () => {
+  const { snapshot, settings, plan } = fixture();
+  settings.factory.disabledTypes = ['食品厂'];
+  settings.factory.demandPriority = ['merchant', 'resident'];
+  snapshot.factories[0].enabled = false;
+  snapshot.recipes[0].available = false;
+  snapshot.inventory = [{ id: '面包', num: 1 }];
+  snapshot.orders[0].requirements[0].num = 1;
+  snapshot.orders.push({ ...snapshot.orders[0], id: 'merchant:1', source: 'merchant' });
+  const result = plan();
+  assert.equal(result.status, 'optimal');
+  assert.equal(result.orders.find(order => order.source === 'merchant').skipped, false);
+  assert.equal(result.orders.find(order => order.source === 'resident').skipped, true);
+});
+
+test('状态未读完整时保留待确认，避免用缺失设施跳过订单', () => {
+  const { snapshot, plan } = fixture();
+  snapshot.complete = false;
+  snapshot.missingReads.push({ request: 'OnWaterRequest', reason: '未返回' });
+  snapshot.buildings = snapshot.buildings.filter(building => building.type !== '食品厂');
+  snapshot.factories = [];
+  const result = plan();
+  assert.equal(result.status, 'incomplete');
+  assert.equal(result.orders[0].skipped, false);
 });
 
 test('备货和未来候选不混入当前订单目标', () => {

@@ -76,7 +76,7 @@ export async function readGuildForts(client,protocol,config,{player,getSettings=
   if(!materials.length)return {...view,reason:'未选择工事材料，联盟互助材料白名单也为空'};
   view.candidates=forts.sort((a,b)=>Number(b.recommended)-Number(a.recommended)||a.cityId-b.cityId).flatMap(fort=>fort.needed.filter(row=>row.need>0&&materials.includes(row.id)).map(row=>({...row,cityId:fort.cityId,type:fort.type,stamp:fort.stamp})));
   if(inventory&&view.candidates.length){
-    const state=await readOrderReservedStock(client,protocol,config,{player,enabled,itemIds:[...new Set(view.candidates.map(row=>row.id))]});
+    const state=await readOrderReservedStock(client,protocol,config,{player,settings:getSettings(),enabled,itemIds:[...new Set(view.candidates.map(row=>row.id))]});
     for(const row of view.candidates){row.have=state.stock.get(row.id)??0;row.reserved=(state.reserved.get(row.id)??0)+Math.max(pref.reserve,resourceReserve(getSettings(),row.id));row.available=Math.max(0,row.have-row.reserved);row.num=Math.min(row.need,row.available,pref.dailyLimit>0?Math.max(0,pref.dailyLimit-view.dailyDonateNum):Number.MAX_SAFE_INTEGER);}
   }
   if(!enabled()||identity(player)!==stamp)throw new Error('账号或联盟已变化');

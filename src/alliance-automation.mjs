@@ -51,7 +51,7 @@ export async function readAllianceRecruitDemand(client, protocol, config, player
   const p = settings?.alliance;
   if (!p?.enabled || !p.recruit || !p.recruitProduction || !enabled()) return [];
   let view;
-  try { view = await readGuildOrderView(client, protocol, config, { player, enabled }); }
+  try { view = await readGuildOrderView(client, protocol, config, { player, settings, enabled }); }
   catch (error) { if (error.code === 'ORDER_MATERIAL_SPEND_PENDING') return []; throw error; }
   const roleKey = exactAutomationId(player.worldId) + ':' + exactAutomationId(player.playerId);
   if (ledger && Object.values(ledger.keyRecords()).some(record => record.details?.kind === 'allianceRecruit' && (record.details.accountKey === view.accountKey || record.details.roleKey === roleKey) &&
@@ -59,7 +59,7 @@ export async function readAllianceRecruitDemand(client, protocol, config, player
   return allianceRecruitDemand({ ...view, checkedAt: nowOf(client) }, settings, ledger?.snapshot());
 }
 
-async function aidState(client, protocol, config, player, enabled) {
+async function aidState(client, protocol, config, player, settings, enabled) {
   const state = await readMutualAid(client, config, player, { target: 20, mode: 'all', memberIds: [], askEnabled: false });
   const counter = await client.request('CounterInfoRequest', {}, 'CounterInfoResponse');
   const matches = counter.counters?.filter(row => row.type === 'DAILY_GUILD_AID');
@@ -67,7 +67,7 @@ async function aidState(client, protocol, config, player, enabled) {
   const count = matches.length ? Number(matches[0].num?.low === undefined ? matches[0].num : BigInt(matches[0].num.high) * 4294967296n + BigInt(matches[0].num.low >>> 0)) : 0;
   const limit = rows(config, 'GuildParamCfg').find(row => row.paramName === '每日求助次数上限')?.paramValue;
   if (!valid(count) || !valid(limit) || limit < 1) throw Error('今日联盟求助次数或上限未确认');
-  const reserved = await readOrderReservedStock(client, protocol, config, { player, enabled, itemIds: [...new Set(state.candidates.map(row => row.itemId))] });
+  const reserved = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds: [...new Set(state.candidates.map(row => row.itemId))] });
   if (!enabled()) throw Error('账号状态已变化');
   return { ...state, ...reserved, askUsed: count, askLimit: limit };
 }
@@ -100,7 +100,7 @@ async function resolveAidRecords(state, ledger, player) {
 }
 
 async function runMutual(client, protocol, config, player, { getSettings, ledger, enabled, report }) {
-  let state = await aidState(client, protocol, config, player, enabled);
+  let state = await aidState(client, protocol, config, player, getSettings(), enabled);
   if (ledger.snapshot().day !== state.day) throw Error('账号账本与游戏日期尚未对齐');
   await resolveAidRecords(state, ledger, player);
   const identity = stamp(player), day = state.day;
@@ -128,7 +128,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
       if (seq && before.some(row => row.itemId === seq.itemId)) ledger.updateKeyDetails(seqKey, { ...seq, received: true });
       report({ key: 'allianceMutual', label: result.label, ok: true });
       if (!current()) return;
-      state = await aidState(client, protocol, config, player, current);
+      state = await aidState(client, protocol, config, player, getSettings(), current);
     } catch (error) {
       if (ticket && (error.guildAidClaimNotSent === true || error.prompt && error.request === 'GotMyGuildAidRequest')) ledger.cancel(ticket);
       report({ key: 'allianceMutual', label: '联盟互助领取', error: error.message, pending: !!ticket && !sent }); return;
@@ -137,7 +137,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
   let p = getSettings().alliance;
   if (p.autoAsk && current()) {
     if (p.mutualMode !== 'exchange' && !p.requestMaterials?.length && p.recruit) {
-      const recruitment = await readGuildOrderView(client, protocol, config, { player, enabled: current });
+      const recruitment = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled: current });
       // Asking remains independent of the recruitment factory setting, but
       // does not prepare a new recruitment once either daily cap is exhausted.
       const cap = p.recruitDailyLimit;
@@ -166,7 +166,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
         let sent = false;
         try {
           await client.sendWatch('GuildAidAskRequest', { reqItemId: askItem, type: 0 }, { window: 400 }); sent = true;
-          const after = await aidState(client, protocol, config, player, current);
+          const after = await aidState(client, protocol, config, player, getSettings(), current);
           if (after.day !== day || after.askUsed !== state.askUsed + 1 || !after.ownRequests.some(row => row.itemId === askItem && !state.ownRequests.some(old => old.id === row.id))) throw Error('求助次数与新请求尚未确认');
           ledger.confirm(token); state = after;
           report({ key: 'allianceAsk', label: '已求助 ' + displayMaterial(config, askItem) + '，今日 ' + state.askUsed + '/' + state.askLimit, ok: true });
@@ -186,7 +186,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
   if (!p.autoHelp || (ledger.snapshot().counters.guildAidGifts ?? 0) >= p.helpDailyLimit) return;
   // Refresh after any ask/collection and immediately before donating. All
   // modes, including late-night top-up, retain material and nickname filters.
-  state = await aidState(client, protocol, config, player, current);
+  state = await aidState(client, protocol, config, player, getSettings(), current);
   p = getSettings().alliance;
   const chosen = state.candidates.find(row => allianceMaterialAllowed(row.itemId, getSettings(), player) &&
     (!p.memberKeywords?.length || p.memberKeywords.some(word => row.name.toLocaleLowerCase().includes(word.toLocaleLowerCase()))) &&
@@ -206,7 +206,7 @@ async function runMutual(client, protocol, config, player, { getSettings, ledger
     confirmOrderMaterialOperation(debit);
     await refreshOrderMaterialSpends(client, player, { enabled: current });
     if (!current()) throw Error('赠送已回执，等待账号恢复后核对');
-    const after = await aidState(client, protocol, config, player, current);
+    const after = await aidState(client, protocol, config, player, getSettings(), current);
     if (after.askIds.includes(chosen.id)) throw Error('求助完成状态尚未确认');
     ledger.confirm(token);
     report({ key: 'allianceHelp', label: '已帮助 ' + chosen.name + '：' + chosen.material + ' ×1', ok: true });
@@ -227,7 +227,7 @@ export async function runAllianceAutomation(client, protocol, config, player, { 
   const run = async (label, work) => { try { if (active()) await work(); } catch (error) { emit({ key: 'alliance', label, error: error.message, skipped: error.code === 'ORDER_MATERIAL_SPEND_PENDING' }); } };
   busy.add(client);
   try {
-    if (getSettings().alliance.recruit) await run('联盟募兵', () => serviceGuildOrders(client, protocol, config, { player, ledger,
+    if (getSettings().alliance.recruit) await run('联盟募兵', () => serviceGuildOrders(client, protocol, config, { player, getSettings, ledger,
       dailyLimit: getSettings().alliance.recruitDailyLimit, enabled: () => active() && getSettings().alliance.recruit, report: emit }));
     if (getSettings().alliance.mutual) await run('联盟互助', () => runMutual(client, protocol, config, player, { getSettings, ledger, enabled: () => active() && getSettings().alliance.mutual, report: emit }));
     if (getSettings().alliance.collectGifts) await run('联盟福利礼包', async () => emit(await claimGuildWelfare(client, config, { player, enabled: () => active() && getSettings().alliance.collectGifts })));

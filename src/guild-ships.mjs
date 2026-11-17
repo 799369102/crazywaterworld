@@ -149,7 +149,7 @@ export async function readGuildShips(client, protocol, config, {player,getSettin
   view.candidates=candidateList(view,getSettings());
   const ids=[...new Set(view.candidates.flatMap(row=>row.costs.map(cost=>cost.id)))];
   if(inventory&&ids.length){
-    const inventoryState=await readOrderReservedStock(client,protocol,config,{player,enabled,itemIds:ids});
+    const inventoryState=await readOrderReservedStock(client,protocol,config,{player,settings:getSettings(),enabled,itemIds:ids});
     for(const candidate of view.candidates)candidate.costs=candidate.costs.map(cost=>{
       const have=inventoryState.stock.get(cost.id)??0,reserved=inventoryState.reserved.get(cost.id)??0;
       const reserve=resourceReserve(getSettings(),cost.id),available=Math.max(0,have-reserved-reserve);

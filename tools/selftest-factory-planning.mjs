@@ -94,6 +94,139 @@ test('原生自动生产保持原目标，仅明确开启协同才允许切换',
   f.settings.factory.produce = false;
   assert.deepEqual(f.plan().actions.map(step => step.request), ['SetFactoryAutoProduceRequest']);
 });
+
+test('商人整单缺少未解锁材料时释放库存，其他需求继续排产', () => {
+  const f = fixture();
+  f.settings.factory.keepStock = 0;
+  f.settings.factory.demandFirst = true;
+  f.settings.factory.demandPriority = ['merchant', 'cargo'];
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.stock.set('短时品', 0);
+  f.stock.set('木材', 4);
+  f.survey.weekOrder = new Map([['木材', 4], ['短时品', 2], ['长时品', 1]]);
+  f.survey.cargoOrder = new Map([['短时品', 1]]);
+  const result = f.plan();
+  assert.deepEqual(products(result), ['短时品']);
+  assert(!result.demands.some(need => need.sources.includes('merchant')));
+  assert.equal(new Map(result.reserved).get('木材'), 1);
+  assert.match(result.notes.join(' '), /不差钱商人.*已跳过排产.*长时品/);
+  f.factory.level = 2;
+  f.stock.set('木材', 100);
+  assert(f.plan().demands.some(need => need.sources.includes('merchant')));
+});
+
+test('禁用需求工厂时整单停止备料，重新启用后恢复', () => {
+  const f = fixture();
+  f.config.tables.BuildingProduceCfg.data.push({ itemId: '颜料', buildType: '化工厂', unlockLevel: 1, costItem: [['短时品', 1]], produceTime: 60 });
+  const chemical = { buildingId: '1化工厂', type: '化工厂', level: 1, product: [], factory: { factoryQ: [], finishedProducts: [] } };
+  f.survey.buildings.push(chemical);
+  f.survey.factories.push(chemical);
+  f.settings.factory.keepStock = 0;
+  f.settings.factory.demandFirst = true;
+  f.settings.factory.disabledTypes = ['1化工厂'];
+  f.survey.weekOrder = new Map([['短时品', 2], ['颜料', 1]]);
+  const skipped = f.plan();
+  assert.equal(skipped.demands.length, 0);
+  assert.equal(new Map(skipped.reserved).get('短时品'), undefined);
+  assert.deepEqual(products(skipped), []);
+  f.settings.factory.disabledTypes = [];
+  assert(f.plan().demands.some(need => need.id === '颜料'));
+  f.settings.factory.disabledTypes = ['化工厂'];
+  chemical.factory.factoryQ.push({ productId: '颜料' });
+  assert.equal(new Map(f.plan().reserved).get('短时品'), 2, '已在产覆盖缺料时继续保留整单');
+});
+
+test('不可生产商人单的现货可供居民直接交单', () => {
+  const f = fixture();
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.survey.weekOrder = new Map([['短时品', 2], ['长时品', 1]]);
+  f.survey.orders = [{ index: 1, requirements: [{ id: '短时品', num: 2 }], rewardExp: 1000, rewardGold: 1000 }];
+  const result = planWorld(f.survey, { config: f.config, settings: f.settings, enabled: kind => kind === 'finishOrder' });
+  assert.equal(result.orderDecisions[0].status, 'ready');
+  assert.equal(result.actions.filter(step => step.kind === 'finishOrder').length, 1);
+  assert.deepEqual(result.actions[0].weeklyBorrowed, []);
+});
+
+test('多个贸易港货单仅跳过缺少未解锁材料的整单', () => {
+  const f = fixture();
+  f.settings.factory.keepStock = 0;
+  f.settings.factory.demandFirst = true;
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.stock.set('短时品', 0);
+  f.survey.cargoOrders = [
+    { requirements: [{ id: '长时品', num: 1 }, { id: '短时品', num: 5 }] },
+    { requirements: [{ id: '短时品', num: 1 }] },
+  ];
+  f.survey.cargoOrder = new Map([['长时品', 1], ['短时品', 6]]);
+  assert.deepEqual(products(f.plan()), ['短时品']);
+});
+
+test('多个货单共享不可再生产现货时只保留一单，跳过单释放其余材料', () => {
+  const f = fixture();
+  f.settings.factory.keepStock = 0;
+  f.settings.factory.demandFirst = true;
+  f.settings.factory.demandPriority = ['cargo'];
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.stock.set('长时品', 1);
+  f.survey.cargoOrders = [
+    { requirements: [{ id: '长时品', num: 1 }] },
+    { requirements: [{ id: '长时品', num: 1 }, { id: '短时品', num: 2 }] },
+  ];
+  f.survey.cargoOrder = new Map([['长时品', 2], ['短时品', 2]]);
+  const result = f.plan();
+  assert.deepEqual(result.reserved, [['长时品', 1]]);
+  assert.deepEqual(result.demands.map(need => [need.id, need.required]), [['长时品', 1]]);
+  assert.deepEqual(products(result), []);
+  assert.match(result.notes.join(' '), /贸易港.*已跳过排产.*长时品/);
+});
+
+test('商人与贸易港按配置优先级分配唯一现货，后续备料复用选单结果', () => {
+  for (const priority of [['merchant', 'cargo'], ['cargo', 'merchant']]) {
+    const f = fixture();
+    f.settings.factory.keepStock = 0;
+    f.settings.factory.demandFirst = true;
+    f.settings.factory.demandPriority = priority;
+    f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+    f.stock.set('长时品', 1);
+    f.survey.weekOrder = new Map([['长时品', 1], ['短时品', 2]]);
+    f.survey.cargoOrders = [{ requirements: [{ id: '长时品', num: 1 }, { id: '木材', num: 3 }] }];
+    f.survey.cargoOrder = new Map([['长时品', 1], ['木材', 3]]);
+    const result = f.plan();
+    const expected = priority[0] === 'merchant' ? [['长时品', 1], ['短时品', 2]] : [['长时品', 1], ['木材', 3]];
+    assert.deepEqual(result.reserved, expected);
+    assert.deepEqual(result.demands.map(need => [need.id, need.required]), expected);
+    assert.deepEqual(products(result), []);
+  }
+});
+
+test('旧无设置入口和空优先级仍释放重复占用现货的货单材料', () => {
+  const f = fixture();
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.stock.set('长时品', 1);
+  f.survey.weekOrder = new Map([['长时品', 1]]);
+  f.survey.cargoOrder = new Map([['长时品', 1], ['短时品', 2]]);
+  f.settings.factory.demandPriority = [];
+  for (const settings of [null, f.settings]) {
+    const result = planWorld(f.survey, { config: f.config, settings, enabled: () => false });
+    assert.deepEqual(result.reserved, [['长时品', 1]]);
+    assert.deepEqual(result.demands, []);
+  }
+});
+
+test('居民和额外需求的上游工厂未解锁时跳过整条备料', () => {
+  const f = fixture();
+  f.settings.factory.keepStock = 0;
+  f.settings.factory.demandFirst = true;
+  f.config.tables.BuildingProduceCfg.data[1].unlockLevel = 2;
+  f.config.tables.BuildingProduceCfg.data[0].costItem = [['长时品', 1]];
+  f.stock.set('短时品', 0);
+  f.survey.orders = [{ index: 1, requirements: [{ id: '短时品', num: 1 }], rewardExp: 1000, rewardGold: 1000 }];
+  const result = planWorld(f.survey, { config: f.config, settings: f.settings,
+    enabled: kind => kind === 'startProduce', extraDemand: [{ source: 'museum', requirements: [{ id: '短时品', num: 1 }] }] });
+  assert.equal(result.orderDecisions[0].status, 'productionSkipped');
+  assert.equal(result.demands.length, 0);
+  assert.deepEqual(products(result), []);
+});
 test('建筑备料遵守新增人口上限，已有施工占用人口空间', () => {
   for (const level of [0, 1]) {
     const f = fixture();

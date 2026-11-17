@@ -966,7 +966,7 @@ function orderState(order, data) {
   const box = el('div', 'order-state');
   const decision = order.decision;
   const labels = { ready: data.idleRunning ? '等待自动交付' : '等待开启挂机', disabled: '自动交付已关闭', refreshing: '订单刷新中',
-    unknown: '等待核对', missing: '材料不足', reserved: '材料已预留', reroll: '等待换单' };
+    unknown: '等待核对', missing: '材料不足', reserved: '材料已预留', reroll: '等待换单', productionSkipped: '已跳过排产' };
   const state = decision?.status ?? 'unknown';
   const label = !data.autoDeliverOrders && !['reroll','refreshing'].includes(state) ? labels.disabled : labels[state] || labels.unknown;
   box.appendChild(chip(state === 'ready' && data.idleRunning && data.autoDeliverOrders ? 'ready' : 'waiting', label));

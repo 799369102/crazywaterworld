@@ -749,11 +749,11 @@ export async function runLoop(client, protocol, {
       // 新版调度服务与这些入口共享同一个账号队列；只有显式开启旧开关时才执行，避免重复请求。
       await checkFactoryDue({ checkpoint: true });
       if (isEnabled && legacyEnabled('guildOrders')) {
-        try { await serviceGuildOrders(client, protocol, config, { player, enabled: () => legacyActive('guildOrders'), scheduler: rewards, report: serviceReport('dailies', '联盟订单') }); }
+        try { await serviceGuildOrders(client, protocol, config, { player, getSettings, enabled: () => legacyActive('guildOrders'), scheduler: rewards, report: serviceReport('dailies', '联盟订单') }); }
         catch (error) { phaseFailure('dailies', '联盟订单检查', error); }
       }
       if (isEnabled && legacyEnabled('guildAidHelp')) {
-        try { await serviceGuildAid(client, protocol, config, { player, enabled: () => legacyActive('guildAidHelp'), scheduler: rewards, report: serviceReport('dailies', '联盟互助') }); }
+        try { await serviceGuildAid(client, protocol, config, { player, getSettings, enabled: () => legacyActive('guildAidHelp'), scheduler: rewards, report: serviceReport('dailies', '联盟互助') }); }
         catch (error) { phaseFailure('dailies', '联盟互助检查', error); }
       }
       if (isEnabled && ['equipmentCollect', 'equipmentCraft'].some(legacyEnabled)) {
@@ -770,7 +770,7 @@ export async function runLoop(client, protocol, {
         catch (error) { phaseFailure('dailies', '世界宝藏检查', error); }
       }
       if (isEnabled && ['museumCollect', 'museumExplore'].some(legacyEnabled)) {
-        try { await serviceMuseum(client, protocol, config, { player, enabled: legacyActive, scheduler: rewards, report: serviceReport('dailies', '博物馆') }); }
+        try { await serviceMuseum(client, protocol, config, { player, getSettings, enabled: legacyActive, scheduler: rewards, report: serviceReport('dailies', '博物馆') }); }
         catch (error) { phaseFailure('dailies', '博物馆探险检查', error); }
       }
       if (isEnabled && ['petCollect', 'petBreed'].some(legacyEnabled)) {

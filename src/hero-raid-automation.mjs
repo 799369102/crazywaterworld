@@ -157,7 +157,7 @@ async function drawLottery(client, protocol, config, player, context, initial) {
   const before = initial.drawTimesInfo, actorIdentity = identity(player);
   if (!drawValid(before)) throw Error('超凡英雄累计抽奖进度未完整同步');
   if (!rows(config, 'HeroRaidLotteryCfg').some(row => row.raidId === initial.raidId)) throw Error('超凡英雄转盘配置缺失');
-  const stock = await readOrderReservedStock(client, protocol, config, { player, enabled: active, itemIds: [lotteryTicket] });
+  const stock = await readOrderReservedStock(client, protocol, config, { player, settings: getSettings(), enabled: active, itemIds: [lotteryTicket] });
   const latest = state.raids.get(initial.raidId);
   if (!active() || !getSettings().heroRaid.lottery || !latest || period(latest) !== period(initial) || JSON.stringify(latest.drawTimesInfo) !== JSON.stringify(before) || !open(latest, nowOf(client))) return;
   const available = (stock.available.get(lotteryTicket) ?? 0) - resourceReserve(getSettings(), lotteryTicket);
@@ -201,7 +201,7 @@ async function finishOrder(client, protocol, config, player, context, initial) {
   const actorIdentity = identity(player);
   const cost = requirements(initial, config, nowOf(client));
   if (!cost) return report({ key: 'heroRaid', label: '超凡英雄订单', skipped: true, reason: '当前订单未解锁或活动订单已全部完成' });
-  const stock = await readOrderReservedStock(client, protocol, config, { player, enabled: active, itemIds: cost.map(row => row.id) });
+  const stock = await readOrderReservedStock(client, protocol, config, { player, settings: getSettings(), enabled: active, itemIds: cost.map(row => row.id) });
   const latest = state.raids.get(initial.raidId);
   if (!active() || !getSettings().heroRaid.orders || !latest || orderStamp(latest) !== orderStamp(initial) || !open(latest, nowOf(client))) return;
   const missing = cost.filter(row => (stock.available.get(row.id) ?? 0) - resourceReserve(getSettings(), row.id) < row.num);

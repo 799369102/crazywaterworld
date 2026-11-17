@@ -1,6 +1,7 @@
 import { readWeekOrder } from './activities.mjs';
 import { toNumber } from './client.mjs';
 import { readMuseumMaterialState, settleMuseumMaterialState } from './museum-materials.mjs';
+import { createProductionEligibility } from './production-eligibility.mjs';
 
 const rows = (config, name) => config?.tables?.[name]?.data ?? [];
 const now = client => Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
@@ -272,7 +273,7 @@ function assets(value, name) {
 // A read-only snapshot for optional consumers of processed goods. Callers must
 // obtain a fresh snapshot immediately before their write and keep their own
 // per-account execution lock; these Maps do not reserve stock on the server.
-export async function readOrderReservedStock(client, protocol, config, { player, enabled = () => true, itemIds = null } = {}) {
+export async function readOrderReservedStock(client, protocol, config, { player, settings = {}, enabled = () => true, itemIds = null } = {}) {
   if (!player || !Number.isSafeInteger(player.level) || player.level < 1
     || !idText(player.playerId) || BigInt(idText(player.playerId)) <= 0n
     || !idText(player.worldId) || BigInt(idText(player.worldId)) <= 0n) throw new Error('无法确认材料预留的账号身份');
@@ -311,6 +312,7 @@ export async function readOrderReservedStock(client, protocol, config, { player,
   confirmOrderMaterialSpends(player, stock, itemIds);
   const reservations = { weekly: new Map(), cargo: new Map(), resident: new Map() };
   const add = (target, id, n) => target.set(id, amount((target.get(id) ?? 0) + n, '预留数量'));
+  const orders = [];
   const times = list(schedule?.activityTime, '周活动时间');
   const time = now(client);
   for (const activity of times) {
@@ -325,7 +327,7 @@ export async function readOrderReservedStock(client, protocol, config, { player,
     check();
     const week = await readWeekOrder(client, active, config);
     check();
-    if (!week.finished) reservations.weekly = week.needed;
+    if (!week.finished) orders.push({ source: 'merchant', target: 'weekly', needs: week.needed });
   }
   const residentSlots = new Set();
   for (const order of list(water?.workerOrder, '居民订单')) {
@@ -347,16 +349,38 @@ export async function readOrderReservedStock(client, protocol, config, { player,
       continue;
     }
     const needs = assets(requirements, '居民订单材料');
-    for (const [id, n] of needs) add(reservations.resident, id, n);
+    orders.push({ source: 'resident', target: 'resident', needs });
   }
   for (const ship of list(ships?.ship, '贸易港订单')) {
     if (![0, 1, 2].includes(ship?.status)) throw new Error('无法确认贸易港状态');
     if (ship.status !== 0) continue;
+    const needs = new Map();
     for (const slot of list(ship.orderItem, '贸易港装货清单')) {
       if (typeof slot?.filled !== 'boolean') throw new Error('无法确认贸易港装货状态');
       if (slot.filled) continue;
-      for (const [id, n] of assets([slot.asset], '贸易港材料')) add(reservations.cargo, id, n);
+      for (const [id, n] of assets([slot.asset], '贸易港材料')) add(needs, id, n);
     }
+    orders.push({ source: 'cargo', target: 'cargo', needs });
+  }
+  let eligible = null;
+  if (Array.isArray(water.building)) {
+    const incoming = new Map();
+    const crops = new Map(rows(config, 'FarmlandPlantCfg').map(row => [row.id, row]));
+    for (const building of water.building) {
+      for (const item of building.factory?.finishedProducts ?? []) add(incoming, item.id, amount(item.num, '待收成品数量'));
+      for (const job of building.factory?.factoryQ ?? []) add(incoming, job.productId, 1);
+      const crop = crops.get(building.farm?.productId);
+      if (crop) add(incoming, crop.id, amount(crop.produceNum, '在田作物产量', true));
+    }
+    eligible = createProductionEligibility(config, { buildings: water.building, settings, stock, incoming });
+  }
+  const priority = settings?.factory?.demandPriority ?? ['merchant', 'cargo', 'resident'];
+  const rank = source => priority.includes(source) ? priority.indexOf(source) : priority.length;
+  orders.sort((a, b) => rank(a.source) - rank(b.source));
+  for (const order of orders) {
+    const requirements = [...order.needs].map(([id, num]) => ({ id, num }));
+    if (eligible?.(requirements, { reserve: true }).length) continue;
+    for (const [id, n] of order.needs) add(reservations[order.target], id, n);
   }
   const reserved = new Map();
   for (const entries of Object.values(reservations)) {

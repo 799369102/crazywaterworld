@@ -161,6 +161,26 @@ await test('配置需求展示分层目标、优先级及上游继承，保留�
   assert.match(env.tables[2].rows[0][3], /木头 ×2/);
 });
 
+await test('跳过的需求展示原因，齐套范围只包含参与排产的需求', () => {
+  const env = fixture();
+  const now = 1767225600;
+  env.render({ statusLabel: '模型内最优', scope: 'feasible-demands', snapshotTime: now,
+    completionAt: now + 60, upperBound: 60,
+    orders: [
+      { id: 'merchant:1', label: '不差钱商人', skipped: true, completionAt: null,
+        requirements: [{ id: '电路板', num: 1 }], statusLabel: '已跳过排产', reason: '已跳过排产，电路板 · 工厂等级不足' },
+      { id: 'building:1', label: '建筑备料', skipped: false, completionAt: now + 60,
+        requirements: [{ id: '面包', num: 1 }], statusLabel: '联合方案已齐套' },
+    ],
+  });
+  const text = env.node('production-plan-result').textContent;
+  assert.match(text, /参与排产的需求预计齐套/);
+  assert.match(text, /需求齐套时间/);
+  assert.equal(env.tables[0].rows[0][3], '已跳过排产');
+  assert.match(env.tables[0].rows[0][4], /电路板.*工厂等级不足/);
+  assert.doesNotMatch(text, /全部需求预计齐套/);
+});
+
 await test('分层未验证状态保留未知上下界，并识别已排队和腾仓辅助任务', () => {
   const env = fixture();
   env.render({ statusLabel: '最优性尚待证明', objective: 'priority-makespan', snapshotTime: 1767225600,

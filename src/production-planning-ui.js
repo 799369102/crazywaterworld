@@ -35,6 +35,7 @@ function renderProductionPlan(data) {
   if (priorityPolicy) box.appendChild(el('p', 'dim', priorityPolicy));
   if (data.completionAt != null) {
     const completionLabel = data.scope === 'configured-demands' ? '全部需求预计齐套 '
+      : data.scope === 'feasible-demands' ? '参与排产的需求预计齐套 '
       : data.scope === 'feasible-orders' ? '可行订单预计齐套 ' : '全部订单预计齐套 ';
     box.appendChild(el('p', null, completionLabel
       + productionPlanTime(data.completionAt) + '，用时 ' + productionPlanDuration(data.upperBound)));
@@ -61,12 +62,12 @@ function renderProductionPlan(data) {
     box.appendChild(list);
   }
   if (data.orders?.length) {
-    box.appendChild(el('h3', null, data.scope === 'configured-demands' ? '需求齐套时间' : '订单齐套时间'));
+    box.appendChild(el('h3', null, ['configured-demands', 'feasible-demands'].includes(data.scope) ? '需求齐套时间' : '订单齐套时间'));
     box.appendChild(table(['目标', '优先级', '需求', '预计齐套', '计算状态'], data.orders.map(order => [
       order.label || order.id,
       order.priorityLabel || '同级',
       (order.requirements || []).map(item => (item.name || item.id) + ' ×' + item.num).join('、'),
-      order.completionAt == null ? '待确认' : productionPlanTime(order.completionAt),
+      order.skipped ? '已跳过排产' : order.completionAt == null ? '待确认' : productionPlanTime(order.completionAt),
       order.reason || order.statusLabel,
     ])));
   }

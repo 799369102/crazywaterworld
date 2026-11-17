@@ -9,7 +9,7 @@ export async function previewExtended(category, client, protocol, config, player
   const result = { checkedAt: new Date().toISOString(), usage: ledger.snapshot(), actions: [], counts: {}, viewOnly: true, notes: [] };
   const options = { player, getSettings: () => settings, enabled: () => client.connected !== false, ledger };
   if (category === 'alliance') {
-    const view = await readGuildOrderView(client, protocol, config, options);
+    const view = await readGuildOrderView(client, protocol, config, { ...options, settings });
     result.scopeLabel = '联盟募兵与互助'; result.notes.push(view.reason || '已读取联盟募兵状态，实际执行前再次检查城市、次数和库存');
     result.notes.push('用户每日募兵上限：' + (settings.alliance.recruitDailyLimit || '不额外限制') + '；互助模式：' + (settings.alliance.mutualMode === 'exchange' ? '刷贡献' : '自定义'));
   } else if (category === 'guildShip') {

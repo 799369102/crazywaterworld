@@ -247,6 +247,7 @@ async function testWeeklyPriority() {
   assert.deepEqual(writeIndices(await plan(client)), [], '周单全部材料到齐时保留给玩家手动交付');
 
   client.otherStock = []; client.stock = 50; client.weekly = 50;
+  client.buildings = [{ buildingId: '1食品厂', level: 1, factory: { factoryQ: [], finishedProducts: [] } }];
   client.cargo = 48;
   assert.deepEqual((await plan(client, true)).actions, [],
     '现货已全部算作周单预留，但其中有 48 件也是货轮所需，剩下 2 件交不了居民单');

@@ -125,7 +125,7 @@ function reconcile(session, stages) {
 // always sends MuseumRewardRequest. Only Reward returns reward + exploreStage
 // and applies the progress / releases heroes. It is NOT a per-star reward.
 export async function serviceMuseum(client, protocol, config, {
-  player, enabled = () => false, report = () => {}, scheduler,
+  player, getSettings = () => ({}), enabled = () => false, report = () => {}, scheduler,
 } = {}) {
   const entries = [];
   const active = Object.fromEntries(keys.map(key => [key, enabled(key) && (!scheduler || scheduler.due(key))]));
@@ -266,7 +266,7 @@ export async function serviceMuseum(client, protocol, config, {
         if (!allowed('museumExplore')) break;
         const cfg = rows(config, 'MuseumExpeditionStageCfg').filter(r => r.stageId === candidate.stageId);
         if (cfg.length !== 1 || !(num(cfg[0].exploreTime, '探险时长', 1) > 0)) throw new Error('缺少当前探险关卡配置');
-        const reserved = await readOrderReservedStock(client, protocol, config, { player, enabled: () => allowed('museumExplore'), itemIds: [...costsOf(candidate).keys()] });
+        const reserved = await readOrderReservedStock(client, protocol, config, { player, settings: getSettings(), enabled: () => allowed('museumExplore'), itemIds: [...costsOf(candidate).keys()] });
         stages = await info('museumExplore');
         const current = stages.find(s => s.stageId === candidate.stageId);
         if (!current || !idle(current) || current.progress !== candidate.progress || JSON.stringify(current.expedition) !== JSON.stringify(candidate.expedition)
@@ -311,7 +311,7 @@ export async function serviceMuseum(client, protocol, config, {
         reconcile(session, stages);
         // Reconcile the shared debit using the observed trip followed by a
         // complete inventory, including production received since dispatch.
-        await readOrderReservedStock(client, protocol, config, { player, enabled: () => allowed('museumExplore') });
+        await readOrderReservedStock(client, protocol, config, { player, settings: getSettings(), enabled: () => allowed('museumExplore') });
         emit({ key: 'museumExplore', label: `博物馆探险 · 已派遣 ${chosen.length} 名英雄前往「${cfg[0].name || current.stageId}」，一倍时长`, ok: true });
         break; // A single new team per call, even when more slots are open.
       }

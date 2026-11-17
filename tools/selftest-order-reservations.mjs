@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readOrderReservedStock } from '../src/order-reservations.mjs';
+import { readOrderReservedStock, beginOrderMaterialSpend, cancelOrderMaterialSpend } from '../src/order-reservations.mjs';
 
 const now = Math.floor(Date.now() / 1000);
 const config = { tables: { CargoUnlockCfg: { data: [{ index: 1, playerLevel: 9 }] } } };
@@ -112,6 +112,58 @@ export async function testOrderReservations() {
   const [one, two] = await Promise.all([first.read(), second.read()]);
   assert.equal(one.available.get('fish'), 2);
   assert.equal(two.available.get('fish'), 82, 'parallel accounts cannot share budgets');
+
+  const productionConfig = { tables: { ...config.tables, BuildingProduceCfg: { data: [
+    { itemId: 'cloth', buildType: 'loom', unlockLevel: 2, costItem: [['fibre', 1]] },
+  ] } } };
+  const production = fixture();
+  const loom = { buildingId: '1loom', level: 1, factory: { factoryQ: [], finishedProducts: [] } };
+  production.responses.OnWaterRequest.building = [loom];
+  const settings = { factory: { enabled: true, disabledTypes: [], demandPriority: ['merchant', 'cargo', 'resident'] } };
+  const readProduction = () => production.read({ settings }, protocol, productionConfig);
+  let unlocked = await readProduction();
+  assert.equal(unlocked.reservations.weekly.size, 0, 'a level-blocked merchant order releases every material');
+  assert.equal(unlocked.available.get('fish'), 12, 'other consumers can use stock released by the skipped order');
+  assert.equal(unlocked.available.get('wood'), 4);
+  assert.equal(unlocked.reservations.resident.get('fish'), 5);
+  assert.equal(unlocked.reservations.cargo.get('fish'), 3);
+
+  loom.level = 2;
+  assert.equal((await readProduction()).available.get('fish'), 2, 'unlocking the factory restores the current order reservation');
+  settings.factory.disabledTypes = ['loom'];
+  assert.equal((await readProduction()).available.get('fish'), 12, 'factory type exclusions release the whole order');
+  settings.factory.disabledTypes = ['1loom'];
+  assert.equal((await readProduction()).available.get('fish'), 12, 'individual factory exclusions use the same rule');
+  settings.factory.disabledTypes = [];
+  settings.factory.enabled = false;
+  assert.equal((await readProduction()).available.get('fish'), 12, 'the factory master switch releases unproducible demand');
+  loom.factory.factoryQ = Array.from({ length: 3 }, () => ({ productId: 'cloth' }));
+  assert.equal((await readProduction()).available.get('fish'), 2, 'already queued products cover demand even with production disabled');
+  loom.factory.factoryQ = [];
+  loom.factory.finishedProducts = [{ id: 'cloth', num: 3 }];
+  assert.equal((await readProduction()).available.get('fish'), 2, 'finished products cover demand before collection');
+  loom.factory.finishedProducts = [];
+  production.responses.AllItemRequest.items.push({ itemId: 'cloth', num: 3 });
+  assert.equal((await readProduction()).available.get('fish'), 2, 'existing finished stock needs no enabled factory');
+  production.responses.OnWaterRequest.workerOrder[0].requirements.push(asset('cloth', 1));
+  unlocked = await readProduction();
+  assert.equal(unlocked.reservations.resident.size, 0, 'a lower-priority order cannot reuse stock allocated to the merchant');
+  assert.equal(unlocked.available.get('fish'), 7, 'the skipped resident order also releases its unrelated materials');
+
+  production.responses.AllItemRequest.items.pop();
+  production.responses.OnWaterRequest.workerOrder[0].requirements.pop();
+  production.responses.CargoShipsRequest.ship[0].orderItem.push({ filled: false, asset: asset('cloth', 1) });
+  unlocked = await readProduction();
+  assert.equal(unlocked.reservations.cargo.size, 0, 'a blocked cargo order releases all remaining slots');
+  assert.equal(unlocked.available.get('fish'), 15);
+  delete production.responses.OnWaterRequest.building;
+  assert.equal((await readProduction()).available.get('fish'), 2, 'missing building evidence retains existing reservations');
+
+  const debit = beginOrderMaterialSpend(production.player, [{ id: 'fish', have: 20, need: 1 }], 'test pending spend');
+  try {
+    await assert.rejects(readProduction(), error => error.code === 'ORDER_MATERIAL_SPEND_PENDING',
+      'eligibility filtering cannot discard an unresolved actual debit');
+  } finally { cancelOrderMaterialSpend(debit); }
 }
 
 if (process.argv[1] && import.meta.filename === process.argv[1]) {

@@ -2,6 +2,7 @@ import { optimizeProductionSchedule } from './production-optimizer.mjs';
 import { createProductionTiming } from './production-timing.mjs';
 import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
 import { activityProductionEnabled } from './activity-automation.mjs';
+import { createProductionEligibility } from './production-eligibility.mjs';
 
 const rows = (config, key) => config?.tables?.[key]?.data ?? [];
 const sourceNames = { resident: '居民订单', merchant: '不差钱商人', cargo: '贸易港', guildRecruit: '联盟招募',
@@ -36,7 +37,6 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
     .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   const priorityLabels = new Map([...new Set(orderRows.map(order => order.priority))].map(priority => [priority,
     unique(orderRows.filter(order => order.priority === priority).map(order => sourceNames[order.source] || order.source)).join('、')]));
-  const needed = dependencyItems(orderRows, snapshot.recipes);
   const missingReads = snapshot.missingReads.map(read => read.request + ' · ' + read.reason);
   const notes = [];
   const timingByJob = new Map();
@@ -110,6 +110,20 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   }
   if (snapshot.autoFarming) missingReads.push('原生自动种植正在运行，后续农田占用尚未固定');
   if (!Number.isSafeInteger(snapshot.stockCap) || snapshot.stockCap <= 0) missingReads.push('加工品存量上限未确认');
+  const incomingStock = new Map();
+  for (const item of incoming) incomingStock.set(item.itemId, (incomingStock.get(item.itemId) ?? 0) + item.quantity);
+  const eligibility = createProductionEligibility(config, {
+    buildings: snapshot.buildings.map(building => ({ ...building,
+      ...snapshot.factories.find(factory => factory.id === building.id) })),
+    settings, stock: new Map(inventory.map(item => [item.itemId, item.quantity])), incoming: incomingStock,
+  });
+  const skippedOrders = new Map();
+  const activeOrderRows = orderRows.filter(order => {
+    const blocked = snapshot.complete ? eligibility(order.requirements, { reserve: true }) : [];
+    if (blocked.length) skippedOrders.set(order.id, blocked);
+    return blocked.length === 0;
+  });
+  const needed = dependencyItems(activeOrderRows, snapshot.recipes);
   const recipes = snapshot.recipes.map(recipe => {
     const farm = recipe.facilityType === '农田';
     const targets = farm
@@ -150,7 +164,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   for (const pending of pendingMaterials) {
     if ([...(pending.scope ?? [])].some(id => candidateMaterials.has(id))) missingReads.push('订单或候选配方材料存在待确认扣款 · ' + pending.label);
   }
-  const orders = orderRows.map(order => ({ id: order.id, source: order.source, priority: order.priority,
+  const orders = activeOrderRows.map(order => ({ id: order.id, source: order.source, priority: order.priority,
     requirements: order.requirements.map(item => ({ itemId: item.id, quantity: item.num })),
     consumeOnCompletion: order.kind === 'order' && (order.source === 'merchant'
       ? activityProductionEnabled(settings, 'merchant') && settings.schedule?.weekOrderSubmit === true : order.metadata?.enabled === true),
@@ -159,7 +173,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   return {
     input: { snapshotTime: now, complete: snapshot.complete && !missingReads.length, missingReads: unique(missingReads),
       inventory, orders, recipes, machines, incoming, stockCaps, stockCapMode: 'start-projected' },
-    orderRows, timingByJob, machineNames, fixedTimeline, notes, capacityEstimated, priorityLabels,
+    orderRows, activeOrderRows, skippedOrders, timingByJob, machineNames, fixedTimeline, notes, capacityEstimated, priorityLabels,
   };
 }
 
@@ -179,14 +193,17 @@ export function planProduction(snapshot, config, settings, options = {}) {
     priorityLabel: job.kind === 'existing' ? '已排队' : job.priority == null ? '腾仓辅助'
       : '第' + (job.priority + 1) + '级 · ' + (model.priorityLabels.get(job.priority) || '需求备料'),
     inheritedPriority: job.kind === 'production' && job.priority != null
-      && !model.orderRows.some(order => order.priority === job.priority && order.requirements.some(item => item.id === job.itemId)),
+      && !model.activeOrderRows.some(order => order.priority === job.priority && order.requirements.some(item => item.id === job.itemId)),
     inputs: job.inputs?.map(item => ({ ...item, name: name(item.itemId) })) }))
     .sort((a, b) => a.startAt - b.startAt || a.machineId.localeCompare(b.machineId));
   const estimated = model.capacityEstimated || [...model.timingByJob.values()].some(basis => basis.estimated)
     || timeline.some(job => job.estimated);
   const priorityObjective = result.objective === 'priority-makespan';
-  const scope = model.orderRows.some(order => order.kind === 'consumption') ? 'configured-demands' : 'all-orders';
-  const subject = scope === 'configured-demands' ? '全部需求' : '全部订单';
+  const hasConsumption = model.orderRows.some(order => order.kind === 'consumption');
+  const scope = model.skippedOrders.size ? (hasConsumption ? 'feasible-demands' : 'feasible-orders')
+    : hasConsumption ? 'configured-demands' : 'all-orders';
+  const subject = model.skippedOrders.size ? '参与排产的需求' : hasConsumption ? '全部需求' : '全部订单';
+  const allSkipped = model.orderRows.length > 0 && model.activeOrderRows.length === 0;
   const optimalLabel = priorityObjective ? '按配置优先级的模型内最优' : '模型内最优';
   const labels = { optimal: optimalLabel + (estimated ? '，含估算条件' : ''),
     'best-known': '已找到可行方案，最优性尚未证明',
@@ -200,18 +217,20 @@ export function planProduction(snapshot, config, settings, options = {}) {
   return {
     ...result, scope, status: refreshUncertain.size ? 'incomplete' : result.status,
     statusLabel: refreshUncertain.size ? '方案越过订单刷新边界，齐套时间待确认'
-      : !model.orderRows.length && result.status === 'optimal' ? '当前没有待齐套订单' : labels[result.status], estimated, config: snapshot.config,
+      : allSkipped ? '当前需求因工厂等级或禁用限制已全部跳过排产'
+        : !model.orderRows.length && result.status === 'optimal' ? '当前没有待齐套订单' : labels[result.status], estimated, config: snapshot.config,
     lowerBound: refreshUncertain.size ? null : result.lowerBound,
     upperBound: refreshUncertain.size ? null : result.upperBound,
     objectiveLowerBound: refreshUncertain.size ? null : result.objectiveLowerBound,
     objectiveUpperBound: refreshUncertain.size ? null : result.objectiveUpperBound,
-    completionAt: result.upperBound === null || refreshUncertain.size ? null : snapshot.serverNow + result.upperBound,
+    completionAt: result.upperBound === null || refreshUncertain.size || allSkipped ? null : snapshot.serverNow + result.upperBound,
     missingReads: model.input.missingReads,
     priorityPolicy: '在原料、设备和截止约束内，按用户配置逐级最小化齐套时间，同级优化共同工期，独立生产位并行安排',
     priorityBounds: (result.priorityBounds ?? []).map(bound => ({ ...bound,
       label: '第' + (bound.priority + 1) + '级 · ' + (model.priorityLabels.get(bound.priority) || '需求备料'),
       ...(refreshUncertain.size ? { lowerBound: null, upperBound: null } : {}) })),
     notes: unique([...model.notes, ...result.reasons,
+      ...(model.skippedOrders.size ? ['已跳过 ' + model.skippedOrders.size + ' 项工厂等级不足或禁用的需求，材料可用于其他排产，恢复生产条件后重新计算'] : []),
       ...(refreshUncertain.size ? ['生产顺序按本次固定需求计算，联盟订单刷新边界之后的实际需求需重新读取确认'] : []),
       ...(estimated ? ['候选方案比较含估算耗时或生产位条件，生产加成与容量变化后需重新读取计算'] : [])]),
     assumptions: [
@@ -229,8 +248,12 @@ export function planProduction(snapshot, config, settings, options = {}) {
       priorityLabel: '第' + (order.priority + 1) + '级',
       requirements: order.requirements.map(item => ({ ...item, name: name(item.id) })),
       completionAt: completions.has(order.id) && !refreshUncertain.has(order.id) ? snapshot.serverNow + completions.get(order.id).completedAt : null,
-      statusLabel: completions.has(order.id) && !refreshUncertain.has(order.id) ? '联合方案已齐套' : '待确认',
-      reason: refreshUncertain.has(order.id) ? '预计完成越过订单刷新边界，需求待重新确认'
+      skipped: model.skippedOrders.has(order.id),
+      statusLabel: model.skippedOrders.has(order.id) ? '已跳过排产'
+        : completions.has(order.id) && !refreshUncertain.has(order.id) ? '联合方案已齐套' : '待确认',
+      reason: model.skippedOrders.has(order.id)
+        ? '已跳过排产，' + unique(model.skippedOrders.get(order.id).map(block => name(block.itemId) + ' · ' + block.reason)).join('，')
+        : refreshUncertain.has(order.id) ? '预计完成越过订单刷新边界，需求待重新确认'
         : unique((blocks.get(order.id) ?? []).map(block => (block.itemId ? name(block.itemId) + ' · ' : '') + block.reason)).join('，'),
     })),
     timeline,

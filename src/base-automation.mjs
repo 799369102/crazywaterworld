@@ -424,7 +424,7 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
         choiceTicket=ledger.reserve({},{},{},{uniqueKey:choiceKey,details:{kind:'choiceEvent',eventUid:step.body.uid}});
       }
       if (step.kind === 'museumStart' && player) {
-        const reserved = await readOrderReservedStock(client, protocol, config, { player, enabled: () => enabled() && current === getSettings(), itemIds: (step.costs ?? []).map(row => row.id) });
+        const reserved = await readOrderReservedStock(client, protocol, config, { player, settings: current, enabled: () => enabled() && current === getSettings(), itemIds: (step.costs ?? []).map(row => row.id) });
         const costs = new Map();
         for (const cost of step.costs ?? []) {
           if (typeof cost.id !== 'string' || !Number.isSafeInteger(cost.num) || cost.num <= 0) throw new AutomationSkip('博物馆派遣消耗未确认');

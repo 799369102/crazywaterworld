@@ -25,7 +25,7 @@ export function planGuildAid(asks, available, me, now, limit = maxAidHelpsPerRou
   return picked;
 }
 
-export async function serviceGuildAid(client, protocol, config, { player, enabled = () => false, report = () => {}, scheduler } = {}) {
+export async function serviceGuildAid(client, protocol, config, { player, getSettings = () => ({}), enabled = () => false, report = () => {}, scheduler } = {}) {
   const finish = entry => { const result = { key, label, ...entry }; report(result); return result; };
   const skip = reason => finish({ skipped: true, reason });
   const later = seconds => scheduler?.defer(key, scheduler.now() + seconds);
@@ -47,7 +47,7 @@ export async function serviceGuildAid(client, protocol, config, { player, enable
     attempts.set(account,saved);
     if (!list.askItems.length) { later(300); return skip('当前没有成员求助'); }
     const eligible=list.askItems.filter(row=>!saved.has(uidText(row.reqId)));
-    const { stock, available } = await readOrderReservedStock(client, protocol, config, { player, enabled:active,itemIds:[...new Set(eligible.map(row=>row.reqItemId))] });
+    const { stock, available } = await readOrderReservedStock(client, protocol, config, { player, settings:getSettings(), enabled:active,itemIds:[...new Set(eligible.map(row=>row.reqItemId))] });
     if (!active()) return skip('账号已暂停或连接已更换');
     const now = Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
     const picked = planGuildAid(eligible, available, uidText(player.playerId), now);

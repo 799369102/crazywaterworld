@@ -77,7 +77,7 @@ async function request(client, protocol, name, enabled) {
   return client.request(name, {}, response);
 }
 
-export async function readGuildOrderView(client, protocol, config, { player, enabled = () => true } = {}) {
+export async function readGuildOrderView(client, protocol, config, { player, settings = {}, enabled = () => true } = {}) {
   const view = { state: 'blocked', reason: '', canFinish: false, requirements: [], cities: [], cityId: null,
     doneToday: null, maxNum: null, season: null, nextRefreshTime: null };
   if (!enabled()) return { ...view, reason: '已暂停' };
@@ -115,7 +115,7 @@ export async function readGuildOrderView(client, protocol, config, { player, ena
   if (maxNum !== -1 && doneToday >= maxNum) return { ...view, reason: '今日联盟订单已交 ' + doneToday + ' 单，达到本赛季上限 ' + maxNum };
   if (!requirements.size) return { ...view, reason: '当前没有联盟订单' };
   if (!city) return { ...view, reason: '联盟当前没有可提交订单的城市' };
-  const { stock, reservations } = await readOrderReservedStock(client, protocol, config, { player, enabled, itemIds:[...requirements.keys()] });
+  const { stock, reservations } = await readOrderReservedStock(client, protocol, config, { player, settings, enabled, itemIds:[...requirements.keys()] });
   if (stamp !== identity(player) || !enabled()) throw new Error('账号或联盟状态已变化');
   view.requirements = [...requirements].map(([id, need]) => {
     const held = Object.fromEntries(Object.entries(reservations).map(([name, values]) => [name, values.get(id) ?? 0]));
@@ -130,7 +130,7 @@ export async function readGuildOrderView(client, protocol, config, { player, ena
   return { ...view, state: 'ready', canFinish: true };
 }
 
-export async function serviceGuildOrders(client, protocol, config, { player, enabled = () => false, report = () => {}, scheduler, ledger, dailyLimit = 0 } = {}) {
+export async function serviceGuildOrders(client, protocol, config, { player, getSettings = () => ({}), enabled = () => false, report = () => {}, scheduler, ledger, dailyLimit = 0 } = {}) {
   const finish = entry => { const result = { key, label, ...entry }; report(result); return result; };
   const skip = reason => finish({ skipped: true, reason });
   const delay = seconds => scheduler?.defer(key, scheduler.now() + seconds);
@@ -141,7 +141,7 @@ export async function serviceGuildOrders(client, protocol, config, { player, ena
   busy.add(client);
   try {
     await refreshOrderMaterialSpends(client,player,{enabled});
-    const initial = await readGuildOrderView(client, protocol, config, { player, enabled });
+    const initial = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled });
     if (ledger && initial.accountKey) {
       for (const [savedKey, record] of Object.entries(ledger.keyRecords())) {
         const data = record.details;
@@ -167,7 +167,7 @@ export async function serviceGuildOrders(client, protocol, config, { player, ena
       return skip('上次联盟订单结果尚未确认，暂不重复提交；请在游戏中核对');
     }
     // Re-read all competing requirements and inventory, not only the order.
-    const current = await readGuildOrderView(client, protocol, config, { player, enabled });
+    const current = await readGuildOrderView(client, protocol, config, { player, settings: getSettings(), enabled });
     if (!current.canFinish) { delay(180); return skip(current.reason); }
     if (initial.identity !== current.identity || initial.orderKey !== current.orderKey || initial.doneToday !== current.doneToday
       || initial.cityId !== current.cityId || initial.day !== current.day) return skip('订单、次数或联盟城市已变化，下一轮重新核对');
