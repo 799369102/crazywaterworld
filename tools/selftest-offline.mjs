@@ -41,6 +41,7 @@ const cases = [
   ['selftest-trace-log.mjs'],
   ['selftest-console-log.mjs'],
   ['selftest-account-status-ui.mjs'],
+  ['selftest-account-picker-ui.mjs'],
   ['selftest-account-cards-ui.mjs'],
   ['selftest-account-capture-ui.mjs'],
   ['selftest-account-add-ui.mjs'],

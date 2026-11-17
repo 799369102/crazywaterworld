@@ -18,6 +18,7 @@ import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
 const alipayLoginScript = readFileSync(new URL('./alipay-login-ui.js', import.meta.url), 'utf8');
 const accountAddScript = readFileSync(new URL('./account-add-ui.js', import.meta.url), 'utf8');
+const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', import.meta.url), 'utf8');
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
 const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
 const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
@@ -491,6 +492,7 @@ function setBusy(text) {
     if (option.text !== label) option.text = label;
   }
   $('account').title = option?.text || '选择账号并查看状态';
+  if (typeof renderAccountPicker === 'function') renderAccountPicker(text);
 }
 
 function paintConnection() {
@@ -559,7 +561,7 @@ function renderAccountSelect() {
   $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
-  $('disconnect').disabled = !snapshot.connected && !snapshot.reconnecting;
+  $('connect').hidden = !current || snapshot.connected || snapshot.paused || snapshot.reconnecting || snapshot.loginBlocked;
   $('account-info-refresh').disabled = !current || snapshot.paused || snapshot.reconnecting || connectingAccounts.has(current);
   $('account-info-refresh').textContent = snapshot.connected ? '刷新资料' : '连接并读取';
   if (!$('tab-account').classList.contains('hidden')) renderAccounts();
@@ -624,12 +626,6 @@ $('account').onchange = async () => {
   selectLoadedAccount(next);
   await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id: next }) });
 };
-$('account').addEventListener('focus', refreshAccountStatuses);
-$('account').addEventListener('pointerdown', refreshAccountStatuses);
-$('account').addEventListener('keydown', event => {
-  if (['ArrowDown', 'ArrowUp', 'Enter', ' ', 'F4'].includes(event.key)) void refreshAccountStatuses();
-});
-
 $('account-pause').onclick = async () => {
   const account = current;
   accountStatusRevision++;
@@ -674,19 +670,6 @@ $('connect').onclick = async () => {
     void refreshAccountStatuses();
   }
 };
-$('disconnect').onclick = async () => {
-  const account = current;
-  accountStatusRevision++;
-  disconnected.add(account);
-  refreshProgression();
-  refreshManualWorld();
-  await call('/api/disconnect', { method: 'POST' });
-  const status = accounts.find(row => row.id === account)?.status ?? {};
-  setAccountStatus(account, { ...status, connected: false, state: 'STOPPED', reconnecting: false, syncingProduction: false });
-  if (account !== current) return;
-  renderAccountSelect();
-};
-
 // ---- 总览 ------------------------------------------------------------------
 function renderWho(view) {
   const box = clear($('who'));
@@ -2001,6 +1984,9 @@ ${alipayLoginScript}
 
 // ---- 添加账号引导 ----------------------------------------------------------
 ${accountAddScript}
+
+// ---- 页头账号选择 ----------------------------------------------------------
+${accountPickerScript}
 
 // ---- 启动 ------------------------------------------------------------------
 ${progressionScript}

@@ -1,6 +1,6 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, CircleUserRound, LayoutDashboard, LogIn, MoreHorizontal, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
+import { Boxes, Building2, Check, ChevronDown, CircleUserRound, LayoutDashboard, LogIn, MoreHorizontal, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "./card"
@@ -24,9 +24,17 @@ export function chrome() {
       <div className="mast"><span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span></div>
       <div className="connection">
         <span id="busy" className="sr-only" role="status" aria-live="polite" aria-atomic="true">未连接</span>
-        <label className="account-label" htmlFor="account">当前账号</label>
-        <NativeSelect id="account" title="选择账号并查看状态" />
-        <Button id="connect" size="sm">连接</Button><Button id="disconnect" size="sm" variant="outline">断开</Button>
+        <label className="account-label" htmlFor="account-picker-trigger">当前账号</label>
+        <div id="account-picker" className="account-picker">
+          <select id="account" hidden aria-hidden="true" tabIndex={-1} />
+          <Button id="account-picker-trigger" type="button" variant="outline" className="w-full min-w-0 justify-start font-normal" aria-haspopup="listbox" aria-controls="account-picker-list" aria-expanded="false" title="选择账号并查看状态">
+            <span id="account-picker-title" className="min-w-0 flex-1 truncate text-left">选择账号</span>
+            <Badge id="account-picker-status" className="chip rounded-md" variant="outline">未连接</Badge>
+            <ChevronDown className="size-4 shrink-0 opacity-50" aria-hidden="true" />
+          </Button>
+          <div id="account-picker-list" role="listbox" aria-label="选择账号" hidden />
+        </div>
+        <Button id="connect" size="sm">连接</Button>
         <Button id="account-pause" size="sm" variant="outline" title="暂停后断开游戏连接，方便自行上号">暂停托管</Button>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>
         <span id="hint" className="warn" />
@@ -90,6 +98,13 @@ export function templates() {
     <template id="ui-number"><Input type="number" /></template>
     <template id="ui-delete"><Button variant="destructive" size="sm" /></template>
     <template id="ui-badge"><Badge variant="outline" /></template>
+    <template id="ui-account-option">
+      <Button type="button" variant="ghost" role="option" tabIndex={-1} aria-selected="false" className="account-picker-option grid h-auto pointer-coarse:h-auto w-full min-w-0 items-start justify-start gap-x-3 gap-y-1 rounded-sm px-3 py-2.5 whitespace-normal text-left font-normal">
+        <span data-picker-field="title" />
+        <Badge data-picker-field="status" className="chip rounded-md max-w-full justify-start whitespace-normal text-left" variant="outline" />
+        <span data-picker-field="check" aria-hidden="true" hidden><Check className="size-4" /></span>
+      </Button>
+    </template>
     <template id="ui-account-card">
       <Card className="account-card">
         <CardHeader>

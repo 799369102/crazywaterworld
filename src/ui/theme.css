@@ -202,6 +202,8 @@
   .config-multi[open] > summary { @apply rounded-b-none border-b; }
   .config-multi-panel { @apply rounded-md border bg-popover p-1 text-popover-foreground shadow-md; }
   .config-option { @apply flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm font-normal hover:bg-accent hover:text-accent-foreground; }
+  #account-picker-list { @apply rounded-md border bg-popover p-1 text-popover-foreground shadow-md; }
+  .account-picker-option[aria-selected=true] { @apply bg-accent text-accent-foreground; }
 
   /* Switch：运行时配置项和 Switch 组件尺寸一致 */
   .config-switch {
@@ -325,8 +327,6 @@
 }
 
 /* 只放必须盖过工具类的规则。 */
-header .connection #connect:disabled:has(+ #disconnect:enabled),
-header .connection #disconnect:disabled { display: none; }
 #world-map-pan { display: none; }
 @media (any-pointer: coarse) { #world-map-pan { display: inline-flex; } }
 @media (prefers-reduced-motion: reduce) {

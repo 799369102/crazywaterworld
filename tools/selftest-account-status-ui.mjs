@@ -180,6 +180,10 @@ await test('每项显示自己的状态，空列表和旧账号都可渲染', as
   await empty.api.refreshAccountStatuses();
   assert.equal(empty.calls.length, 0);
   assert.match(PAGE, /id="busy"[^>]*class="sr-only"[^>]*role="status"/);
+  assert.doesNotMatch(PAGE, /id="disconnect"/, '页面移除独立断开按钮');
+  assert.doesNotMatch(pageScript, /\$\('disconnect'\)/, '页面逻辑没有引用已移除的按钮');
+  assert.match(PAGE, /id="account-pause"/, '页面保留暂停托管入口');
+  assert.match(PAGE, /id="logs-open"/, '页面保留日志入口');
 });
 
 await test('状态变化原位更新选项，当前选择和同值播报保持稳定', async () => {
@@ -217,26 +221,23 @@ await test('全账号刷新只合并已有状态，保留账号选择和名称�
   assert.deepEqual(env.effects, [], '纯状态读取不切换账号或重载详情');
 });
 
-await test('展开下拉及定时刷新共享进行中的请求', async () => {
+await test('直接刷新与定时刷新共享在途请求，完成后可以重新读取', async () => {
   const env = fixture();
   const gate = deferred();
   env.respond = () => gate.promise;
   const first = env.api.refreshAccountStatuses();
   const second = env.api.refreshAccountStatuses();
   assert.equal(first, second);
-  env.node('account').fire('focus');
-  env.node('account').fire('pointerdown');
-  for (const key of ['ArrowDown', 'ArrowUp', 'Enter', ' ', 'F4']) env.node('account').fire('keydown', { key });
   for (const timer of env.intervals.filter(timer => timer.delay === 3000)) timer.callback();
   assert.equal(env.calls.length, 1);
   gate.resolve({ accounts: env.serverAccounts });
   await first;
   env.respond = async () => ({ accounts: env.serverAccounts });
-  env.node('account').fire('keydown', { key: 'Tab' });
-  assert.equal(env.calls.length, 1);
-  env.node('account').fire('pointerdown');
-  await settle();
+  await env.api.refreshAccountStatuses();
   assert.equal(env.calls.length, 2);
+  for (const timer of env.intervals.filter(timer => timer.delay === 3000)) timer.callback();
+  await settle();
+  assert.equal(env.calls.length, 3);
 });
 
 await test('隐藏页面暂停状态轮询，恢复可见自动刷新后台账号', async () => {
@@ -417,25 +418,28 @@ await test('连接失败清除进行中状态并允许下一次连接', async ()
   assert.equal(env.calls.filter(call => call.route === '/api/connect').length, 2);
 });
 
-await test('断开和暂停在切号后仍更新原账号，不影响新账号状态', async () => {
-  for (const action of ['disconnect', 'account-pause']) {
+await test('暂停和恢复在切号后仍更新原账号，不影响新账号状态', async () => {
+  for (const paused of [true, false]) {
     const env = fixture([
-      { id: 'account-a', title: '甲', status: { connected: true } },
+      { id: 'account-a', title: '甲', status: { connected: paused, paused: !paused } },
       { id: 'account-b', title: '乙', status: { connected: true } },
     ]);
     const gate = deferred();
     env.respond = () => gate.promise;
-    const request = env.node(action).onclick();
+    const request = env.node('account-pause').onclick();
     env.select('account-b');
-    gate.resolve(action === 'disconnect' ? {} : { paused: true, connected: false });
+    gate.resolve({ paused, connected: false });
     await request;
+    assert.equal(env.calls[0].route, '/api/accounts/pause');
+    assert.deepEqual(env.calls[0].payload, { paused });
     assert.equal(env.calls[0].owner, 'account-a');
     assert.equal(env.row('account-a').status.connected, false);
+    assert.equal(env.row('account-a').status.paused, paused);
     assert.equal(env.row('account-b').status.connected, true);
     assert.equal(env.api.snapshot().connected, true);
     assert.equal(env.api.current(), 'account-b');
     assert.deepEqual(env.effects, []);
-    assert.match(env.option('account-a').text, action === 'disconnect' ? /未连接/ : /已暂停/);
+    assert.match(env.option('account-a').text, paused ? /已暂停/ : /未连接/);
   }
 });
 
