@@ -2,8 +2,9 @@
 @import "tailwindcss/preflight.css" layer(base);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "./*.tsx";
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
-/* shadcn/ui 默认 neutral 主题。换主色只需改 :root 里的 --primary 和 --primary-foreground。 */
+/* neutral 主题；运行时在根节点设置 data-theme，组件与原生控件共用配色。 */
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -34,6 +35,7 @@
 }
 
 :root {
+  color-scheme: light;
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -53,7 +55,43 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  --success: #047857;
+  --success-muted: #ecfdf5;
+  --success-border: #a7f3d0;
+  --warning: #b45309;
+  --warning-muted: #fffbeb;
+  --error: #b91c1c;
+  --error-muted: #fef2f2;
   --header-h: 97px;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.32 0 0);
+  --input: oklch(0.371 0 0);
+  --ring: oklch(0.556 0 0);
+  --success: #6ee7b7;
+  --success-muted: #10352b;
+  --success-border: #235a47;
+  --warning: #fcd34d;
+  --warning-muted: #382a12;
+  --error: #fca5a5;
+  --error-muted: #451a1a;
 }
 
 @layer base {
@@ -108,6 +146,9 @@
     background-position: center;
     background-repeat: no-repeat;
     background-size: 0.75rem;
+  }
+  html[data-theme="dark"] input[type=checkbox]:checked {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23171717' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
   }
 
   /* Radio Group */
@@ -213,6 +254,8 @@
   .config-switch-track { display: contents; }
   .config-switch-thumb { @apply pointer-events-none block size-4 rounded-full bg-background ring-0 transition-transform; }
   .config-switch[data-state=checked] .config-switch-thumb { @apply translate-x-[calc(100%-2px)]; }
+  html[data-theme="dark"] .config-switch-thumb { @apply bg-foreground; }
+  html[data-theme="dark"] .config-switch[data-state=checked] .config-switch-thumb { @apply bg-primary-foreground; }
 
   /* Table */
   table { @apply w-full caption-bottom text-sm; }
@@ -250,7 +293,7 @@
   /* Alert */
   .config-message { @apply relative w-full rounded-lg border bg-card px-4 py-3 text-sm text-card-foreground; }
   .config-message[data-kind=error] { @apply text-destructive; }
-  .config-message[data-kind=success] { @apply border-emerald-200 text-emerald-700; }
+  .config-message[data-kind=success] { border-color: var(--success-border); color: var(--success); }
 
   /* 提示图标：lucide circle-help */
   .help-tip { @apply relative inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50; }
@@ -301,15 +344,18 @@
 
 /* 组件变体：写在 utilities 层才能盖过模板克隆元素上的工具类。 */
 @layer utilities {
-  .chip.ready, .chip.done { @apply border-transparent bg-emerald-50 text-emerald-700; }
-  .chip.paid, .chip.partial, .chip.waiting { @apply border-transparent bg-amber-50 text-amber-700; }
-  .chip.error { @apply border-transparent bg-red-50 text-red-700; }
+  .chip.ready, .chip.done { @apply border-transparent; background: var(--success-muted); color: var(--success); }
+  .chip.paid, .chip.partial, .chip.waiting { @apply border-transparent; background: var(--warning-muted); color: var(--warning); }
+  .chip.error { @apply border-transparent; background: var(--error-muted); color: var(--error); }
   .chip.blocked, .chip.unknown { @apply border-transparent bg-secondary text-muted-foreground; }
 
   .activity-badge { @apply inline-flex w-fit shrink-0 items-center justify-center rounded-full border border-transparent bg-secondary px-2 py-0.5 text-xs font-medium whitespace-nowrap text-secondary-foreground; }
-  .activity-badge.limited { @apply bg-amber-50 text-amber-700; }
+  .activity-badge.limited { background: var(--warning-muted); color: var(--warning); }
   .activity-badge.permanent { @apply border-border bg-transparent text-foreground; }
   .activity-ready { @apply inline-flex w-fit shrink-0 items-center justify-center rounded-full bg-primary px-2 py-0.5 text-xs font-medium whitespace-nowrap text-primary-foreground; }
+
+  html[data-theme="dark"] [data-variant=destructive] { @apply bg-red-700 text-white; }
+  html[data-theme="dark"] :is(button, a)[data-variant=destructive]:hover { @apply bg-red-800; }
 
 }
 

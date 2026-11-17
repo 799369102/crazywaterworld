@@ -20,6 +20,7 @@ const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', impor
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
 const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
 const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
+const themeScript = readFileSync(new URL('./theme-ui.js', import.meta.url), 'utf8');
 
 export const PAGE = `<!doctype html>
 <html lang="zh-CN">
@@ -30,6 +31,7 @@ export const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
+<script id="theme-init">${themeScript}</script>
 <style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} } ${componentCss}</style>
 </head>
 <body>
