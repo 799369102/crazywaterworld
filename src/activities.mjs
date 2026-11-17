@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { usageLimits, resourceReserve, exactAutomationId } from './automation-policy.mjs';
+import { usageLimits, resourceReserve, exactAutomationId, AutomationSkip } from './automation-policy.mjs';
 import { displayMaterial } from './config.mjs';
 import { normalize } from './worlds.mjs';
 import { claimCollection, newbieView } from './collections.mjs';
@@ -8,10 +8,13 @@ import { campaignReportState, claimOpenRanks, openRankState, openRanks } from '.
 import { claimReportRewards } from './missing-rewards.mjs';
 import { beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialSpends, confirmOrderMaterialOperation, readOrderMaterialState, settleOrderMaterialState } from './order-reservations.mjs';
 import { riverActivity, edictPassActivity } from './seasonal-activities.mjs';
+import { activityTimestamp, catalogEntry, pushedActivityEntries } from './activity-catalog.mjs';
+import { festivalTaskWindow } from './activity-availability.mjs';
+import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
 import { claimFestivalRewards, claimWeeklyRewards, claimVipDaily, festivalRewardKeys, weeklyRewardKeys, festivalRewardState, snowballState,
   compassState, weekChargeState, weekHeroStarState, weekFreePackState, weekOrderState, vipDailyState, syncFestivalDay } from './free-rewards.mjs';
 
-const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '周订单', 6: '芯片活动', 7: '周翻牌' };
+const weekNames = { 1: '勇士战令', 2: '累计充值', 3: '英雄升星', 4: '幸运转盘', 5: '不差钱商人', 6: '芯片活动', 7: '周翻牌' };
 const serverNow = client => (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
 const open = (activity, now) => activity.startTime <= now && now < activity.endTime;
 const linkageNames = { 28: '龙王罗盘', 29: '酆都法旨', 30: '驱邪除祟' };
@@ -26,10 +29,11 @@ const festivalEntries = {
 const weekTasks = { 1: ['weekPass'], 2: ['weekCharge'], 3: ['weekHeroStar'], 4: ['weekGift', 'weekTimes', 'weekLotterySpin'],
   5: ['weekOrderFinal', 'weekOrderSubmit'], 6: ['weekChipFree'], 7: ['weekUniqueFree'] };
 const weeklyId = row => `weekly:${row.type}:${row.period ?? 0}:${row.startTime}`;
-const linkageId = (row, sub) => `linkage:${toNumber(row.activityId)}:${sub.subActivityType}`;
+const linkageId = (row, sub) => `linkage:${exactAutomationId(row.activityId)}:${sub.subActivityType}`;
 
 function playable(row, sub, now) {
-  return open(row, now) && (!sub.openTime || sub.openTime <= now) && (!sub.closeTime || now < sub.closeTime);
+  const window = festivalTaskWindow(row, sub);
+  return window && open(window, now);
 }
 
 const rejectedEdicts = new WeakMap();
@@ -74,7 +78,10 @@ export async function runLinkage(client, config, enabled, report, selectedId = n
       const expel = sub.subActivityType === 30;
       const key = linkageTasks[sub.subActivityType];
       if (!key) continue;
-      const allowed = () => enabled(key) && playable(row, sub, serverNow(client));
+      const allowed = () => enabled(key) && playable(row, sub, serverNow(client))
+        && (client.festivals ?? []).some(current => exactAutomationId(current.activityId) === exactAutomationId(row.activityId)
+          && current.startTime === row.startTime && current.subActivity?.some(candidate => candidate.subActivityType === sub.subActivityType
+            && playable(current, candidate, serverNow(client))));
       if (!allowed()) continue;
       const label = linkageNames[sub.subActivityType];
       const request = (name, fields = {}) => client.request(name + 'Request', { activityId: row.activityId, ...fields }, name + 'Response');
@@ -116,8 +123,10 @@ export async function runLinkage(client, config, enabled, report, selectedId = n
 export async function weekSchedule(client) {
   const reply = await client.request('WeekInfoRequest', {}, 'WeekInfoResponse');
   // Scalar defaults live on protobufjs prototypes and are lost by normalize().
-  return (reply.activityTime ?? []).map(row => ({ ...normalize(row), type: row.type,
+  const schedule = (reply.activityTime ?? []).map(row => ({ ...normalize(row), type: row.type,
     startTime: row.startTime, endTime: row.endTime, period: row.period }));
+  client.weekActivities = schedule;
+  return schedule;
 }
 
 async function weekly(client) {
@@ -127,7 +136,7 @@ async function weekly(client) {
 export async function readWeekOrder(client, week, config) {
   const active = week ?? await weekly(client);
   const needed = new Map();
-  if (active.filter(row => row.type === 5).length > 1) throw new Error('周订单活动期次不唯一，请刷新后再试');
+  if (active.filter(row => row.type === 5).length > 1) throw new Error('商人订单活动期次不唯一，请刷新后再试');
   const current = active.find(row => row.type === 5);
   if (!current) return { needed, finished: false };
   const order = normalize(await client.request('WeekOrderInfoRequest', {}, 'WeekOrderInfoResponse'));
@@ -136,9 +145,9 @@ export async function readWeekOrder(client, week, config) {
   if (prizes?.length && prizes.every(row => order?.gotRwdId?.includes(row.rwdId))) {
     return { needed, finished: true, finalReady: true };
   }
-  if (!order?.order?.length) throw new Error('未能确认当前周订单的材料清单');
+  if (!order?.order?.length) throw new Error('未能确认当前商人订单的材料清单');
   for (const item of order.order) {
-    if (!item?.id || !Number.isSafeInteger(item.num) || item.num <= 0) throw new Error('周订单材料或数量不完整');
+    if (!item?.id || !Number.isSafeInteger(item.num) || item.num <= 0) throw new Error('商人订单材料或数量不完整');
     needed.set(item.id, (needed.get(item.id) ?? 0) + item.num);
   }
   const identity = [current.period, current.startTime, current.endTime, order.gotRwdId, [...needed]];
@@ -167,48 +176,66 @@ function lotteryProgress(config, period, info) {
   return { times, claimed, required: next?.reqTimes, ready: Boolean(next && times >= next.reqTimes) };
 }
 
-export function activityEntries(client, week = [], festivals = client.festivals ?? []) {
+function festivalDisplayWindow(row, sub = null) {
+  return { ...(festivalTaskWindow(row, sub) ?? { startTime: null, endTime: null }),
+    rewardEndTime: activityTimestamp(row.endTime) };
+}
+
+export function activityEntries(client, week = [], festivals = client.festivals ?? [], { includeInactive = false } = {}) {
   const time = serverNow(client);
-  const activities = week.filter(row => open(row, time)).map(row => ({
+  const activities = week.filter(row => includeInactive || open(row, time)).map(row => ({
     id: weeklyId(row), kind: 'weekly', weekType: row.type, taskKeys: weekTasks[row.type] ?? [],
-    name: weekNames[row.type] ?? '周活动 ' + row.type, endTime: row.endTime,
+    name: weekNames[row.type] ?? '周活动 ' + row.type, startTime: row.startTime, endTime: row.endTime,
   }));
   for (const row of festivals) {
     const before = activities.length;
     const linkage = (row.subActivity ?? []).filter(sub => linkageNames[sub.subActivityType]);
     if (linkage.length) {
       for (const sub of linkage) {
-        if (playable(row, sub, time)) activities.push({
-          id: linkageId(row, sub), kind: 'limited', group: '捞尸人联动',
+        if (includeInactive || playable(row, sub, time)) activities.push({
+          id: linkageId(row, sub), kind: 'limited', group: '酆都诡事',
           taskKeys: sub.subActivityType === 28 ? ['compassReward', 'compassSpin'] : sub.subActivityType === 29 ? ['edict', 'edictPass'] : [linkageTasks[sub.subActivityType]],
           name: linkageNames[sub.subActivityType], taskKey: linkageTasks[sub.subActivityType],
-          endTime: Math.min(sub.closeTime || row.endTime, row.endTime),
+          ...festivalDisplayWindow(row, sub),
         });
       }
     }
     const subs = row.subActivity ?? [];
     for (const sub of subs) {
       const entry = festivalEntries[sub.subActivityType];
-      if (!entry || !playable(row, sub, time)) continue;
+      if (!entry || !includeInactive && !playable(row, sub, time)) continue;
       if (!linkage.length && row.type !== '捞尸人联动活动' && sub.subActivityType !== 27) continue;
-      if (entry.unless && subs.some(other => other.subActivityType === entry.unless && playable(row, other, time))) continue;
-      activities.push({ id: linkageId(row, sub), kind: 'limited', group: '捞尸人联动', name: entry.name,
+      if (entry.unless && subs.some(other => other.subActivityType === entry.unless && (includeInactive
+        ? JSON.stringify(festivalDisplayWindow(row, other)) === JSON.stringify(festivalDisplayWindow(row, sub))
+        : playable(row, other, time)))) continue;
+      activities.push({ id: linkageId(row, sub), kind: 'limited', group: '酆都诡事', name: entry.name,
         taskKeys: entry.taskKeys, ...(entry.taskKey ? { taskKey: entry.taskKey } : {}),
-        endTime: Math.min(sub.closeTime || row.endTime, row.endTime) });
+        ...festivalDisplayWindow(row, sub) });
     }
-    if (open(row, time) && activities.length === before) activities.push({
-      id: 'festival:' + row.activityId, kind: 'limited', taskKeys: [],
+    if ((includeInactive || open(row, time)) && activities.length === before) activities.push({
+      id: 'festival:' + exactAutomationId(row.activityId), kind: 'limited', taskKeys: [],
       name: linkage.length || row.type === '捞尸人联动活动' ? '酆都诡事（捞尸人联动）'
         : row.type || ({ 1: '五一活动', 2: '端午活动', 3: '人鱼活动' })[row.festival] || '节日活动 ' + row.activityId,
-      endTime: row.endTime,
+      ...festivalDisplayWindow(row),
     });
   }
-  const newbie = newbieView(client);
-  if (newbie) activities.push({
+  const newbie = newbieView(client), newbieStart = activityTimestamp(client.newbieActivity?.startTime);
+  const newbieEnd = newbieStart ? Math.min((Math.floor((newbieStart + 28800) / 86400) + 7) * 86400 - 28800,
+    activityTimestamp(client.newbieActivity.finishTime) ?? Infinity) : null;
+  if (newbie || includeInactive && newbieStart) activities.push({
     id: 'newbie:' + client.newbieActivity.startTime, kind: 'limited', name: '新手七日登录',
-    taskKeys: ['newbieLogin'], taskKey: 'newbieLogin', endTime: newbie.end,
+    taskKeys: ['newbieLogin'], taskKey: 'newbieLogin', startTime: newbieStart, endTime: newbieEnd,
   });
-  return activities;
+  if (includeInactive) {
+    activities.push(...pushedActivityEntries(client, time));
+    for (const row of client.openRankActivity?.activityTime ?? []) {
+      activities.push({ id: 'openrank:' + row.type + ':' + row.startTime, kind: 'limited',
+        name: ({ 1: '订单冲榜', 2: '闯关冲榜', 3: '剿匪冲榜', 4: '杀敌冲榜' })[row.type] ?? '开服冲榜 ' + row.type,
+        taskKeys: [], startTime: row.startTime, endTime: row.endTime });
+    }
+  }
+  const entries = activities.map(row => catalogEntry(row, time));
+  return includeInactive ? entries : entries.filter(row => row.lifecycle === 'active');
 }
 
 // A manual run uses the same routines as the idle loop, but never changes its settings.
@@ -236,7 +263,7 @@ export async function runActivity(client, config, { activityId, taskKey, enabled
     const view = await readWeekOrder(client, week, config);
     const result = await runWeekOrder(client, config, getSettings(), ledger,
       () => allowed(taskKey), 'submit', { orderKey: orderKey ?? view.orderKey }, { player });
-    collect({ label: '周订单提交', ok: true, note: result.message });
+    collect({ label: '商人订单提交', ok: true, note: result.message });
   } else if (['riverScore', 'riverPass', 'riverHelp'].includes(taskKey)) {
     await riverActivity(client, config, { ...channel, player, key: taskKey, label: activity.name, ledger, manual: true,
       settings: getSettings, enabled: () => allowed(taskKey), report: collect });
@@ -248,7 +275,7 @@ export async function runActivity(client, config, { activityId, taskKey, enabled
     enabled: () => allowed(taskKey), ledger, report: collect });
   else if (taskKey === 'openRankRewards') await claimOpenRanks(client, config, player, allowed, collect);
   else if (festivalRewardKeys.includes(taskKey)) {
-    await claimFestivalRewards(client, config, allowed, collect, null, (row, type) => activityId.startsWith('linkage:' + toNumber(row.activityId) + ':')
+    await claimFestivalRewards(client, config, allowed, collect, null, (row, type) => activityId.startsWith('linkage:' + exactAutomationId(row.activityId) + ':')
       && (activity.taskKeys.includes(taskKey) && (taskKey === 'festivalGifts' || activityId.endsWith(':' + type))), { spinCount });
   } else if (weeklyRewardKeys.includes(taskKey)) {
     await claimWeeklyRewards(client, config, week.filter(row => weeklyId(row) === activityId), allowed, collect, { readOrder: readWeekOrder, player });
@@ -272,8 +299,8 @@ async function rewardStatus(client, config, activities, week, player) {
   syncFestivalDay(client);
   for (const row of client.festivals ?? []) {
     const state = festivalRewardState(client, row, config);
-    const id = type => 'linkage:' + toNumber(row.activityId) + ':' + type;
-    if (state.sign) {
+    const id = type => 'linkage:' + exactAutomationId(row.activityId) + ':' + type;
+    if (state.sign && activities.some(item => item.id === id(11))) {
       const { sign, active } = state;
       put(id(11), [
         !sign.cfg ? '无法确认今天的签到日，自动签到已跳过' : '活动第 ' + sign.day + ' 天 · ' + (sign.done ? '今日已签到' : '今日可签到：' + text(config, sign.cfg.rewards)),
@@ -284,14 +311,14 @@ async function rewardStatus(client, config, activities, week, player) {
       const entry = activities.find(item => item.id === id(6) || item.id === id(10));
       if (entry) put(entry.id, state.gifts.map(gift => gift.cfg.name + '：' + (gift.done ? '今日已领' : '可领 ' + text(config, gift.cfg.rewards ?? gift.cfg.fixedRewards))), state.gifts.some(gift => !gift.done));
     }
-    if (state.snowball) await safely(id(27), async () => {
+    if (state.snowball && activities.some(item => item.id === id(27))) await safely(id(27), async () => {
       const view = await snowballState(client, config);
       put(id(27), [
         ...view.packs.map(pack => pack.cfg.name + '：' + (pack.done ? '已领' : '可领 ' + text(config, pack.cfg.fixedRewards))),
         '累计 ' + view.score + ' 分 · 通行证已领至第 ' + view.claimed + ' 档' + (view.next ? ' · 下一档 ' + view.next.reqScore + ' 分' + (view.ready ? '（可领取）' : '') : ' · 全部领完'),
       ], view.ready || view.packs.some(pack => !pack.done));
     });
-    if (state.compass) await safely(id(28), async () => {
+    if (state.compass && activities.some(item => item.id === id(28))) await safely(id(28), async () => {
       const view = await compassState(client, row);
       put(id(28), [view.usable ? '抽奖券 ' + view.tickets + ' 张 · 每次消耗 ' + view.cost.num + ' 张 · 当前积分 ' + (view.info.score ?? 0) : '抽奖消耗不是抽奖券，不会自动抽奖'], view.spins > 0, '可抽');
     });
@@ -336,7 +363,9 @@ async function rewardStatus(client, config, activities, week, player) {
     for (const rank of openRanks) ranks.push(await openRankState(client, config, player, rank));
     const open = ranks.filter(rank => rank.open);
     if (!open.length) return;
-    activities.push({ id: 'openrank', kind: 'limited', name: '开服冲榜', taskKeys: ['openRankRewards'], endTime: Math.max(...open.map(rank => rank.endTime)) });
+    const windows = (client.openRankActivity?.activityTime ?? []).filter(row => row.startTime <= serverNow(client) && serverNow(client) < row.endTime);
+    activities.push({ id: 'openrank', kind: 'limited', name: '开服冲榜', taskKeys: ['openRankRewards'],
+      startTime: windows.length ? Math.min(...windows.map(row => row.startTime)) : null, endTime: Math.max(...open.map(rank => rank.endTime)) });
     put('openrank', open.map(rank => rank.name + ' ' + rank.progress + ' 分' + (rank.me?.rank ? ' · 第 ' + rank.me.rank + ' 名' : '') + ' · 已领 ' + rank.got + '/' + rank.total + ' 档' + (rank.ready.length ? '（可领 ' + rank.ready.length + ' 档）' : '')), open.some(rank => rank.ready.length > 0));
   });
   if (vip.level > 0) put('vip', ['VIP ' + vip.level + ' · ' + (vip.available.length ? '可领 ' + vip.available.map(row => 'VIP ' + row.level + '：' + text(config, row.reward)).join('；') : '今日已领完')], vip.available.length > 0);
@@ -344,9 +373,26 @@ async function rewardStatus(client, config, activities, week, player) {
 }
 
 export async function activityView(client, festivals = [], config = null, player = null) {
-  const week = await weekly(client);
-  const activities = activityEntries(client, week, festivals);
-  const status = await rewardStatus(client, config, activities, week, player);
+  const schedule = await weekSchedule(client), time = serverNow(client);
+  const week = schedule.filter(row => open(row, time));
+  const activities = activityEntries(client, schedule, festivals, { includeInactive: true });
+  const active = activities.filter(row => row.lifecycle === 'active');
+  const status = await rewardStatus(client, config, active, week, player);
+  const heroActivities = active.filter(row => row.id.startsWith('hero-raid:'));
+  if (heroActivities.length) {
+    const state = watchHeroRaidPushes(client);
+    for (const row of heroActivities) {
+      const raid = state.raids.get(Number(row.id.slice('hero-raid:'.length)));
+      const synced = state.observed && !state.invalid && raid?.startTime === row.startTime && raid?.finishTime === row.endTime;
+      const progress = value => Number.isSafeInteger(value) && value >= 0 ? value : '未同步';
+      status[row.id] = { ready: false, lines: synced ? [
+        '已通过关卡 ' + progress(raid.passedStage),
+        '当前订单 ' + progress(raid.order?.orderId) + ' · 已完成订单 ' + progress(raid.order?.gotOrderId),
+        '累计转盘抽奖 ' + progress(raid.drawTimesInfo?.times) + ' 次 · 已领取累计抽奖奖励 ' + progress(raid.drawTimesInfo?.gotIndex) + ' 档',
+      ] : ['活动进度待同步'] };
+    }
+  }
+  for (const row of active) if (!activities.some(item => item.id === row.id)) activities.push(catalogEntry(row, time));
   return { status, ...(await activityDetails(client, config, week, activities)) };
 }
 
@@ -363,10 +409,7 @@ async function activityDetails(client, config, week, activities) {
   try {
     const { needed, finished, finalReady, orderKey, evidence } = await readWeekOrder(client, week, config);
     if (finished) return { activities, lottery, lotteryError, order: { materials: [], finished, finalReady } };
-    const bag = normalize(await client.request('AllItemRequest', {}, 'AllItemResponse'));
-    if (!Array.isArray(bag?.items)) throw new Error('未能确认仓库库存');
-    const stock = new Map();
-    for (const item of bag.items ?? []) stock.set(item.itemId, (stock.get(item.itemId) ?? 0) + item.num);
+    const stock = await readWeekOrderInventory(client);
 
     const materials = Array.from(needed, ([id, required]) => {
       const owned = stock.get(id) ?? 0;
@@ -498,19 +541,24 @@ function weekOrderActor(player) {
   return {playerId,worldId};
 }
 
-export async function readWeekOrderStock(client,player,enabled=()=>true) {
-  const stamp=JSON.stringify(weekOrderActor(player));
-  const check=()=>{if(!enabled()||client.connected===false||JSON.stringify(weekOrderActor(player))!==stamp)throw Error('账号连接已变化');};
-  check();
-  const snapshot=await readOrderMaterialState(client,player,{enabled});
+async function readWeekOrderInventory(client) {
   const bag=await client.request('AllItemRequest',{},'AllItemResponse'),stock=new Map();
-  check();
   if(!Array.isArray(bag?.items))throw Error('未能确认仓库库存');
   for(const row of bag.items){
     const count=row?.num==null?NaN:toNumber(row.num);
     if(typeof row?.itemId!=='string'||!row.itemId||stock.has(row.itemId)||!Number.isSafeInteger(count)||count<0)throw Error('仓库材料库存异常');
     stock.set(row.itemId,count);
   }
+  return stock;
+}
+
+export async function readWeekOrderStock(client,player,enabled=()=>true) {
+  const stamp=JSON.stringify(weekOrderActor(player));
+  const check=()=>{if(!enabled()||client.connected===false||JSON.stringify(weekOrderActor(player))!==stamp)throw Error('账号连接已变化');};
+  check();
+  const snapshot=await readOrderMaterialState(client,player,{enabled});
+  const stock=await readWeekOrderInventory(client);
+  check();
   settleOrderMaterialState(player,snapshot,stock);
   return stock;
 }
@@ -536,20 +584,17 @@ async function readWeekPurchaseBalances(client,check) {
   if(!ids.has(4))throw Error('购买后钻石余额尚未确认');
 }
 
-export async function runWeekOrder(client,config,settings,ledger,enabled,action,payload,{player=null}={}){
-  const actor=weekOrderActor(player),stamp=JSON.stringify(actor);
-  const check=()=>{if(!enabled()||client.connected===false||JSON.stringify(weekOrderActor(player))!==stamp)throw Error('账号连接已变化');};
-  check();
-  const requestedKey='week-order:'+createHash('sha256').update(JSON.stringify([action,payload?.orderKey,action==='buy'?payload?.itemId:null])).digest('hex');
+async function reconcileWeekOrderOperations(client,ledger,player,check,action,requestedKey) {
+  const actor=weekOrderActor(player);
   for(const [savedKey,record] of Object.entries(ledger.keyRecords())){
     const details=record.details;
     if(record.confirmed||!['weekOrderBuy','weekOrderSubmit'].includes(details?.kind)||details.playerId!==actor.playerId||details.worldId!==actor.worldId)continue;
     if(details.kind==='weekOrderBuy'){
-      if(!details.acknowledged){if(action==='buy')throw Error('上次周订单购买结果待确认，暂不重复购买');continue;}
+      if(!details.acknowledged){if(action==='buy'||action==='auto')throw Error('上次商人订单购买结果待确认，暂不重复购买');continue;}
       await readWeekPurchaseBalances(client,check);
     }else{
       if(!details.acknowledged&&!await verifyWeekOrderOperation(client,details.evidence)){
-        if(action==='submit')throw Error('该操作已提交，结果待确认，请核对订单记录');
+        if(action==='submit'||action==='auto')throw Error('该操作已提交，结果待确认，请核对订单记录');
         continue;
       }
       check();
@@ -557,21 +602,41 @@ export async function runWeekOrder(client,config,settings,ledger,enabled,action,
     }
     check();
     ledger.resolveKey(savedKey,true);
-    if(savedKey===requestedKey)return {message:details.kind==='weekOrderBuy'?'已核对上次周订单材料购买及最新库存':'已核对上次周订单提交及最新库存'};
+    if(savedKey===requestedKey)return {message:details.kind==='weekOrderBuy'?'已核对上次商人订单材料购买及最新库存':'已核对上次商人订单提交及最新库存'};
   }
+}
+
+async function checkWeekOrderPurchase(client, getSettings, cost, check) {
+  check();
+  const resources = normalize(await client.request('AllResourceRequest', {}, 'AllResourceResponse'));
+  check();
+  const settings = getSettings();
+  if (!settings?.resources?.allowDiamonds) throw new AutomationSkip('钻石消耗开关已关闭');
+  const balances = resources.list?.filter(row => row.res === 4);
+  const ruby = balances?.length === 1 ? balances[0].amount : null;
+  if (!Number.isSafeInteger(ruby) || ruby - cost < resourceReserve(settings, 'RUBY')) {
+    throw new AutomationSkip('钻石不足或低于保留量');
+  }
+  return settings;
+}
+
+export async function runWeekOrder(client,config,settings,ledger,enabled,action,payload,{player=null,getSettings=()=>settings}={}){
+  const actor=weekOrderActor(player),stamp=JSON.stringify(actor);
+  const check=()=>{if(!enabled()||client.connected===false||JSON.stringify(weekOrderActor(player))!==stamp)throw Error('账号连接已变化');};
+  check();
+  const requestedKey='week-order:'+createHash('sha256').update(JSON.stringify([action,payload?.orderKey,action==='buy'?payload?.itemId:null])).digest('hex');
+  const recovered=await reconcileWeekOrderOperations(client,ledger,player,check,action,requestedKey);
+  if(recovered)return recovered;
   const state=await activityDetails(client,config,await weekly(client),[]),view=state.order;
   if(state.orderError)throw Error(state.orderError);
   if(!view?.orderKey || view.orderKey!==payload?.orderKey)throw Error('订单已变化，请刷新');
   const buy=action==='buy',item=view.materials.find(row=>row.id===payload.itemId);
-  let cost=0, rubyBefore;
+  let cost=0;
   if(buy){
     if(!item?.price || !Number.isSafeInteger(item.missing) || item.missing<=0)throw Error('材料已齐或暂无钻石售价');
     cost=item.price*item.missing;
     if(!Number.isSafeInteger(cost)||cost!==payload.cost||item.missing!==payload.quantity)throw Error('缺口或报价已变化，请刷新');
-    if(!settings.resources.allowDiamonds)throw Error('钻石消耗开关已关闭');
-    const resources=normalize(await client.request('AllResourceRequest',{},'AllResourceResponse'));
-    rubyBefore=resources.list?.find(r=>r.res===4)?.amount;
-    if(!Number.isSafeInteger(rubyBefore)||rubyBefore-cost<resourceReserve(settings,'RUBY'))throw Error('钻石不足或低于保留量');
+    settings=await checkWeekOrderPurchase(client,getSettings,cost,check);
   }else if(action!=='submit'||!view.ready)throw Error('材料未齐，请先补齐');
   check();
   const key='week-order:'+createHash('sha256').update(JSON.stringify([action,view.orderKey,buy?item.id:null])).digest('hex');
@@ -584,16 +649,20 @@ export async function runWeekOrder(client,config,settings,ledger,enabled,action,
     if(costs.some(row=>row.have<row.need))throw Error('材料未齐，请刷新库存');
     check();
   }
-  const ticket=ledger.reserve(buy?{diamonds:cost}:{},usageLimits(settings),{},{uniqueKey:key,
+  if(!open(view.evidence,serverNow(client)))throw new AutomationSkip('不差钱商人活动已结束');
+  const ticket=ledger.reserve(buy?{diamonds:cost}:{},usageLimits(getSettings()),{},{uniqueKey:key,
     details:buy?{kind:'weekOrderBuy',...actor,itemId:item.id,quantity:item.missing,cost,acknowledged:false}:
       {kind:'weekOrderSubmit',...actor,evidence:view.evidence,acknowledged:false}});
   let materialSpend;
   try{
-    if(!buy)materialSpend=beginOrderMaterialSpend(player,costs,'周订单提交',{operation:{verify:(next)=>verifyWeekOrderOperation(next,view.evidence)}});
+    if(!buy)materialSpend=beginOrderMaterialSpend(player,costs,'商人订单提交',{operation:{verify:(next)=>verifyWeekOrderOperation(next,view.evidence)}});
   }catch(error){ledger.cancel(ticket);throw error;}
   const name=buy?'CommonBuyGoods':'FinishWeekOrder';
-  let responseReceived=false;
+  let responseReceived=false,writeStarted=false;
   try{
+    check();
+    if(!open(view.evidence,serverNow(client)))throw new AutomationSkip('不差钱商人活动已结束');
+    writeStarted=true;
     const result=await client.request(name+'Request',buy?{goods:[{itemId:item.id,num:item.missing}]}:{},name+'Response');
     responseReceived=true;
     if(buy){
@@ -612,10 +681,71 @@ export async function runWeekOrder(client,config,settings,ledger,enabled,action,
     ledger.confirm(ticket);
     return {message:buy?'已购买 '+item.name+' ×'+item.missing+'，花费 '+cost+' 钻石':'整单已提交'};
   }catch(error){
-    if((!responseReceived&&error.notSent===true)||error.prompt&&error.request===name+'Request'){
+    if(!writeStarted||(!responseReceived&&error.notSent===true)||error.prompt&&error.request===name+'Request'){
       ledger.cancel(ticket);
       cancelOrderMaterialSpend(materialSpend);
     }
     throw error;
   }
+}
+
+export async function runAutomaticWeekOrder(client, config, { player, getSettings, ledger, enabled, report }) {
+  const publish = entry => report({ key: 'weekOrderSubmit', label: '不差钱商人订单', ...entry });
+  const active = () => enabled() && getSettings()?.schedule?.weekOrderSubmit === true;
+  if (!active()) return publish({ skipped: true, reason: '自动完成商人订单已关闭' });
+  const stamp = JSON.stringify(weekOrderActor(player));
+  const check = () => {
+    if (!active()) throw new AutomationSkip('自动完成商人订单已暂停');
+    if (client.connected === false || JSON.stringify(weekOrderActor(player)) !== stamp) {
+      throw Error('账号连接已变化');
+    }
+  };
+  check();
+  // Recover the whole order before choosing another purchase or submission.
+  await reconcileWeekOrderOperations(client, ledger, player, check, 'auto');
+  const readOrder = async () => {
+    check();
+    const state = await activityDetails(client, config, await weekly(client), []);
+    check();
+    if (state.orderError) throw Error(state.orderError);
+    return state.order;
+  };
+  let view = await readOrder();
+  if (!view?.orderKey) {
+    return publish({ skipped: true, reason: view?.finished ? '本期商人订单已全部完成' : '不差钱商人活动未开放' });
+  }
+  const orderKey = view.orderKey;
+  const missing = view.materials.filter(item => item.missing > 0);
+  if (missing.length) {
+    const purchaseActive = () => active() && getSettings()?.weekOrder?.allowDiamonds === true &&
+      getSettings()?.resources?.allowDiamonds === true;
+    if (!purchaseActive()) return publish({ skipped: true, reason: '商人订单缺材料，钻石补料未开启，等待备料' });
+    if (missing.some(item => !Number.isSafeInteger(item.price) || item.price <= 0 || !Number.isSafeInteger(item.missing))) {
+      return publish({ skipped: true, reason: '商人订单缺料中有材料无法确认钻石售价，等待备料' });
+    }
+    const total = missing.reduce((sum, item) => sum + item.price * item.missing, 0);
+    if (!Number.isSafeInteger(total) || total <= 0) throw Error('商人订单补料总价异常');
+    const settings = await checkWeekOrderPurchase(client, getSettings, total, check);
+    const used = ledger.snapshot().counters.diamonds ?? 0;
+    if (!Number.isSafeInteger(used) || used < 0) throw Error('历史钻石消费计数异常');
+    if (used + total > usageLimits(settings).diamonds) {
+      return publish({ skipped: true, reason: '钻石今日剩余额度不足以补齐本单材料，等待备料' });
+    }
+    for (const planned of missing) {
+      check();
+      if (!purchaseActive()) throw new AutomationSkip('商人订单钻石补料已关闭');
+      const item = view.materials.find(row => row.id === planned.id);
+      if (item.missing <= 0) continue;
+      const result = await runWeekOrder(client, config, getSettings(), ledger, purchaseActive, 'buy', {
+        orderKey, itemId: item.id, quantity: item.missing, cost: item.price * item.missing,
+      }, { player, getSettings });
+      publish({ ok: true, note: result.message });
+      view = await readOrder();
+      if (view?.orderKey !== orderKey) throw new AutomationSkip('商人订单已变化，下一轮重新检查');
+    }
+  }
+  check();
+  if (!view.ready) return publish({ skipped: true, reason: '商人订单材料尚未齐全，等待库存同步' });
+  const result = await runWeekOrder(client, config, getSettings(), ledger, active, 'submit', { orderKey }, { player, getSettings });
+  publish({ ok: true, note: result.message });
 }

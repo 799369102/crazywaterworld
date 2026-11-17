@@ -28,7 +28,7 @@ function mock() {
         case 'AllResourceRequest': return { list: [] };
         case 'WeekInfoRequest': return { activityTime: this.weekly === 0 ? [] : [{ type: 5, period: 1001, startTime: now - 60, endTime: now + 3600 }] };
         case 'WeekOrderInfoRequest':
-          if (this.weekly == null) throw Error('周订单读取失败');
+          if (this.weekly == null) throw Error('商人订单读取失败');
           return this.weekReply ?? { order: [{ id: '烤鱼', num: this.weekly }, ...this.otherWeekly] };
         case 'CargoShipsRequest':
           if (this.cargo == null) throw Error('货单读取失败');
@@ -63,7 +63,7 @@ export async function testResidentOrders() {
   const held = await plan(client);
   assert.deepEqual(held.actions, []);
   assert.equal(held.orderDecisions[0].status, 'reserved');
-  assert.match(held.orderDecisions[0].reason, /周订单预留 50.*可用 0.*上限 50/);
+  assert.match(held.orderDecisions[0].reason, /商人订单预留 50.*可用 0.*上限 50/);
   client.weekly = 3;
   client.cargo = 47;
   assert.deepEqual((await plan(client, true)).orderDecisions[0].shortages[0],
@@ -184,7 +184,7 @@ async function testManualResidentOrder() {
   weekly.weekly = weekly.stock = 50;
   weekly.otherWeekly = [{ id: '淡水', num: 1 }];
   const weeklyKey = (await survey(weekly)).orders[1].orderKey;
-  assert.match((await submitResidentOrder(weekly, protocol, { ...context(weekly), index: 2, orderKey: weeklyKey })).label, /周订单待补 烤鱼 ×3/);
+  assert.match((await submitResidentOrder(weekly, protocol, { ...context(weekly), index: 2, orderKey: weeklyKey })).label, /商人订单待补 烤鱼 ×3/);
 
   for (const block of [c => { c.weekly = 50; }, c => { c.cargo = 49; }, c => { c.cargo = null; }, c => { c.stock = 0; }]) {
     const waiting = setup();
@@ -215,7 +215,7 @@ async function testActualShortages() {
     { config: cfg, enabled: key => ['finishOrder', 'startProduce'].includes(key) });
   const first = await inspect();
   const decision = first.orderDecisions[0];
-  assert.match(decision.reason, /烤鱼.*可从周订单临时使用 3/);
+  assert.match(decision.reason, /烤鱼.*可从商人订单临时使用 3/);
   assert.deepEqual(decision.shortages.map(s => [s.id, s.missing]), [['烤鱼', 0], ['晾衣架', 1]]);
   assert.deepEqual(decision.harvestNeeds, [{ id: '晾衣架', missing: 1 }]);
   assert(!first.actions.some(a => a.kind === 'finishOrder'));

@@ -33,7 +33,7 @@ export const PAGE = `<!doctype html>
 ${chrome()}
 <div class="deck"><main>
   <nav id="resource-tabs" class="resource-tabs" aria-label="资源与玩法分类" hidden>
-    <button type="button" data-resource-tab="dailies">日常</button><button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="activities">材料与订单</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
+    <button type="button" data-resource-tab="dailies">日常</button><button type="button" data-resource-tab="guild">联盟</button><button type="button" data-resource-tab="inventory">仓库</button><button type="button" data-resource-tab="heroes">英雄与装备</button><button type="button" data-resource-tab="activities">活动</button><button type="button" data-resource-tab="giftcodes">礼包兑换</button>
   </nav>
   <section id="tab-overview">
     ${overviewPage()}

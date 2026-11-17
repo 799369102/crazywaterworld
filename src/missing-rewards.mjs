@@ -19,7 +19,7 @@ export function rewardData(value,key=''){
 const read=(c,name,body={})=>c.request(name+'Request',body,name+'Response').then(rewardData);
 const reward=r=>r?.reward?.asset?.some(a=>Number(a.num)>0)||['hero','antique','equipIds','badge','tickets','supply'].some(k=>r?.[k]?.length>0);
 const wait=(report,label,reason)=>report({label,skipped:true,reason});
-export const weekActivityNames={1:'勇士战令',2:'累计充值',3:'英雄升星',4:'幸运转盘',5:'周订单',6:'芯片活动',7:'周翻牌'};
+export const weekActivityNames={1:'勇士战令',2:'累计充值',3:'英雄升星',4:'幸运转盘',5:'不差钱商人',6:'芯片活动',7:'周翻牌'};
 export async function readWeekCalendar(client){
  const data=await read(client,'WeekInfo');
  if(!Array.isArray(data.activityTime))throw Error('活动日历未完整返回');

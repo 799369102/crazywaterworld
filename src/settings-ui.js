@@ -1,6 +1,8 @@
 // 游戏配置编辑器：按账号合并连续输入，校验后自动保存，预览仍使用独立只读接口。
 const configEditor = { owner: null, data: null, draft: null, baseline: null, category: 'base', busy: false, loading: false, serial: 0, saveTimer: null, savePromise: null, saving: false, saveError: null, saveRetries: 0, fields: new Map(), widgets: new Map(), groups: new Map(), selectedGroups: {}, errors: {}, playerData: null, playerRequest: null, playerError: '', playerWidgets: [] };
 const configCategories = { base: '基地', world: '世界', heroes: '英雄', daily: '日常与活动' };
+const activityOwnedSettings = new Set(['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
+  'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const baseFamilies = [
   { id: 'construction', title: '建设', groups: ['building'] },
   { id: 'production', title: '生产', groups: ['factory', 'farm', 'gather', 'forge'] },
@@ -89,13 +91,6 @@ const configGroups = [
         configField(key+'maxRepairCost',label+'单次维修汽油上限','number',{parent:key+'autoRepair',when,help:'0 表示不额外限制；关闭自动维修可禁止维修消费。'}),configField(key+'repairSpeedUp',label+'允许加速维修','switch',{parent:key+'enabled',when}),
         configField(key+'marchSpeedUp',label+'允许行军加速','switch',{parent:key+'enabled',when}),configField(key+'marchTargetSeconds',label+'行军剩余目标','number',{unit:'秒',parent:key+'marchSpeedUp',when})];
     }),
-  ]},
-  {id:'rich-merchant',title:'不差钱商人',category:'daily',fields:[
-    configField('schedule.weekOrderSubmit','自动完成商人订单','switch',{help:'复用周订单任务，材料齐全后提交。缺料转交工厂按商人需求补产，生产受工厂开关和需求优先级控制。'}),configField('schedule.weekOrderFinal','领取商人最终奖励'),
-  ]},
-  {id:'hero-raid',title:'超凡英雄活动',category:'daily',fields:[
-    configField('heroRaid.enabled','超凡英雄活动总开关','switch',{help:'关闭后保留子项选择，只处理服务器确认开放的活动。'}),
-    configField('heroRaid.orders','自动完成活动订单'),configField('heroRaid.rewards','自动领取达标奖励','switch',{help:'领取订单与已达成的累计抽奖奖励。实际抽取消耗英雄副本抽卡券，没有免费抽取次数，因此不自动抽卡。'}),
   ]},
   {id:'ad-rewards',title:'广告奖励',category:'daily',fields:[
     configField('ads.waitSeconds','广告申请后等待','number',{unit:'秒',help:'无免广告权益时默认申请并等待后领取；有权益时立即领取。默认15秒，是挂机收益、英雄招募、工厂加速、藏品招募、广告商店、节庆礼包和雪球礼包都实测成功过的时长。5秒只在藏品招募上测通，广告商店3秒被拒。等待会占用账号操作队列，挂机每轮最多处理1次；服务器返回未完成时跳过该入口并冷却5分钟。'}),
@@ -632,10 +627,10 @@ function configRender() {
   const root = clear($('config-fields'));
   const groups = configGroups.map(group => ({ ...group, fields: [...group.fields] }));
   const hiddenFields = new Set(configEditor.data.rules?.hiddenFields ?? []);
-  for (const group of groups) group.fields = group.fields.filter(field => !hiddenFields.has(field.key));
+  for (const group of groups) group.fields = group.fields.filter(field => !hiddenFields.has(field.key) && !activityOwnedSettings.has(field.key));
   const mapped = new Set(configEditor.data.rules?.mappedTasks ?? []);
   const staticFields=new Set(groups.flatMap(g=>g.fields.map(f=>f.key)));
-  const tasks = (configEditor.data.tasks ?? []).filter(task => !mapped.has(task.key)&&!hiddenFields.has('schedule.'+task.key)&&!staticFields.has('schedule.'+task.key)).map(task => ['freeRecruit', 'ticketRecruit'].includes(task.key) ? { ...task, group: '招募' } : task);
+  const tasks = (configEditor.data.tasks ?? []).filter(task => !mapped.has(task.key)&&!hiddenFields.has('schedule.'+task.key)&&!activityOwnedSettings.has('schedule.'+task.key)&&!staticFields.has('schedule.'+task.key)).map(task => ['freeRecruit', 'ticketRecruit'].includes(task.key) ? { ...task, group: '招募' } : task);
   const destinations = { '联盟': ['cityWar', '联盟/城战'], '海面': ['building', '建筑'], '领奖': ['rewards', '任务与领奖'],
     '周期活动': ['daily-weekly', '周期活动'], '限时活动': ['daily-events', '限时活动'], '藏品': ['daily-collections', '日常招募'],
     '招募': ['daily-collections', '日常招募'], '日常': ['daily-actions', '日常行动'], '挑战': ['daily-challenges', '挑战与扫荡'] };

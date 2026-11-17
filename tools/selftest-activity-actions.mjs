@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { activityEntries, runActivity } from '../src/activities.mjs';
 import { createUsageLedger } from '../src/automation-settings.mjs';
+import { classifyLog, LOG_CATEGORIES, LOG_GROUPS } from '../src/log-categories.mjs';
 
 const initialTime = Date.UTC(2026, 10, 5, 4) / 1000;
 const config = { tables: {
@@ -48,6 +50,115 @@ function fixture() {
   assert.equal(rows.find(row => row.id === 'linkage:101:30').taskKey, 'evilExpel');
   assert.equal(rows.at(-1).id, 'newbie:' + client.newbieActivity.startTime);
   assert.deepEqual(activityEntries(client, weekly), rows, '刷新前后活动实例标识稳定');
+}
+
+{
+  const { client } = fixture();
+  const window = { type: 5, period: 1001, startTime: initialTime - 100, endTime: initialTime + 100 };
+  const rows = activityEntries(client, [window]);
+  const merchant = rows.filter(row => row.weekType === 5);
+  assert.equal(merchant.length, 1, '不差钱商人有独立活动入口');
+  assert.equal(merchant[0].name, '不差钱商人');
+  assert.equal(merchant[0].id, 'weekly:5:1001:' + window.startTime, '名称调整后沿用当前活动实例标识');
+  assert.deepEqual(merchant[0].taskKeys, ['weekOrderFinal', 'weekOrderSubmit']);
+  assert(!rows.some(row => row.name === '周订单'), '活动列表使用游戏中的活动名称');
+  assert.equal(LOG_CATEGORIES.orders, '不差钱商人');
+  assert(LOG_GROUPS['日常与活动'].includes('orders'));
+  assert(!LOG_GROUPS['基地与资源'].includes('orders'));
+  for (const message of ['不差钱商人', '商人订单提交', '周订单提交', 'FinishWeekOrderRequest']) {
+    assert.equal(classifyLog(message), 'orders');
+  }
+  for (const message of ['超凡英雄', 'HeroRaidChallengeRequest', 'HeroRaidPrizeRequest']) {
+    assert.equal(classifyLog(message), 'activity');
+  }
+}
+
+// Execute the browser's order rendering and confirmation handlers with a small
+// DOM fixture so naming changes also exercise the actual purchase/submit wiring.
+const activityScript = fs.readFileSync(new URL('../src/ui/activities.js', import.meta.url), 'utf8');
+const orderHandlersStart = activityScript.indexOf('function renderActivityOrder()');
+const orderHandlersEnd = activityScript.indexOf('async function refreshActivities()', orderHandlersStart);
+assert(orderHandlersStart >= 0 && orderHandlersEnd > orderHandlersStart);
+const orderHandlers = activityScript.slice(orderHandlersStart, orderHandlersEnd);
+
+function orderUiFixture(order) {
+  const nodes = new Map(), confirmations = [], calls = [];
+  const element = (tag, className = '', textContent = '') => ({
+    tag, className, textContent, children: [],
+    appendChild(child) { this.children.push(child); return child; },
+  });
+  let refreshes = 0;
+  const context = {
+    activitiesData: { order }, activitiesAccount: 'merchant-test', current: 'merchant-test',
+    snapshot: { paused: false }, disconnected: new Set(), pendingActivities: new Set(),
+    $(id) {
+      if (!nodes.has(id)) nodes.set(id, element('div'));
+      return nodes.get(id);
+    },
+    clear(node) { node.children = []; node.textContent = ''; return node; },
+    el: element,
+    smallButton: text => element('button', '', text),
+    table: (headers, rows) => ({ tag: 'table', headers, rows }),
+    openConfirm(title, details, accept) { confirmations.push({ title, details, accept }); },
+    async call(url, options) { calls.push({ url, method: options.method, body: JSON.parse(options.body) }); return { message: '已确认' }; },
+    async refreshActivities() { refreshes++; },
+  };
+  const handlers = vm.runInNewContext(orderHandlers + '\n({ renderActivityOrder, confirmWeekOrderAction });', context);
+  return { ...handlers, nodes, confirmations, calls, context, get refreshes() { return refreshes; } };
+}
+
+{
+  const order = { orderKey: 'merchant-order-key', finished: false, ready: false,
+    materials: [{ id: '木板', name: '木板', required: 3, owned: 1, missing: 2, price: 10 }] };
+  const ui = orderUiFixture(order);
+  ui.renderActivityOrder();
+  const children = ui.nodes.get('activities-order').children;
+  assert.match(children[0].textContent, /商人订单.*缺材料/);
+  assert(!children[0].textContent.includes('周订单'));
+  assert.equal(children[1].disabled, true, '缺料时整单提交按钮不可用');
+  const buy = children.find(child => child.tag === 'table').rows[0][6];
+  assert.equal(buy.textContent, '20 钻');
+  buy.onclick();
+  assert.equal(ui.calls.length, 0, '购买前先显示确认内容');
+  assert.equal(ui.confirmations[0].title, '钻石购买商人订单材料');
+  assert.equal(ui.confirmations[0].details[0].textContent, '木板 ×2，共 20 钻石');
+  await ui.confirmations[0].accept();
+  assert.deepEqual(ui.calls, [{ url: '/api/week-order/buy?account=merchant-test', method: 'POST',
+    body: { confirm: true, orderKey: order.orderKey, itemId: '木板', quantity: 2, cost: 20 } }]);
+  assert.equal(ui.refreshes, 1);
+  assert.equal(ui.context.pendingActivities.size, 0);
+}
+
+{
+  const order = { orderKey: 'merchant-ready-key', finished: false, ready: true,
+    materials: [{ id: '木板', name: '木板', required: 3, owned: 3, missing: 0, price: 10 }] };
+  const ui = orderUiFixture(order);
+  ui.renderActivityOrder();
+  const children = ui.nodes.get('activities-order').children;
+  assert.match(children[0].textContent, /商人订单材料已齐/);
+  assert(!children[0].textContent.includes('周订单'));
+  assert.equal(children[1].disabled, false);
+  children[1].onclick();
+  assert.equal(ui.calls.length, 0, '提交前显示整单材料确认');
+  assert.match(ui.confirmations[0].title, /商人订单/);
+  assert(!ui.confirmations[0].title.includes('周订单'));
+  assert.equal(ui.confirmations[0].details[0].textContent, '木板 ×3');
+  await ui.confirmations[0].accept();
+  assert.deepEqual(ui.calls, [{ url: '/api/week-order/submit?account=merchant-test', method: 'POST',
+    body: { confirm: true, orderKey: order.orderKey } }]);
+  assert.equal(ui.refreshes, 1);
+  assert.equal(ui.context.pendingActivities.size, 0);
+}
+
+for (const [order, message] of [
+  [null, '不差钱商人活动未开放'],
+  [{ materials: [], finished: true, finalReady: true }, '本期商人订单已全部交付，可领取最终奖励。'],
+  [{ materials: [], finished: true }, '本期商人订单已完成'],
+]) {
+  const ui = orderUiFixture(order);
+  ui.renderActivityOrder();
+  assert.equal(ui.nodes.get('activities-order').textContent, message);
+  assert.equal(ui.calls.length, 0);
 }
 
 {
@@ -235,6 +346,9 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-activity-actions-'));
 process.env.CW_DATA_DIR = dir;
 process.env.CW_CONFIG_PACK = path.join(dir, 'config.json');
 fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify(Object.entries(config.tables).map(([name, table], index) => [index + 1, name, table])));
+const { PAGE } = await import('../src/page.mjs');
+assert.match(PAGE, /<button\b[^>]*data-resource-tab="activities"[^>]*>活动<\/button>/);
+assert(!PAGE.includes('材料与订单'), '资源与玩法使用活动页名称');
 const { saveStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 saveStore({ activeId: 'activity-test', accounts: [{ id: 'activity-test', url: 'ws://invalid.invalid', login: {}, automation: { enabled: false } }] });

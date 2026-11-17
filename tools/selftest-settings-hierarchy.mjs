@@ -141,6 +141,17 @@ test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   ]) assert.equal(fields.get(child)?.parent, parent, child);
 });
 
+test('商人与超凡英雄配置集中在活动页，游戏配置没有重复字段或分组', () => {
+  const f = fixture();
+  assert(!f.groups.some(group => group.id === 'rich-merchant'));
+  assert(!f.groups.some(group => group.id === 'hero-raid'));
+  const fields = f.groups.flatMap(group => group.fields.map(field => field.key));
+  for (const key of ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal']) {
+    assert(!fields.includes(key), key);
+  }
+  assert(!fields.some(key => key.startsWith('heroRaid.')));
+});
+
 test('不连续的培育参数跟随所属开关，并保持同级设置顺序', () => {
   const f = fixture();
   const fields = f.groups.find(group => group.id === 'pet').fields.filter(field => [

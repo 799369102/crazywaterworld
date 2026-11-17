@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS = {
   login: { autoReconnect: false, intervalSeconds: 900, jitterSeconds: 0, quietHours: true, quietStart: '02:00', quietEnd: '07:00', quietIntervalSeconds: 60, maxRetries: 5 },
   schedule: taskSettings(),
   eventActions: { compassThreshold: 10, compassDrawCount: 10 },
+  weekOrder: { allowDiamonds: false },
   merchant: { autoShareIntel: true, quoteMaxAgeSeconds: 300, estimateDiscountPercent: 10, refreshWaitSeconds: 120, liquidationMinutes: 120,
     maxLossPercent: 0, minExpectedProfit: 1, autoSpeedUp: false, speedUpMinProfit: 1000, keepPointers: 0,
     speedUpMode: 'profit', speedUpMaxPerLeg: 4, monitorSeconds: 60,
@@ -411,7 +412,7 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   if (source === 'stored') return input;
 
   const addedGroups = ['login', 'treasure', 'cityWar', 'forge', 'antique', 'trials', 'pirateHunt',
-    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'merchant', 'ads', ...Object.keys(EXTENDED_DEFAULTS)];
+    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'merchant', 'weekOrder', 'ads', ...Object.keys(EXTENDED_DEFAULTS)];
   for (const group of addedGroups) {
     if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
   }

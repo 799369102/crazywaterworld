@@ -73,7 +73,7 @@ export async function readActivityStatistics(client,config,player,ledger,setting
     row.rewards=activityRewardState(rows(config,'WeekLotteryTimesCfg').filter(t=>t.periodId===event.period),t=>progress.times>=t.reqTimes,t=>t.rwdId<=progress.gotStage);
    }else if(event.type===5){
     const s=await ask('WeekOrderInfo'),tiers=rows(config,'WeekOrderRwdCfg').filter(t=>t.periodId===event.period&&t.rwdId>0);
-    if(!Array.isArray(s.gotRwdId)||!tiers.length||typeof s.isGotFinal!=='boolean')throw Error('周订单进度未完整返回');
+    if(!Array.isArray(s.gotRwdId)||!tiers.length||typeof s.isGotFinal!=='boolean')throw Error('商人订单进度未完整返回');
     const count=tiers.filter(t=>s.gotRwdId.includes(t.rwdId)).length;
     row.progress=count+'/'+tiers.length+' 单';
     row.rewards=s.isGotFinal?'全部已领':count===tiers.length?'最终奖励待领':'订单奖励 '+count+'/'+tiers.length+' · 最终未达成';

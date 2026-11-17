@@ -55,7 +55,8 @@ import { claimRewards } from './claim-rewards.mjs';
 import { fishView, newbieView } from './collections.mjs';
 import { normalize } from './worlds.mjs';
 import { pirateTracker, pirateHuntOptions, startPirateHunt } from './pirates.mjs';
-import { activityView, runActivity, runWeekOrder } from './activities.mjs';
+import { activityEntries, activityView, runActivity, runWeekOrder } from './activities.mjs';
+import { activityCatalogPushNames, readActivityCatalog, rememberActivityCatalog, rememberActivityPush } from './activity-catalog.mjs';
 import { displayMaterial, getConfig } from './config.mjs';
 import { planHeroes, runHeroPlan, formatHeroPlan } from './heroes.mjs';
 import { appointments } from './appointments.mjs';
@@ -469,6 +470,36 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       usage: usageFor(session).snapshot(), pendingUsage: usageFor(session).pendingCounters(), running: session.loop.running };
   }
 
+  function weekOrderSettingsView(session) {
+    const current = settingsView(session);
+    return {
+      settings: {
+        autoSubmit: current.settings.schedule.weekOrderSubmit,
+        allowDiamonds: current.settings.weekOrder.allowDiamonds,
+        autoFinal: current.settings.schedule.weekOrderFinal,
+      },
+      revision: current.revision,
+      baseRevision: current.baseRevision,
+    };
+  }
+
+  function heroRaidSettingsView(session) {
+    const current = settingsView(session);
+    return { settings: current.settings.heroRaid, revision: current.revision, baseRevision: current.baseRevision };
+  }
+
+  function activityCatalogView(session, activities, catalogOnly = false) {
+    const current = settingsView(session);
+    const keys = new Set(['fishBook', 'vipDaily', 'campaignReports', 'openRankRewards', ...activities.flatMap(row => row.taskKeys ?? [])]);
+    return {
+      activities, catalogOnly,
+      eventTasks: automationTasks.filter(task => keys.has(task.key)).map(({ key, label }) => ({ key, label, enabled: session.loop.tasks[key] })),
+      compassSpinCount: current.settings.eventActions.compassDrawCount,
+      compassSpinEditable: !session.preferences,
+      serverNow: (Date.now() + (session.client?.serverClockOffsetMs || 0)) / 1000,
+    };
+  }
+
   async function refreshFleetReservations(session,settings) {
     await refreshCityWarReservations(session.client, protocol, loadConfigSafe(), session.player,
       () => session.preferences ?? settings);
@@ -589,6 +620,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           type: row.type, start: row.startTime, end: row.endTime, open: row.openTime, close: row.closeTime,
           subs: row.subActivity.map(sub => sub.subActivityType),
         }))));
+      }
+      if (activityCatalogPushNames.has(name)) {
+        rememberActivityPush(instance, name, body);
+        if (name === 'WeekInfoResponse') instance.weekActivities = (body.activityTime ?? []).map(row => ({
+          type: row.type, period: row.period, startTime: row.startTime, endTime: row.endTime,
+        }));
+        try {
+          const now = (Date.now() + (instance.serverClockOffsetMs || 0)) / 1000;
+          rememberActivityCatalog(session.id, activityEntries(instance, instance.weekActivities ?? [], instance.festivals ?? [], { includeInactive: true }), now);
+        } catch (error) { emit(session, 'warn', '保存活动目录失败：' + error.message); }
       }
     });
     instance.on('state', (event) => {
@@ -1301,7 +1342,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -1337,6 +1378,77 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'GET /api/settings') {
         const { session } = scoped_(parsed);
         json(settingsView(session));
+        return;
+      }
+      if (route === 'GET /api/week-order/settings') {
+        const { session } = scoped_(parsed);
+        json(weekOrderSettingsView(session));
+        return;
+      }
+      if (route === 'POST /api/week-order/settings') {
+        const payload = jsonBody();
+        const fields = {
+          autoSubmit: ['schedule', 'weekOrderSubmit'],
+          allowDiamonds: ['weekOrder', 'allowDiamonds'],
+          autoFinal: ['schedule', 'weekOrderFinal'],
+        };
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || typeof payload.key !== 'string' || !Object.hasOwn(fields, payload.key)
+          || typeof payload.enabled !== 'boolean'
+          || Object.keys(payload).some(key => !['key', 'enabled', 'revision', 'baseRevision', 'confirm'].includes(key))) {
+          throw new SettingsError({ settings: '请选择有效的商人活动开关' });
+        }
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const current = settingsView(session);
+        if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
+          || !current.revision && payload.baseRevision !== current.baseRevision) {
+          throw new SettingsError({ revision: '商人活动设置已变化，请重新读取后再保存' });
+        }
+        const next = structuredClone(current.settings);
+        const [group, field] = fields[payload.key];
+        next[group][field] = payload.enabled;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+        if (session.client) {
+          rewardSchedule(session.client).clearTask('weekOrderSubmit');
+          rewardSchedule(session.client).clearTask('weekOrderFinal');
+        }
+        emit(session, 'info', '不差钱商人设置已保存');
+        json(weekOrderSettingsView(session));
+        return;
+      }
+      if (route === 'GET /api/hero-raid/settings') {
+        const { session } = scoped_(parsed);
+        json(heroRaidSettingsView(session));
+        return;
+      }
+      if (route === 'POST /api/hero-raid/settings') {
+        const payload = jsonBody();
+        const fields = {
+          'heroRaid.enabled': 'enabled',
+          'heroRaid.challenge': 'challenge',
+          'heroRaid.retryTimes': 'retryTimes',
+          'heroRaid.orders': 'orders',
+          'heroRaid.lottery': 'lottery',
+          'heroRaid.rewards': 'rewards',
+        };
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || typeof payload.key !== 'string' || !Object.hasOwn(fields, payload.key)
+          || Object.keys(payload).some(key => !['key', 'value', 'revision', 'baseRevision', 'confirm'].includes(key))) {
+          throw new SettingsError({ settings: '请选择有效的超凡英雄活动设置' });
+        }
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const current = settingsView(session);
+        if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
+          || !current.revision && payload.baseRevision !== current.baseRevision) {
+          throw new SettingsError({ revision: '超凡英雄活动设置已变化，请重新读取后再保存' });
+        }
+        const next = structuredClone(current.settings);
+        next.heroRaid[fields[payload.key]] = payload.value;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+        emit(session, 'info', '超凡英雄活动设置已保存');
+        json(heroRaidSettingsView(session));
         return;
       }
       if (route === 'GET /api/login-settings') {
@@ -1491,7 +1603,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const state = await activityView(client, client.festivals ?? [], config);
             return { ...output({ actions: [], notes: ['此范围只读取活动开放状态，不推算充值、抽奖、消耗道具或付费动作。',
               ...(state.activities?.length ? state.activities.map(row => row.name + (row.endTime ? '：截至' + new Date(row.endTime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '：开放时间未确认')) : ['当前未读到开放活动']),
-              ...(state.lotteryError ? ['周抽奖状态未确认：' + state.lotteryError] : []), ...(state.orderError ? ['周订单状态未确认：' + state.orderError] : [])] }, { activities: state.activities?.length ?? 0 }, '活动状态（只读）'), viewOnly: true };
+              ...(state.lotteryError ? ['周抽奖状态未确认：' + state.lotteryError] : []), ...(state.orderError ? ['商人订单状态未确认：' + state.orderError] : [])] }, { activities: state.activities?.length ?? 0 }, '活动状态（只读）'), viewOnly: true };
           }
           if (category === 'forge') {
             const state = await readEquipmentForge(client, protocol, config, session.player);
@@ -2185,7 +2297,13 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const {account,session}=scoped_(parsed),action=route.endsWith('/buy')?'buy':'submit';
         const result=await progressionJob(session,account,route+':'+payload.orderKey+':'+String(payload.itemId||''),null,
           (client,enabled)=>runWeekOrder(client,loadConfigSafe(),session.preferences,usageFor(session),enabled,action,payload,{player:session.player}));
-        emit(session,'info','周订单 · '+result.message);json(result);return;
+        emit(session,'info','商人订单 · '+result.message);json(result);return;
+      }
+      if (route === 'GET /api/activities/catalog') {
+        const { session } = scoped_(parsed);
+        const now = (Date.now() + (session.client?.serverClockOffsetMs || 0)) / 1000;
+        json({ status: {}, ...activityCatalogView(session, readActivityCatalog(session.id, now), true) });
+        return;
       }
       if (route === 'GET /api/activities') {
         const { account, session } = scoped_(parsed);
@@ -2205,7 +2323,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             const water = await client.request('OnWaterRequest', {}, 'OnWaterResponse');
             buildings = (water.building ?? []).map(b => ({ ...b, type: typeOf(b.buildingId) }));
           } catch (error) {
-            emit(session, 'error', '读取周订单工厂等级失败：' + error.message);
+            emit(session, 'error', '读取商人订单工厂等级失败：' + error.message);
           }
           for (const row of view.order.materials) {
             row.factory = weekFactoryInfo(config, row.id, buildings);
@@ -2217,10 +2335,15 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           }
         }
         if (view.lotteryError) emit(session, 'error', '读取周抽奖进度失败：' + view.lotteryError);
-        if (view.orderError) emit(session, 'error', '读取周订单失败：' + view.orderError);
-        const activityTasks = new Set(['fishBook', 'vipDaily', 'campaignReports', 'openRankRewards', ...view.activities.flatMap(row => row.taskKeys ?? [])]);
-        view.eventTasks = automationTasks.filter(task => activityTasks.has(task.key) && isActivityTaskAvailable(task.key, client)).map(({ key, label }) => ({ key, label, enabled: session.loop.tasks[key] }));
-        view.serverNow = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
+        if (view.orderError) emit(session, 'error', '读取商人订单失败：' + view.orderError);
+        const now = (Date.now() + (client.serverClockOffsetMs || 0)) / 1000;
+        let activities = view.activities;
+        try { activities = rememberActivityCatalog(session.id, activities, now); }
+        catch (error) {
+          view.catalogError = '活动历史暂未保存，请稍后刷新重试。';
+          emit(session, 'warn', '保存活动目录失败：' + error.message);
+        }
+        Object.assign(view, activityCatalogView(session, activities));
         json(view);
         return;
       }
@@ -2715,7 +2838,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const payload=jsonBody();needConfirm(payload);const {session}=scoped_(parsed);
         const current=settingsView(session);
         if(payload.revision!==current.revision) throw new SettingsError({revision:'配置已变化，请刷新挂机设置后再操作'});
-        if(payload.enabled===true && current.rules.hiddenFields.includes(payload.key)) throw new Error('该活动已下线，重新开放后可启用');
         const next=setAutomationControl(current.settings,payload.key,payload.enabled);
         adoptPreferences(session,saveAutomationSettings(session.id,next,{revision:current.revision,catalog:current.catalog}));
         if(session.client) for(const task of automationTasks) rewardSchedule(session.client).clearTask(task.key);
@@ -2727,7 +2849,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const { session } = scoped_(parsed);
         const task = automationTasks.find(item => item.key === payload.key);
         if (!task || typeof payload.enabled !== 'boolean') throw new Error('无效的自动任务设置');
-        if (payload.enabled && !isActivityTaskAvailable(task.key, session.client)) throw new Error('该活动已下线，重新开放后可启用');
         const tasks = { ...session.loop.tasks, [task.key]: payload.enabled };
         if (session.preferences) {
           const current = settingsView(session);

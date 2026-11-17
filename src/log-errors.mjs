@@ -4,7 +4,7 @@ const requestLabels = new Map([
   ['DailyTaskInfoRequest', '读取每日任务'],
   ['MainTaskInfoRequest', '读取主线任务'],
   ['WeekInfoRequest', '读取周活动'],
-  ['WeekOrderInfoRequest', '读取周订单'],
+  ['WeekOrderInfoRequest', '读取商人订单'],
   ['AllItemRequest', '读取仓库'],
   ['OnWaterRequest', '读取海面建筑'],
   ['HeroStarUpRequest', '英雄升星'],

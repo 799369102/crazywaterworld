@@ -36,6 +36,9 @@ function legacySettings() {
   delete settings.gather.enabled;
   delete settings.museum.runEnabled;
   delete settings.radar.runEnabled;
+  delete settings.heroRaid.challenge;
+  delete settings.heroRaid.retryTimes;
+  delete settings.heroRaid.lottery;
   return settings;
 }
 
@@ -55,6 +58,7 @@ try {
     assert.equal(migrated.factory.gain, true);
     assert.equal(migrated.gather.fishing, false);
     assert.equal(migrated.factory.checkEverySeconds, 30);
+    assert.deepEqual(migrated.heroRaid, { enabled: false, challenge: false, retryTimes: 10, orders: false, lottery: false, rewards: true });
     assert.deepEqual(migrated.cityWar.defenceFleetIds, []);
     const once = migrateSettingsVersion(settings, 1);
     assert.deepEqual(migrateSettingsVersion(once, 1), once);
@@ -119,6 +123,27 @@ try {
       const invalid = structuredClone(document);
       invalid.settings.cityWar[field] = value;
       assert.throws(() => importAutomationSettings(invalid), error => !!error.fields?.['cityWar.' + field]);
+    }
+  });
+  test('超凡英雄旧设置保留既有选择并补全挑战与转盘字段', () => {
+    const settings = legacySettings();
+    settings.heroRaid = { enabled: true, orders: true, rewards: false };
+    const expected = { enabled: true, challenge: false, retryTimes: 10, orders: true, lottery: false, rewards: false };
+    const document = { format: SETTINGS_FORMAT, version: 1, settings };
+    assert.deepEqual(importAutomationSettings(document).heroRaid, expected);
+    fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { raid: { settings, revision: 3 } } }));
+    const original = fs.readFileSync(file);
+    assert.deepEqual(loadAutomationSettings('raid', { file }).settings.heroRaid, expected);
+    assert.deepEqual(fs.readFileSync(file), original);
+    for (const [field, value] of [['challenge', 'true'], ['lottery', 1], ['retryTimes', -1], ['retryTimes', 101], ['retryTimes', 1.5], ['retryTimes', null]]) {
+      const invalid = structuredClone(document);
+      invalid.settings.heroRaid[field] = value;
+      assert.throws(() => importAutomationSettings(invalid), error => !!error.fields?.['heroRaid.' + field]);
+    }
+    for (const retryTimes of [0, 100]) {
+      const valid = structuredClone(document);
+      Object.assign(valid.settings.heroRaid, { challenge: true, lottery: true, retryTimes });
+      assert.deepEqual(importAutomationSettings(valid).heroRaid, { ...expected, challenge: true, lottery: true, retryTimes });
     }
   });
   test('旧账号缺少详细设置时仍返回版本0且不会创建详细配置', () => {

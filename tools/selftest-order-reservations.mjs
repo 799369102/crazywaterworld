@@ -82,7 +82,7 @@ export async function testOrderReservations() {
     await assert.rejects(broken.read());
   }
   const noProtocol = fixture();
-  await assert.rejects(noProtocol.read({}, { ...protocol, WeekOrderInfoResponse: undefined }), /协议缺少周订单/);
+  await assert.rejects(noProtocol.read({}, { ...protocol, WeekOrderInfoResponse: undefined }), /协议缺少商人订单/);
   await assert.rejects(fixture().read({}, protocol, { tables: {} }), /贸易港开放条件/);
   const absent = fixture(); delete absent.player.playerId;
   await assert.rejects(absent.read(), /账号身份/);

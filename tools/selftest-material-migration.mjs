@@ -212,7 +212,7 @@ export async function testMaterialMigration() {
     museum.weekOrder = [asset('fish', 5)];
     const blocked = await museum.museum(6);
     assert.equal(blocked[0].ok, false);
-    assert.match(blocked[0].error, /周订单.*贸易港.*居民订单/);
+    assert.match(blocked[0].error, /商人订单.*贸易港.*居民订单/);
     assert.deepEqual(museum.writes, []);
     assert((await museum.museum(5))[0].ok, 'only stock beyond all three order reservations is available to a new expedition');
     await assert.rejects(museum.read(), /扣款尚未确认/);

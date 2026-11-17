@@ -76,6 +76,36 @@ try {
     assert.equal(nativeTaskValues(changed, {}).collect, false);
   });
 
+  await check('商人自动完成与钻石补料独立保存，旧账号补料默认关闭', () => {
+    const settings = validateSettings(defaultSettings());
+    assert.equal(settings.schedule.weekOrderSubmit, false);
+    assert.equal(settings.weekOrder.allowDiamonds, false);
+    settings.schedule.weekOrderSubmit = true;
+    settings.weekOrder.allowDiamonds = true;
+    const file = path.join(directory, 'week-order-settings.json');
+    saveAutomationSettings('merchant', settings, { file, revision: 0 });
+    assert.equal(loadAutomationSettings('merchant', { file }).settings.weekOrder.allowDiamonds, true);
+    assert.deepEqual(importAutomationSettings(exportAutomationSettings(settings)), settings);
+    assert.equal(loadAutomationSettings('another', { file }).settings.weekOrder.allowDiamonds, false);
+    const old = structuredClone(settings);
+    delete old.weekOrder;
+    fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { merchant: { revision: 4, settings: old } } }));
+    const bytes = fs.readFileSync(file);
+    for (const migrated of [loadAutomationSettings('merchant', { file }).settings,
+      importAutomationSettings({ format: 'crazywaterword-automation', version: 1, settings: old })]) {
+      assert.equal(migrated.schedule.weekOrderSubmit, true);
+      assert.equal(migrated.weekOrder.allowDiamonds, false);
+      delete migrated.weekOrder;
+      assert.deepEqual(migrated, old);
+    }
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    for (const value of ['true', 1, null]) {
+      const invalid = defaultSettings();
+      invalid.weekOrder.allowDiamonds = value;
+      assert.throws(() => validateSettings(invalid), error => !!error.fields?.['weekOrder.allowDiamonds']);
+    }
+  });
+
   await check('城战逐队攻防配置校验、旧值迁移和导入导出', () => {
     const settings = validateSettings(defaultSettings());
     settings.cityWar.fleetIds = ['1远征船', '2远征船'];

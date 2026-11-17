@@ -51,7 +51,7 @@ export async function serviceGuildAid(client, protocol, config, { player, enable
     if (!active()) return skip('账号已暂停或连接已更换');
     const now = Math.floor((Date.now() + (client.serverClockOffsetMs || 0)) / 1000);
     const picked = planGuildAid(eligible, available, uidText(player.playerId), now);
-    if (!picked.length) { later(300); return skip('留足周订单、贸易港和居民订单后，没有可用于互助的材料'); }
+    if (!picked.length) { later(300); return skip('留足商人订单、贸易港和居民订单后，没有可用于互助的材料'); }
     const counts = new Map();
     for (const ask of picked) counts.set(ask.reqItemId, (counts.get(ask.reqItemId) ?? 0) + 1);
     const debit = beginOrderMaterialSpend(player, [...counts].map(([id, need]) => ({ id, need, have: stock.get(id) ?? 0 })), label,{operation:{}});

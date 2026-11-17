@@ -75,15 +75,24 @@ try {
       const s=defaultSettings();s[group][key]=['不存在的配置项'];assert.throws(()=>validateSettings(s,{catalog}),group+'.'+key);
     }
   });
-  await test('全部新增参数具有界面入口，模块总开关保持子项并跳到正确页签',()=>{
-    const src=fs.readFileSync(new URL('../src/settings-ui.js',import.meta.url),'utf8'),groups=new Function(src.slice(0,src.indexOf('function configGet('))+'\nreturn configGroups;')();
+  await test('全部新增参数具有界面入口，超凡英雄归属活动页并保留子项',()=>{
+    const src=fs.readFileSync(new URL('../src/settings-ui.js',import.meta.url),'utf8');
+    const { groups, activityFields }=new Function(src.slice(0,src.indexOf('function configGet('))+'\nreturn {groups:configGroups,activityFields:activityOwnedSettings};')();
     const fields=new Set(groups.flatMap(g=>g.fields.map(f=>f.key)));
-    const s=defaultSettings();for(const group of ['alliance','guildShip','guildFort','heroRaid','silicon'])for(const key of Object.keys(s[group])){
+    const s=defaultSettings();for(const group of ['alliance','guildShip','guildFort','silicon'])for(const key of Object.keys(s[group])){
       if(key==='fleets')for(let i=0;i<3;i++)for(const name of Object.keys(s.silicon.fleets[i]))assert(fields.has('silicon.fleets.'+i+'.'+name));
       else assert(fields.has(group+'.'+key),group+'.'+key);
     }
+    for(const key of Object.keys(s.heroRaid)){
+      assert(activityFields.has('heroRaid.'+key),'heroRaid.'+key);
+      assert(!fields.has('heroRaid.'+key),'超凡英雄移出游戏配置');
+    }
+    const heroControl=automationControls.find(c=>c.key==='heroRaid.enabled');
+    assert(heroControl);assert(!heroControl.idleGroup);assert(!heroControl.configTarget);
+    Object.assign(s.heroRaid,{enabled:true,challenge:true,orders:true,lottery:true,retryTimes:23});
+    assert.deepEqual(setAutomationControl(s,'heroRaid.enabled',false).heroRaid,{...s.heroRaid,enabled:false});
     s.alliance.recruit=true;const off=setAutomationControl(s,'alliance.enabled',false);assert(off.alliance.recruit);
-    for(const key of ['alliance','guildShip','guildFort','silicon','heroRaid'])assert(automationControls.some(c=>c.key===key+'.enabled'&&c.configTarget));
+    for(const key of ['alliance','guildShip','guildFort','silicon'])assert(automationControls.some(c=>c.key===key+'.enabled'&&c.configTarget));
   });
   await test('刷新模式只在真实刷新窗口加速，每日用量与每程上限共同生效',()=>{
     const f=fixture(),radar={radar:[{cityId:20,specGoodsId:1002}]},stock=new Map([['海商王加速',10]]);

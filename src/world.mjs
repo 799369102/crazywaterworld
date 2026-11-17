@@ -309,7 +309,7 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
   const stockKnown = Array.isArray(itemList?.items) && itemList.items.every(item =>
     (item?.itemId || item?.id) && Number.isSafeInteger(item.num ?? item.count ?? 0) && (item.num ?? item.count ?? 0) >= 0);
   let orderCheckError = !stockKnown ? '未能读取仓库库存' : includeWeekOrder &&
-    (!protocol.WeekInfoRequest || !protocol.WeekOrderInfoRequest) ? '无法确认周订单预留' : '';
+    (!protocol.WeekInfoRequest || !protocol.WeekOrderInfoRequest) ? '无法确认商人订单预留' : '';
   if (includeCargo && !player?.level) orderCheckError = '无法确认贸易港的开放状态';
   if (includeWeekOrder && itemList && protocol.WeekInfoRequest && protocol.WeekOrderInfoRequest) {
     try {
@@ -332,8 +332,8 @@ export async function surveyWorld(client, protocol, { config = null, player = nu
         }
       }
     } catch (error) {
-      notes.push('本轮未能读取周订单：' + error.message);
-      orderCheckError = '未能确认周订单预留';
+      notes.push('本轮未能读取商人订单：' + error.message);
+      orderCheckError = '未能确认商人订单预留';
     }
   }
   const factories = buildings.filter((b) => b.factory);
@@ -404,7 +404,7 @@ export function planWorld(survey, {
   const reserve = (id, num) => reserved.set(id, (reserved.get(id) ?? 0) + Number(num ?? 0));
   const free = (id) => have(id) - (reserved.get(id) ?? 0) - resourceReserve(settings, id);
 
-  // 给手动交周订单留出已有库存，在产和待收的成品也计入缺口。
+  // 给手动交商人订单留出已有库存，在产和待收的成品也计入缺口。
   const weeklyGap = new Map();
   const weeklyHeld = new Map();
   const borrowedTotals = new Map();
@@ -583,7 +583,7 @@ export function planWorld(survey, {
       body: { buildingId: u.building.buildingId },
       costs: u.consume,
       label: `建造${buildingName(u.building)}（需要角色 ${u.row.playerLevel} 级）`
-        + (priorityPlots.has(u.building.buildingId) ? `，周订单需要 ${factoryTargets.get(u.building.type).required} 级` : '')
+        + (priorityPlots.has(u.building.buildingId) ? `，商人订单需要 ${factoryTargets.get(u.building.type).required} 级` : '')
         + (u.capacity ? `，竣工后人口上限 +${u.capacity}` : '')
         + (u.gain ? `，竣工后人口 +${u.gain}` : ''),
     });
@@ -649,7 +649,7 @@ export function planWorld(survey, {
       if (!enabled('finishOrder')) { decision('disabled', '材料已齐，自动交居民订单未开启'); continue; }
       const weeklyBorrowed = shortages.map(({ id, canBorrow }) => ({ id, num: canBorrow }));
       const borrowedText = weeklyBorrowed.map(item => name(item.id) + ' ×' + item.num).join('、');
-      decision('ready', borrowedText ? '周订单尚缺材料，先交居民订单，周订单待补 ' + borrowedText : '材料已齐，可交单');
+      decision('ready', borrowedText ? '商人订单尚缺材料，先交居民订单，商人订单待补 ' + borrowedText : '材料已齐，可交单');
       for (const { id, num } of weeklyBorrowed) {
         weeklyHeld.set(id, weeklyHeld.get(id) - num);
         reserve(id, -num);
@@ -667,14 +667,14 @@ export function planWorld(survey, {
         weeklyBorrowed,
         orderKey: order.orderKey, requirements: order.requirements, workerId: order.workerId, textId: order.textId,
         label: `交付${label}${order.rewardExp == null ? '' : `（经验 ${order.rewardExp}）`}` +
-          (borrowedText ? '；周订单待补 ' + borrowedText : ''),
+          (borrowedText ? '；商人订单待补 ' + borrowedText : ''),
       });
       residentPlanned++;
       continue;
     }
     const short = shortages.map(item => {
       const holds = [];
-      if (item.weeklyReserved) holds.push('周订单预留 ' + item.weeklyReserved);
+      if (item.weeklyReserved) holds.push('商人订单预留 ' + item.weeklyReserved);
       if (item.cargoReserved) holds.push('贸易港预留 ' + item.cargoReserved);
       const cargoOverlap = Math.min(item.weeklyReserved, (survey.cargoOrder?.get(item.id) ?? 0) - item.cargoReserved);
       if (weeklyIncomplete && cargoOverlap > 0) holds.push('其中贸易港也需 ' + cargoOverlap);
@@ -684,12 +684,12 @@ export function planWorld(survey, {
         && rowsOf(config, 'BuildingProduceCfg').some(row => row.itemId === item.id);
       return item.name + '需 ' + item.required + '，库存 ' + item.owned
         + (holds.length ? '（' + holds.join('、') + '）' : '')
-        + (item.canBorrow ? '，整单材料齐后可从周订单临时使用 ' + item.canBorrow : holds.length ? '，可用 ' + item.available : '')
+        + (item.canBorrow ? '，整单材料齐后可从商人订单临时使用 ' + item.canBorrow : holds.length ? '，可用 ' + item.available : '')
         + (item.missing ? '，缺 ' + item.missing : '')
         + (item.missing && limited ? '；加工品存量上限 ' + survey.stockCap : '');
     }).join('；');
     if (shortages.every(item => item.owned >= item.required)) {
-      const holdReason = !weeklyIncomplete && shortages.some(item => item.weeklyReserved) ? '周订单材料已齐，保留待玩家交单：' : '材料已预留：';
+      const holdReason = !weeklyIncomplete && shortages.some(item => item.weeklyReserved) ? '商人订单材料已齐，保留待玩家交单：' : '材料已预留：';
       decision('reserved', holdReason + short, shortages);
     } else if (enabled('finishOrder') && shortages.every(item => (dueHarvest.get(item.id) ?? 0) >= item.missing)) {
       decision('missing', '等待本轮收货后复查：' + short, shortages);
@@ -879,7 +879,7 @@ export function planWorld(survey, {
       credit(best.itemId, 1);
       const displayFactory = buildingName(b);
       const displayProduct = name(best.itemId);
-      const reason = forDemand && weeklyNeed ? `周订单缺 ${weeklyNeed} 件` + (needsConfirmedBorrow ? '，居民交单后补回' : '') : forDemand && cargoNeed ? `贸易港缺 ${cargoNeed} 件`
+      const reason = forDemand && weeklyNeed ? `商人订单缺 ${weeklyNeed} 件` + (needsConfirmedBorrow ? '，居民交单后补回' : '') : forDemand && cargoNeed ? `贸易港缺 ${cargoNeed} 件`
         : forDemand && need ? `居民订单缺 ${need} 件` : forDemand && buildNeed ? `${buildMaterials.get(best.itemId).name}建造缺 ${buildNeed} 件` : `补库存，排入后预计共 ${projected + 1} 件（含待收和在产）`;
       actions.push({
         kind: 'startProduce',
@@ -955,7 +955,7 @@ export function planWorld(survey, {
         body: { buildingId: u.building.buildingId },
         costs: u.consume,
         label: `${buildingName(u.building)}从 ${u.building.level} 级升至 ${u.building.level + 1} 级（耗时 ${durationText(u.costTime)}，需要 ${u.row.curPeople} 人）`
-          + (priority ? `，周订单需要 ${factoryTargets.get(u.building.type).required} 级` : ''),
+          + (priority ? `，商人订单需要 ${factoryTargets.get(u.building.type).required} 级` : ''),
       });
     }
   }
@@ -1153,7 +1153,7 @@ export async function runWorldRound(client, protocol, plan, {
 // A harvest earlier in this round can complete the weekly order. Do not spend
 // its stock based solely on a plan that was made before the harvest.
 async function confirmResidentOrder(client, protocol, step, config, player, cargoEnabled, settings, usage) {
-  if (!config || !player) return { reason: '无法复核周订单和贸易港预留' };
+  if (!config || !player) return { reason: '无法复核商人订单和贸易港预留' };
   const includeCargo = cargoEnabled();
   const survey = await surveyWorld(client, protocol, { config, player, ordersOnly: true, includeCargo });
   if (survey.orderCheckError) return { reason: survey.orderCheckError };

@@ -291,8 +291,17 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 /* ---- 活动 ---- */
 .activity-toolbar,.activity-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px }
 .activity-shell { display:grid; gap:16px; align-items:start }
-.activity-tabs { display:flex; gap:6px; overflow-x:auto; padding:2px 2px 8px; scrollbar-width:none }
-.activity-tabs::-webkit-scrollbar { display:none }
+.activity-tabs { display:grid; gap:8px; min-width:0 }
+.activity-current-tabs,.activity-state-tabs { display:flex; gap:6px; overflow-x:auto; padding:2px 2px 8px; scrollbar-width:none }
+.activity-current-tabs::-webkit-scrollbar,.activity-state-tabs::-webkit-scrollbar { display:none }
+.activity-state-tabs[hidden] { display:none }
+.activity-state-group { min-width:0; border-top:1px solid var(--border); padding-top:4px }
+.activity-state-toggle { display:flex; align-items:center; gap:8px; width:100%; padding:8px; text-align:left; font-weight:500; background:transparent; border:0; border-radius:6px; cursor:pointer }
+.activity-state-toggle::before { content:'›'; display:inline-block; transition:transform .15s }
+.activity-state-toggle[aria-expanded=true]::before { transform:rotate(90deg) }
+.activity-state-toggle .dim { margin-left:auto; font-size:12px; font-weight:400 }
+.activity-state-toggle:hover { background:var(--accent) }
+.activity-state-toggle:focus-visible { outline:2px solid var(--ring); outline-offset:2px }
 .activity-tabs:empty { display:none }
 .activity-group { display:none; align-items:baseline; justify-content:space-between; gap:8px; padding:8px 8px 4px; font-size:12px; font-weight:500; color:var(--muted-foreground) }
 .activity-group:first-child { padding-top:4px }
@@ -314,6 +323,8 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .activity-controls { grid-column:2; grid-row:1 / span 2; display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:12px }
 .activity-auto { display:flex; gap:8px; align-items:center; cursor:pointer; font-weight:400; white-space:nowrap }
 .activity-auto input[type=number] { width:72px }
+.activity-settings { display:grid; gap:12px }
+.activity-settings .activity-auto { white-space:normal }
 .activity-content { display:grid; gap:16px; min-width:0 }
 #activities-status:empty { display:none }
 #activities-order { overflow-x:auto }
@@ -332,7 +343,8 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .pirate-list { display:grid; gap:4px }
 @container main (min-width:640px) {
   .activity-shell { grid-template-columns:clamp(220px,28%,280px) minmax(0,1fr) }
-  .activity-tabs { flex-direction:column; gap:2px; overflow:visible; padding:8px; border:1px solid var(--border); border-radius:calc(var(--radius) * 1.4); box-shadow:0 1px 2px 0 rgb(0 0 0 / .05) }
+  .activity-tabs { gap:4px; padding:8px; border:1px solid var(--border); border-radius:calc(var(--radius) * 1.4); box-shadow:0 1px 2px 0 rgb(0 0 0 / .05) }
+  .activity-current-tabs,.activity-state-tabs { flex-direction:column; gap:2px; overflow:visible; padding:0 }
   .activity-group { display:flex }
   .activity-tab { border-color:transparent }
   .activity-tab[aria-selected=true] { border-color:transparent }

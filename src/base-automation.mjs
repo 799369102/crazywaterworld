@@ -432,7 +432,7 @@ export async function runBaseAutomation(client, protocol, config, plan, { player
           if (!Number.isSafeInteger(total)) throw new AutomationSkip('博物馆派遣消耗无法精确确认');
           costs.set(cost.id, total);
         }
-        if (!costs.size || [...costs].some(([id, need]) => (reserved.available.get(id) ?? 0) < need)) throw new AutomationSkip('博物馆派遣材料不足，或已为周订单、贸易港和居民订单预留');
+        if (!costs.size || [...costs].some(([id, need]) => (reserved.available.get(id) ?? 0) < need)) throw new AutomationSkip('博物馆派遣材料不足，或已为商人订单、贸易港和居民订单预留');
       }
       if (['petBreed', 'petClaim', 'petFeed'].includes(step.kind)) {
         const fresh = normalize(await client.request('OnWaterRequest', {}, 'OnWaterResponse', 8000));

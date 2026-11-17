@@ -18,12 +18,13 @@ function fixture() {
   const id = ++serial, now = Math.floor(Date.now() / 1000), start = now - 86400;
   const f = { id, player: { playerId: String(9007199300000000n + BigInt(id)), worldId: '2002001', guildId: '1001', level: 50 },
     settings: defaultSettings(), file: path.join(root, id + '.json'), calls: [], writes: [], reports: [],
-    gameRaid: { raidId: 1001, startTime: start, finishTime: now + 86400, order: { orderId: 1, gotOrderId: 0, gotTimes: 0 }, drawTimesInfo: { times: 0, gotIndex: 0 } },
-    stock: {}, fail: '', lost: '', readHook: null, wrongReceipt: false, workerOrder: [], disconnected: false };
+    gameRaid: { raidId: 1001, startTime: start, finishTime: now + 86400, passedStage: 0, order: { orderId: 1, gotOrderId: 0, gotTimes: 0 }, drawTimesInfo: { times: 0, gotIndex: 0 } },
+    stock: {}, fail: '', lost: '', readHook: null, replyHook: null, wrongReceipt: false, workerOrder: [], disconnected: false, won: true, wait: async () => {} };
   Object.assign(f.settings.heroRaid, { enabled: true, orders: true, rewards: true });
   const orders = actual.tables.HeroRaidOrderCfg.data.filter(row => row.raidId === 1001);
   f.config = { materialName: id => id, tables: { HeroRaidOrderCfg: table(orders), HeroRaidOrderRewardCfg: actual.tables.HeroRaidOrderRewardCfg,
-    HeroRaidLotteryTimesCfg: actual.tables.HeroRaidLotteryTimesCfg, CargoUnlockCfg: table([{ index: 1, playerLevel: 9 }]) } };
+    HeroRaidLotteryTimesCfg: actual.tables.HeroRaidLotteryTimesCfg, HeroRaidLotteryCfg: actual.tables.HeroRaidLotteryCfg,
+    HeroRaidStageCfg: actual.tables.HeroRaidStageCfg, CargoUnlockCfg: table([{ index: 1, playerLevel: 9 }]) } };
   for (const row of orders) for (const [item] of row.orderList) f.stock[item] = 500;
   f.ledger = createUsageLedger('hero-' + id, { file: f.file });
   f.connect = () => {
@@ -55,23 +56,34 @@ function fixture() {
           const tiers = actual.tables.HeroRaidLotteryTimesCfg.data.filter(row => row.raidId === f.gameRaid.raidId && row.reqTimes <= f.gameRaid.drawTimesInfo.times);
           f.gameRaid.drawTimesInfo.gotIndex = Math.max(...tiers.map(row => row.index));
           value = { gotInfo: structuredClone(f.gameRaid.drawTimesInfo), reward: { asset: [{ type: 0, id: '橙卡万能碎片', num: 10 }] } };
+        } else if (name === 'HeroRaidChallengeRequest') {
+          value = { raidId: body.raidId, stageId: body.stageId, initialData: { leftTeam: {}, rightTeams: [{}] } };
+          if (f.won) {
+            f.gameRaid.passedStage = body.stageId;
+            value.reward = { asset: [{ type: 0, id: '英雄副本抽卡券', num: 1 }] };
+          }
+        } else if (name === 'HeroRaidPrizeRequest') {
+          assert(f.stock.英雄副本抽卡券 >= body.times);
+          f.stock.英雄副本抽卡券 -= body.times;
+          f.gameRaid.drawTimesInfo.times += body.times;
+          value = { prizeIndex: 1, gotInfo: structuredClone(f.gameRaid.drawTimesInfo), reward: { asset: [{ type: 0, id: '红技能书', num: 2 }] } };
         } else throw Error('禁止未知写协议：' + name);
         if (f.lost === name) throw Error('服务端已处理，回执丢失');
         if (f.wrongReceipt) value = {};
       }
-      return wire(response, value);
+      return wire(response, f.replyHook?.(name, value) ?? value);
     };
     return client;
   };
   f.connect();
   f.push = (name = 'SCAllActivity') => f.client.emit('message', { name, body: wire(name, name === 'SCAllActivity' ? { raid: [f.gameRaid] } : { raid: f.gameRaid }) });
-  f.run = () => runHeroRaidAutomation(f.client, protocol, f.config, f.player, { getSettings: () => f.settings, ledger: f.ledger, enabled: () => true, report: row => f.reports.push(row) });
+  f.run = () => runHeroRaidAutomation(f.client, protocol, f.config, f.player, { getSettings: () => f.settings, ledger: f.ledger, enabled: () => true, report: row => f.reports.push(row), wait: f.wait });
   f.demands = () => heroRaidDemands(f.client, f.config, f.player, f.settings, { ledger: f.ledger });
   return f;
 }
 
 try {
-  await test('没有免费抽次数字段与接口，自动化从不发送消耗抽卡券的 Prize 请求', async () => {
+  await test('没有免费抽次数字段与接口，自动抽奖默认关闭', async () => {
     assert(protocol.HeroRaidPrizeRequest); assert(!protocol.HeroRaidInfoRequest);
     assert.equal('freeTimes' in new protocol.HeroRaidTimes(), false);
     const f = fixture(); f.push(); await f.run(); assert(f.writes.every(row => row.name !== 'HeroRaidPrizeRequest'));
@@ -150,6 +162,96 @@ try {
   await test('重复活动编号或不完整推送封锁旧状态，不能并发提交同一订单', async () => {
     const f = fixture(); f.push(); f.client.emit('message', { name: 'SCAllActivity', body: { raid: [f.gameRaid, f.gameRaid] } }); await f.run(); assert.equal(f.writes.length, 0);
     f.push(); await Promise.all([f.run(), f.run()]); assert.equal(f.writes.length, 1);
+  });
+  await test('自动挑战按真实关卡推进，明确胜利才更新进度，每轮挑战一次', async () => {
+    const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, challenge: true }); f.push();
+    await f.run(); assert.equal(f.writes.length, 1); assert.equal(f.writes[0].name, 'HeroRaidChallengeRequest');
+    const stages = actual.tables.HeroRaidStageCfg.data.filter(row => row.raidId === 1001);
+    assert.equal(f.writes[0].body.stageId, stages[0].stageId); assert.equal(watchHeroRaidPushes(f.client).raids.get(1001).passedStage, stages[0].stageId);
+    await f.run(); assert.equal(f.writes[1].body.stageId, stages[1].stageId);
+    f.gameRaid.passedStage = stages.at(-1).stageId; f.push(); await f.run(); assert.equal(f.writes.length, 2);
+  });
+  await test('重试次数为首次挑战后的额外次数，跨轮与重连保存战败额度', async () => {
+    const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, challenge: true, retryTimes: 1 }); f.won = false; f.push();
+    await f.run(); assert.equal(f.writes.length, 1); assert.equal(f.gameRaid.passedStage, 0); assert.equal(f.ledger.snapshot().uncertain, 0);
+    f.ledger = createUsageLedger('hero-' + f.id, { file: f.file }); f.connect(); f.push();
+    await f.run(); assert.equal(f.writes.length, 2); await f.run(); assert.equal(f.writes.length, 2); assert.match(f.reports.at(-1).reason, /重试已用完/);
+    f.settings.heroRaid.retryTimes = 2; f.won = true; await f.run(); assert.equal(f.writes.length, 3);
+    await f.run(); assert.equal(f.writes.length, 4); assert.notEqual(f.writes[3].body.stageId, f.writes[2].body.stageId);
+    const g = fixture(); Object.assign(g.settings.heroRaid, { orders: false, rewards: false, challenge: true, retryTimes: 0 }); g.won = false; g.push();
+    await g.run(); await g.run(); assert.equal(g.writes.length, 1);
+  });
+  await test('挑战未知结果与残缺回包不计战败、不重发，通关推送可恢复', async () => {
+    for (const failure of ['lost', 'wrongReceipt']) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, challenge: true });
+      if (failure === 'lost') f.lost = 'HeroRaidChallengeRequest'; else f.wrongReceipt = true;
+      f.push(); await f.run(); assert.equal(f.ledger.snapshot().uncertain, 1);
+      assert(Object.values(f.ledger.keyRecords()).every(row => row.details?.won === undefined));
+      f.lost = ''; f.wrongReceipt = false; await f.run(); assert.equal(f.writes.length, 1);
+      f.connect(); f.push(); await f.run(); assert.equal(f.writes.length, 2); assert.equal(f.ledger.snapshot().uncertain, 0);
+    }
+  });
+  await test('挑战明确未发送与服务端拒绝不占重试额度，等待限频后复核状态', async () => {
+    for (const failure of ['HeroRaidChallengeRequest', 'reject:HeroRaidChallengeRequest']) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, challenge: true, retryTimes: 0 }); f.push();
+      f.fail = failure; await f.run(); assert.equal(f.ledger.snapshot().uncertain, 0);
+      f.fail = ''; await f.run(); assert.equal(f.writes.length, 2);
+      f.wait = async () => { f.settings.heroRaid.challenge = false; }; await f.run(); assert.equal(f.writes.length, 2);
+    }
+  });
+  await test('挑战错关、缺失战报、空奖励及陌生已通关编号均阻止推进', async () => {
+    for (const mutate of [reply => reply.stageId++, reply => reply.raidId++, reply => delete reply.initialData,
+      reply => reply.initialData.rightTeams = [], reply => reply.reward = {}]) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, challenge: true }); f.push();
+      f.replyHook = (name, reply) => { if (name === 'HeroRaidChallengeRequest') mutate(reply); return reply; };
+      await f.run(); await f.run(); assert.equal(f.writes.length, 1); assert.equal(f.ledger.snapshot().uncertain, 1);
+      assert.equal(watchHeroRaidPushes(f.client).raids.get(1001).passedStage, 0);
+    }
+    const g = fixture(); Object.assign(g.settings.heroRaid, { orders: false, rewards: false, challenge: true }); g.gameRaid.passedStage = 999; g.push();
+    await g.run(); assert.equal(g.writes.length, 0);
+  });
+  await test('转盘按已有券抽取十次或一次，累计进度与奖励自动衔接', async () => {
+    const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, lottery: true }); f.stock.英雄副本抽卡券 = 11; f.push();
+    await f.run(); assert.deepEqual(f.writes.map(row => row.name), ['HeroRaidPrizeRequest', 'HeroRaidGotRewardRequest']);
+    assert.equal(f.writes[0].body.times, 10); assert.equal(watchHeroRaidPushes(f.client).raids.get(1001).drawTimesInfo.times, 10);
+    await f.run(); assert.equal(f.writes.at(-1).body.times, 1); assert.equal(f.stock.英雄副本抽卡券, 0);
+    await f.run(); assert.equal(f.writes.length, 3); assert.match(f.reports.at(-1).reason, /抽卡券不足/);
+    assert(f.writes.every(row => /^HeroRaid/.test(row.name)));
+  });
+  await test('关闭总开关或转盘子开关时保留券，读库存期间切换状态取消抽奖', async () => {
+    for (const change of [f => f.settings.heroRaid.enabled = false, f => f.settings.heroRaid.lottery = false,
+      f => f.player.playerId = '999', f => { f.gameRaid.drawTimesInfo.times++; f.push(); },
+      f => { f.gameRaid.finishTime = Math.floor(Date.now() / 1000) - 1; f.push(); }]) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, lottery: true }); f.stock.英雄副本抽卡券 = 10; f.push();
+      f.readHook = name => { if (name === 'AllItemRequest') change(f); }; await f.run(); assert.equal(f.writes.length, 0); assert.equal(f.stock.英雄副本抽卡券, 10);
+    }
+  });
+  await test('抽奖未知结果跨重启防重，真实累计次数核销，错误回执不消费第二次', async () => {
+    const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, lottery: true }); f.stock.英雄副本抽卡券 = 20; f.push();
+    f.lost = 'HeroRaidPrizeRequest'; await f.run(); assert.equal(f.stock.英雄副本抽卡券, 10); assert.equal(f.ledger.snapshot().uncertain, 1);
+    f.lost = ''; f.ledger = createUsageLedger('hero-' + f.id, { file: f.file }); await f.run(); assert.equal(f.writes.length, 1);
+    f.connect(); f.push(); await f.run(); assert.equal(f.writes.length, 2); assert.equal(f.stock.英雄副本抽卡券, 0); assert.equal(f.ledger.snapshot().uncertain, 0);
+    const g = fixture(); Object.assign(g.settings.heroRaid, { orders: false, rewards: false, lottery: true }); g.stock.英雄副本抽卡券 = 20; g.wrongReceipt = true; g.push();
+    await g.run(); await g.run(); assert.equal(g.writes.length, 1); assert.equal(g.ledger.snapshot().uncertain, 1);
+  });
+  await test('抽奖明确拒绝可重试，回执后读取失败保留材料保护', async () => {
+    for (const failure of ['HeroRaidPrizeRequest', 'reject:HeroRaidPrizeRequest']) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, lottery: true }); f.stock.英雄副本抽卡券 = 10; f.push();
+      f.fail = failure; await f.run(); assert.equal(f.ledger.snapshot().uncertain, 0); assert.equal(f.stock.英雄副本抽卡券, 10);
+      f.fail = ''; await f.run(); assert.equal(f.writes.length, 2); assert.equal(f.stock.英雄副本抽卡券, 0);
+    }
+    const g = fixture(); Object.assign(g.settings.heroRaid, { orders: false, rewards: false, lottery: true }); g.stock.英雄副本抽卡券 = 20; g.push();
+    g.readHook = name => { if (name === 'AllItemRequest' && g.writes.length) throw Object.assign(Error('读取失败'), { notSent: true }); };
+    await g.run(); await g.run(); assert.equal(g.writes.length, 1); assert.equal(g.ledger.snapshot().uncertain, 0);
+    g.readHook = null; await g.run(); assert.equal(g.writes.length, 2);
+  });
+  await test('转盘累计次数、领奖档位或奖励不匹配时保留待确认记录', async () => {
+    for (const mutate of [reply => reply.gotInfo.times--, reply => reply.gotInfo.gotIndex++, reply => reply.reward = {}]) {
+      const f = fixture(); Object.assign(f.settings.heroRaid, { orders: false, rewards: false, lottery: true }); f.stock.英雄副本抽卡券 = 20; f.push();
+      f.replyHook = (name, reply) => { if (name === 'HeroRaidPrizeRequest') mutate(reply); return reply; };
+      await f.run(); await f.run(); assert.equal(f.writes.length, 1); assert.equal(f.ledger.snapshot().uncertain, 1);
+      assert.equal(watchHeroRaidPushes(f.client).raids.get(1001).drawTimesInfo.times, 0);
+    }
   });
   console.log(`${passed}/${passed} 超凡英雄自动化测试通过`);
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

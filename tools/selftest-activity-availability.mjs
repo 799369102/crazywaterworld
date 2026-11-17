@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { activityAvailability, activityRetirements, isActivityTaskAvailable } from '../src/activity-availability.mjs';
+import { activityAvailability, activityRetirements, isActivityTaskAvailable, nextActivityBoundary } from '../src/activity-availability.mjs';
+import { rewardSchedule } from '../src/reward-schedule.mjs';
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-activity-availability-'));
 const previousDataDir = process.env.CW_DATA_DIR;
@@ -50,6 +51,16 @@ try {
     now = savedNow;
   });
 
+  await test('公告期限以前执行仍核验服务端窗口，未来和过期活动不放行', () => {
+    const savedNow = now;
+    now = cutoff - 10000;
+    assert(!available('compassSpin', []));
+    assert(!available('compassSpin', [festival([28], { startTime: seconds() + 1 })]));
+    assert(!available('compassSpin', [festival([28], { endTime: seconds() })]));
+    assert(available('compassSpin', [festival([28])]));
+    now = savedNow;
+  });
+
   await test('结束后仅恢复当前开放的对应子活动，罗盘参数跟随抽取入口', () => {
     const client = { festivals: [festival([28])] };
     const view = activityAvailability(client);
@@ -78,6 +89,14 @@ try {
     assert(!available('compassSpin', [festival([28], { endTime: seconds(), subActivity: [{ subActivityType: 28, closeTime: seconds() + 100 }] })]));
     assert(!available('compassSpin', [festival([28], { subActivity: [{ subActivityType: 28, openTime: seconds() + 100, closeTime: seconds() - 100 }] })]));
     assert(available('compassSpin', [festival([28], { subActivity: [{ subActivityType: 28, openTime: seconds() - 7200, closeTime: seconds() + 7200 }] })]));
+  });
+
+  await test('父活动实际开关时间约束玩法与每日领取，展示结束时间不延长执行', () => {
+    for (const key of ['edict', 'compassSpin', 'festivalSign', 'festivalGifts']) {
+      assert(!available(key, [festival([6, 11, 28, 29], { openTime: seconds() + 1 })]), key);
+      assert(!available(key, [festival([6, 11, 28, 29], { closeTime: seconds() })]), key);
+      assert(available(key, [festival([6, 11, 28, 29], { openTime: 0, closeTime: 0 })]), key);
+    }
   });
 
   await test('下一期全量开放可恢复全部字段，历史过期条目不干扰', () => {
@@ -123,10 +142,30 @@ try {
   });
 
   await test('判定使用服务器时钟偏移，不能被电脑时钟误判', () => {
-    assert(isActivityTaskAvailable('compassSpin', { serverClockOffsetMs: cutoff - 1 - now }));
+    assert(!isActivityTaskAvailable('compassSpin', { serverClockOffsetMs: cutoff - 1 - now }));
     const row = festival([28]);
     assert(!isActivityTaskAvailable('compassSpin', { festivals: [row], serverClockOffsetMs: 3600000 }));
     assert(isActivityTaskAvailable('compassSpin', { festivals: [row], serverClockOffsetMs: Number.NaN }));
+  });
+
+  await test('定时边界按主子活动交集和服务器偏移计算，只采纳当前连接启用任务', () => {
+    const row = festival([28], { openTime: seconds() + 2, closeTime: seconds() + 20,
+      subActivity: [{ subActivityType: 28, openTime: seconds() + 5, closeTime: seconds() + 50 }] });
+    const client = { festivals: [row], serverClockOffsetMs: 1000 };
+    assert.equal(nextActivityBoundary(client, key => key === 'compassSpin'), now + 4000);
+    assert.equal(nextActivityBoundary(client, key => key === 'compassSpin', now + 4000), now + 19000);
+    assert.equal(nextActivityBoundary(client, key => key === 'compassSpin', now + 19000), Infinity);
+    assert.equal(nextActivityBoundary(client, () => false), Infinity);
+    assert.equal(nextActivityBoundary({ activityHistory: [row] }), Infinity);
+    assert.equal(nextActivityBoundary({ festivals: [festival([28], { closeTime: 'invalid' })] }), Infinity);
+  });
+
+  await test('周活动、海商王、风采及新手活动的已知边界可以提前唤醒', () => {
+    const window = { startTime: seconds() + 5, endTime: seconds() + 10 };
+    assert.equal(nextActivityBoundary({ weekActivities: [{ ...window, type: 5 }] }, key => key === 'weekOrderSubmit'), now + 5000);
+    assert.equal(nextActivityBoundary({ tradeWindow: window }, key => key === 'merchantTrade'), now + 5000);
+    assert.equal(nextActivityBoundary({ beautyWindow: window }, key => key === 'beautyGift'), now + 5000);
+    assert.equal(nextActivityBoundary({ newbieActivity: { startTime: seconds() + 5, finishTime: seconds() + 10 } }, key => key === 'newbieLogin'), now + 5000);
   });
 
   await test('隐藏与复开不改历史开关及参数，导入导出完整保留', () => {
@@ -150,9 +189,9 @@ try {
     const settings = defaultSettings();
     Object.assign(settings.loop, { world: false, tasks: false, dailies: false, heroes: false });
     const ledger = createUsageLedger('offline-' + passed, { file: path.join(folder, 'ledger-' + passed + '.json') });
-    const run = keys => runLoop(client, {}, { config: { tables: {} }, player: { level: 37, worldId: '2002001001' },
+    const run = (keys, extra = {}) => runLoop(client, {}, { config: { tables: {} }, player: { level: 37, worldId: '2002001001' },
       getSettings: () => settings, usageLedger: ledger, rounds: 1, allowMutate: true,
-      isEnabled: key => keys.includes(key), onStep: entry => steps.push(entry), sleep: async () => {} });
+      isEnabled: key => keys.includes(key), onStep: entry => steps.push(entry), sleep: async () => {}, ...extra });
     return { client, settings, calls, steps, run };
   };
 
@@ -189,6 +228,61 @@ try {
     assert.deepEqual(f.calls, ['ClaimActivityDailyCheckInRewardRequest']);
     assert.deepEqual(row.subActivity[0].dailyActive.checkInId, [1]);
     assert.deepEqual(other.subActivity[0].dailyActive.checkInId, []);
+  });
+
+  const signConfig = { tables: { LinkageLSRSignCfg: { data: [{ rewardId: 1, signDay: 1 }] } } };
+  function upcomingSign() {
+    const row = festival([11, 28], { startTime: seconds() + 5, openTime: seconds() + 5, closeTime: seconds() + 10 });
+    row.subActivity[0].dailyActive = { checkInId: [] };
+    const fixture = loopFixture([row]);
+    fixture.settings.schedule.festivalSign = true;
+    const writes = [];
+    fixture.client.request = async name => {
+      assert.equal(name, 'ClaimActivityDailyCheckInRewardRequest');
+      writes.push(now);
+      return { checkId: [1], reward: { asset: [{ id: '木材', num: 1 }] } };
+    };
+    return { ...fixture, row, writes };
+  }
+
+  await test('一小时轮询间隔内到开放时间自动运行，到结束时间自动停止并保留选择', async () => {
+    const f = upcomingSign(), started = now, sleeps = [];
+    const before = structuredClone(f.settings);
+    rewardSchedule(f.client).defer('festivalSign', seconds() + 3600);
+    await f.run(['festivalSign'], { config: signConfig, rounds: 3, everyMs: 3600000,
+      sleep: async ms => { sleeps.push(ms); now += ms; } });
+    assert.deepEqual(sleeps, [5000, 5000]);
+    assert.deepEqual(f.writes, [started + 5000]);
+    assert.equal(now, started + 10000);
+    assert.deepEqual(f.settings, before);
+  });
+
+  await test('活动推送可提前唤醒主轮，推送回调只通知且每次写入走账号队列', async () => {
+    const f = upcomingSign(), started = now, sleeps = [];
+    f.client.festivals = [];
+    let inQueue = false;
+    const request = f.client.request;
+    f.client.request = async (...args) => { assert(inQueue); return request(...args); };
+    await f.run(['festivalSign'], { config: signConfig, rounds: 2, everyMs: 3600000,
+      schedule: async work => { assert(!inQueue); inQueue = true; try { return await work(); } finally { inQueue = false; } },
+      sleep: async ms => {
+        sleeps.push(ms); now += 5000;
+        f.client.festivals = [f.row];
+        f.client.emit('message', { name: 'SCAllActivity', body: {} });
+        assert.equal(f.writes.length, 0);
+      } });
+    assert.deepEqual(sleeps, [3600000]);
+    assert.deepEqual(f.writes, [started + 5000]);
+  });
+
+  await test('用户关闭活动时不会因未来日程自动开启或产生协议调用', async () => {
+    const f = upcomingSign(), sleeps = [];
+    f.settings.schedule.festivalSign = false;
+    await f.run([], { config: signConfig, rounds: 2, everyMs: 3600000,
+      sleep: async ms => { sleeps.push(ms); now += ms; } });
+    assert.deepEqual(sleeps, [3600000]);
+    assert.deepEqual(f.writes, []);
+    assert.equal(f.settings.schedule.festivalSign, false);
   });
 
   console.log('活动下线与复开专项 ' + passed + '/' + passed + ' 通过');

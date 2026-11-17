@@ -67,9 +67,9 @@ import { claimExtraRewards, extraRewardKeys } from './extra-rewards.mjs';
 
 import { setTimeout as pause } from 'node:timers/promises';
 import { claimRewards } from './claim-rewards.mjs';
-import { claimWeekly, runLinkage, weekSchedule, readWeekOrder, runWeekOrder, activityView } from './activities.mjs';
+import { claimWeekly, runLinkage, weekSchedule, readWeekOrder, runAutomaticWeekOrder } from './activities.mjs';
 import { automationTasks, dailyTaskKey, defaultFishingGoldReserve, defaultCompassSpinCount, worldTaskKey } from './automation.mjs';
-import { isActivityTaskAvailable } from './activity-availability.mjs';
+import { activityTimeTasks, isActivityTaskAvailable, nextActivityBoundary } from './activity-availability.mjs';
 
 const defaultSleep = (ms, signal) => pause(ms, undefined, { signal });
 const dailyActionKeys = {
@@ -142,6 +142,17 @@ export async function runLoop(client, protocol, {
   const merchantNext = () => merchantActive()
     ? Math.max(merchantRunAfter, merchantMonitor.nextCheckAt * 1000 - (client.serverClockOffsetMs || 0)) : Infinity;
   const scheduler = createLoopScheduler({ client, stop, schedule, sleep });
+  let activityVersion = 0;
+  // 海商王走商已有独立时钟，由 merchantNext 接续，不重复提前消耗主轮。
+  const activityConfigured = key => key !== 'merchantTrade' && nativePreferenceEnabled(getSettings(), key) && (!isEnabled || isEnabled(key));
+  const wakeActivities = () => {
+    if (!activityTimeTasks.some(activityConfigured)) return;
+    activityVersion++;
+    scheduler.wake();
+  };
+  scheduler.listen(client, 'message', ({ name }) => {
+    if (name === 'SCAllActivity' || name === 'SCServerTimeChanged') wakeActivities();
+  });
   let followVersion = 0;
   const factorySchedule = createFactorySchedule(client, {
     getSettings, getConfig: () => config,
@@ -156,7 +167,7 @@ export async function runLoop(client, protocol, {
     siliconAt = 0; siliconVersion++; scheduler.wake();
   }));
   const settingsWake = () => { siliconAt = 0; extendedAt = 0; siliconVersion++; dispatchSettingsPending = true;
-    rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); scheduler.wake(); };
+    rewards?.clearTask('guildShip'); rewards?.clearTask('guildFort'); wakeActivities(); scheduler.wake(); };
   const extendedPush = ({ name }) => {
     if (/^SCGuildShip|^SCFort|^SCHeroRaid/.test(name) || ['SCAllActivity','SCGuildOrder','SCNewGuildAidAsk','SCGuildAidHelp','SCGuildAidRemove','SCNewGuildWelfarePack'].includes(name)) {
       extendedAt = 0; scheduler.wake();
@@ -185,6 +196,7 @@ export async function runLoop(client, protocol, {
     // 配置对象和配套地图均为不可变版本快照；只在下一轮开始时采用新发布。
     if (refreshConfig) config = refreshConfig();
     const roundStartedMs = Date.now();
+    const roundActivityVersion = activityVersion;
     let mainRoundFinished = false;
     const empty = () => ({ planned: 0, results: [] });
     const summary = { round, startedAt: Math.floor(Date.now() / 1000), tasks: empty(), dailies: empty(), world: empty() };
@@ -278,7 +290,7 @@ export async function runLoop(client, protocol, {
             { ledger: usageLedger, enabled: current });
           if (current()) demand = baseDemands(extra, config, currentSettings);
         }
-        const orderRead = !survey.notes.some(note => note.startsWith('本轮未能读取周订单'));
+        const orderRead = !survey.notes.some(note => note.startsWith('本轮未能读取商人订单'));
         const allow = kind => {
           if (!current()) return false;
           if (kind === 'gainFactory') return canFactory('collect');
@@ -685,12 +697,10 @@ export async function runLoop(client, protocol, {
         if (extraRewardKeys.some(rewardEnabled)) await claimExtraRewards(client,config,player,rewardEnabled,report,rewards,rewardActive);
         if (settings && enabled('weekOrderSubmit')) {
           try {
-            const view = (await activityView(client,client.festivals,config)).order;
-            if (view?.ready) {
-              const result = await runWeekOrder(client,config,getSettings(),usageLedger,()=>active('weekOrderSubmit'),'submit',{orderKey:view.orderKey},{player});
-              report({key:'weekOrderSubmit',label:'周订单提交',ok:true,note:result.message});
-            } else report({key:'weekOrderSubmit',label:'周订单提交',skipped:true,reason:'当前订单未开放或材料未齐，等待备料'});
-          } catch(error) { report({key:'weekOrderSubmit',label:'周订单提交',ok:false,error:error.message}); }
+            await runAutomaticWeekOrder(client,config,{player,getSettings,ledger:usageLedger,
+              enabled:()=>active('weekOrderSubmit'),report});
+          } catch(error) { report({key:'weekOrderSubmit',label:'不差钱商人订单',ok:false,
+            ...(error.code==='AUTOMATION_SKIP'?{skipped:true,reason:error.message}:{}),error:error.message}); }
         }
       }
       for (const key of ['radarAuto','radarRepair','equipmentCollect','equipmentCraft','museumCollect','museumExplore','museumAchievements','petCollect','petBreed','treasureLoot','heroGrowth']) {
@@ -1002,8 +1012,10 @@ export async function runLoop(client, protocol, {
         const nextRound = Date.now() + getEveryMs();
         let upgradeAt = Date.now() + 30_000;
         while (scheduler.active() && Date.now() < nextRound) {
+          const activityAt = activityVersion !== roundActivityVersion ? 0
+            : nextActivityBoundary(client, activityConfigured, roundStartedMs);
           const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
-          const wakeAt = Math.min(nextRound, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(),
+          const wakeAt = Math.min(nextRound, activityAt, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
@@ -1013,6 +1025,10 @@ export async function runLoop(client, protocol, {
             antiqueEnabled(getSettings()) ? antiqueAt : Infinity, afkAt);
           if (wakeAt > Date.now()) await scheduler.waitUntil(wakeAt);
           if (!scheduler.active() || Date.now() >= nextRound) break;
+          if (activityVersion !== roundActivityVersion || activityAt <= Date.now()) {
+            for (const key of activityTimeTasks) rewards?.clearTask(key);
+            break;
+          }
           // 推送或保存设置可能早于原定时间唤醒；必须重读当前到期时间与开关。
           const checkUpgrade = !!isEnabled && enabled('upgrade') && upgradeAt <= Date.now();
           if (factorySchedule.due() || checkUpgrade) {

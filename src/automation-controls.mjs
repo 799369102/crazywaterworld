@@ -54,7 +54,6 @@ for (const task of automationTasks) {
 const idleModules = {
  'alliance.enabled':['世界','alliance','联盟募兵与互助'], 'guildShip.enabled':['世界','guildShip','联盟商船'],
  'guildFort.enabled':['世界','guildFort','联盟工事'], 'silicon.enabled':['世界','silicon','硅矿'],
- 'heroRaid.enabled':['日常与活动','hero-raid','超凡英雄活动'],
  'loop.world':['基地','building','基地运行'],
  'building.enabled':['基地','building','建筑'], 'factory.enabled':['基地','factory','工厂'],
  'farm.enabled':['基地','farm','农田'], 'resident.enabled':['基地','resident','居民需求'],

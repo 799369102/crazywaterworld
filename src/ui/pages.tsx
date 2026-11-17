@@ -62,7 +62,7 @@ export function overviewPage() {
 
 export function activitiesPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <div className="activity-toolbar"><p className="dim">选择活动，单独执行或设置自动运行。</p><Button id="activities-refresh" variant="outline" size="sm">刷新活动</Button></div>
+    <div className="activity-toolbar"><p className="dim">按开放时间自动启停。待开放与已结束活动收起保存。</p><Button id="activities-refresh" variant="outline" size="sm">刷新活动</Button></div>
     <div id="activities-status" className="dim" role="status" />
     <div className="activity-shell">
       <div id="activity-tabs" className="activity-tabs" role="tablist" aria-label="选择活动" />

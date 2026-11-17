@@ -2,6 +2,7 @@
 // 没有 HeroRaidInfoRequest，也没有免费抽取次数；禁止把抽卡券当免费次数。
 import { exactAutomationId, resourceReserve } from './automation-policy.mjs';
 import { displayMaterial } from './config.mjs';
+import { waitForChallenge } from './battle-pacing.mjs';
 import { readOrderReservedStock, beginOrderMaterialSpend, cancelOrderMaterialSpend, confirmOrderMaterialOperation, refreshOrderMaterialSpends } from './order-reservations.mjs';
 
 const watches = new WeakMap(), busy = new WeakSet();
@@ -16,7 +17,8 @@ const drawValid = info => info && valid(info.times) && valid(info.gotIndex);
 const orderStamp = raid => JSON.stringify([period(raid), raid.order]);
 const receiptHasReward = reply => reply?.reward?.asset?.some(item => typeof item.id === 'string' && item.id &&
   (typeof item.num === 'number' && item.num > 0 || item.num?.low > 0 || item.num?.high > 0)) || reply?.heroIds?.some(id => typeof id === 'string' && id);
-const recordKinds = new Set(['heroRaidOrder', 'heroRaidOrderReward', 'heroRaidDrawReward']);
+const recordKinds = new Set(['heroRaidOrder', 'heroRaidOrderReward', 'heroRaidDrawReward', 'heroRaidChallenge', 'heroRaidLottery']);
+const lotteryTicket = '英雄副本抽卡券';
 
 function copyRaid(raw) {
   if (!valid(raw?.raidId) || raw.raidId < 1 || !valid(raw.startTime) || !valid(raw.finishTime) || raw.finishTime <= raw.startTime) throw Error('超凡英雄活动时间或编号未完整同步');
@@ -89,10 +91,100 @@ function reconcile(state, player, ledger) {
     if (record.confirmed || !recordKinds.has(d?.kind) || d.identity !== identity(player)) continue;
     const raid = state.raids.get(d.raidId);
     if (!raid || period(raid) !== d.period) continue;
-    const confirmed = d.kind === 'heroRaidOrder' ? orderValid(raid.order) && raid.order.gotOrderId >= d.orderId :
+    const confirmed = d.kind === 'heroRaidChallenge' ? valid(raid.passedStage) && raid.passedStage >= d.stageId :
+      d.kind === 'heroRaidLottery' ? drawValid(raid.drawTimesInfo) && raid.drawTimesInfo.times >= d.beforeTimes + d.times :
+      d.kind === 'heroRaidOrder' ? orderValid(raid.order) && raid.order.gotOrderId >= d.orderId :
       d.kind === 'heroRaidOrderReward' ? orderValid(raid.order) && raid.order.gotTimes > d.beforeGot :
       drawValid(raid.drawTimesInfo) && raid.drawTimesInfo.gotIndex > d.beforeGot;
     if (confirmed) ledger.resolveKey(key, true);
+  }
+}
+
+async function challengeStage(client, config, player, context, initial) {
+  const { state, getSettings, ledger, active, report, wait } = context;
+  const stages = rows(config, 'HeroRaidStageCfg').filter(row => row.raidId === initial.raidId).sort((a, b) => a.stageId - b.stageId);
+  if (!stages.length || stages.some(row => !valid(row.stageId) || row.stageId < 1) || new Set(stages.map(row => row.stageId)).size !== stages.length) throw Error('超凡英雄关卡配置不完整');
+  if (!valid(initial.passedStage) || initial.passedStage && !stages.some(row => row.stageId === initial.passedStage)) throw Error('超凡英雄通关进度与配置不符');
+  const next = stages.find(row => row.stageId > initial.passedStage);
+  if (!next) return report({ key: 'heroRaid', label: '超凡英雄挑战', skipped: true, reason: '本期活动关卡已全部通关' });
+  const retryTimes = getSettings().heroRaid.retryTimes ?? 10;
+  if (!valid(retryTimes)) throw Error('超凡英雄战败重试次数无效');
+  const attempts = Object.values(ledger.keyRecords()).filter(record => record.details?.kind === 'heroRaidChallenge' &&
+    record.details.identity === identity(player) && record.details.period === period(initial) && record.details.stageId === next.stageId);
+  const failures = attempts.filter(record => record.confirmed && record.details.won === false).length;
+  if (failures > retryTimes) return report({ key: 'heroRaid', label: '超凡英雄挑战', skipped: true,
+    reason: '第 ' + next.stageId + ' 关已战败 ' + failures + ' 次，本期该关的 ' + retryTimes + ' 次重试已用完' });
+  await waitForChallenge(client, { wait });
+  const latest = state.raids.get(initial.raidId);
+  if (!active() || !getSettings().heroRaid.challenge || !latest || period(latest) !== period(initial) || latest.passedStage !== initial.passedStage || !open(latest, nowOf(client))) return;
+  const attempt = failures + 1;
+  const key = 'heroRaidChallenge:' + identity(player) + ':' + period(initial) + ':' + next.stageId + ':' + attempt;
+  if (ledger.hasKey(key)) return;
+  const details = { kind: 'heroRaidChallenge', identity: identity(player), period: period(initial), raidId: initial.raidId, stageId: next.stageId, attempt };
+  const token = ledger.reserve({}, {}, {}, { uniqueKey: key, details });
+  let acknowledged = false;
+  try {
+    if (!active() || !getSettings().heroRaid.challenge) { ledger.cancel(token); return; }
+    const reply = await client.request('HeroRaidChallengeRequest', { raidId: initial.raidId, stageId: next.stageId }, 'HeroRaidChallengeResponse'); acknowledged = true;
+    if (reply?.raidId !== initial.raidId || reply.stageId !== next.stageId || !reply.initialData?.leftTeam || !reply.initialData?.rightTeams?.length) throw Error('超凡英雄挑战战报未完整确认');
+    // 游戏客户端以 reward 是否返回判断通关，战报类型没有 stats 字段。
+    const won = reply.reward != null;
+    if (won && !receiptHasReward(reply)) throw Error('超凡英雄挑战奖励回执不完整');
+    ledger.updateKeyDetails(key, { ...details, won });
+    ledger.confirm(token);
+    const current = state.raids.get(initial.raidId);
+    if (won && current && period(current) === period(initial) && current.passedStage < next.stageId) {
+      state.raids.set(initial.raidId, { ...current, passedStage: next.stageId }); state.revision++;
+    }
+    report({ key: 'heroRaid', label: '超凡英雄 · 第 ' + next.stageId + ' 关', ok: won, skipped: !won,
+      reason: won ? '已通关，下轮继续' : '已战败 ' + attempt + ' 次' + (attempt > retryTimes ? '，本期该关重试已用完' : '，下轮重试') });
+  } catch (error) {
+    const refused = !acknowledged && (error.notSent === true || error.prompt && error.request === 'HeroRaidChallengeRequest');
+    if (refused) ledger.cancel(token);
+    report({ key: 'heroRaid', label: '超凡英雄挑战', error: error.message, pending: !refused });
+  }
+}
+
+function applyDraw(state, original, info) {
+  const current = state.raids.get(original.raidId);
+  if (!current || period(current) !== period(original)) return;
+  if (drawValid(current.drawTimesInfo) && (current.drawTimesInfo.times > info.times || current.drawTimesInfo.gotIndex > info.gotIndex)) return;
+  state.raids.set(original.raidId, { ...current, drawTimesInfo: { times: info.times, gotIndex: info.gotIndex } }); state.revision++;
+}
+
+async function drawLottery(client, protocol, config, player, context, initial) {
+  const { state, getSettings, ledger, active, report } = context;
+  const before = initial.drawTimesInfo, actorIdentity = identity(player);
+  if (!drawValid(before)) throw Error('超凡英雄累计抽奖进度未完整同步');
+  if (!rows(config, 'HeroRaidLotteryCfg').some(row => row.raidId === initial.raidId)) throw Error('超凡英雄转盘配置缺失');
+  const stock = await readOrderReservedStock(client, protocol, config, { player, enabled: active, itemIds: [lotteryTicket] });
+  const latest = state.raids.get(initial.raidId);
+  if (!active() || !getSettings().heroRaid.lottery || !latest || period(latest) !== period(initial) || JSON.stringify(latest.drawTimesInfo) !== JSON.stringify(before) || !open(latest, nowOf(client))) return;
+  const available = (stock.available.get(lotteryTicket) ?? 0) - resourceReserve(getSettings(), lotteryTicket);
+  if (available < 1) return report({ key: 'heroRaid', label: '超凡英雄转盘', skipped: true, reason: '英雄副本抽卡券不足' });
+  const times = available >= 10 ? 10 : 1;
+  const key = 'heroRaidLottery:' + identity(player) + ':' + period(initial) + ':' + before.times;
+  if (ledger.hasKey(key)) return;
+  const token = ledger.reserve({}, {}, {}, { uniqueKey: key, details: { kind: 'heroRaidLottery', identity: identity(player), period: period(initial), raidId: initial.raidId, beforeTimes: before.times, times } });
+  let debit, acknowledged = false;
+  try {
+    debit = beginOrderMaterialSpend(player, [{ id: lotteryTicket, need: times, have: stock.stock.get(lotteryTicket) ?? 0 }], '超凡英雄转盘', { operation: {
+      verify(next, { player: actor, enabled }) {
+        const observed = watchHeroRaidPushes(next), raid = observed.raids.get(initial.raidId);
+        return enabled() && identity(actor) === actorIdentity && observed.observed && !observed.invalid && raid && period(raid) === period(initial) && drawValid(raid.drawTimesInfo) && raid.drawTimesInfo.times >= before.times + times;
+      },
+    } });
+    if (!active() || !getSettings().heroRaid.lottery) { ledger.cancel(token); cancelOrderMaterialSpend(debit); return; }
+    const reply = await client.request('HeroRaidPrizeRequest', { raidId: initial.raidId, times }, 'HeroRaidPrizeResponse'); acknowledged = true;
+    if (!drawValid(reply?.gotInfo) || reply.gotInfo.times !== before.times + times || reply.gotInfo.gotIndex !== before.gotIndex || !receiptHasReward(reply)) throw Error('超凡英雄转盘抽奖结果未完整确认');
+    applyDraw(state, initial, reply.gotInfo);
+    ledger.confirm(token); confirmOrderMaterialOperation(debit);
+    await refreshOrderMaterialSpends(client, player, { enabled: active });
+    report({ key: 'heroRaid', label: '超凡英雄 · 已消耗 ' + times + ' 张券完成转盘抽奖', ok: true });
+  } catch (error) {
+    const refused = !debit || !acknowledged && (error.notSent === true || error.prompt && error.request === 'HeroRaidPrizeRequest');
+    if (refused) { ledger.cancel(token); cancelOrderMaterialSpend(debit); }
+    report({ key: 'heroRaid', label: '超凡英雄转盘', error: error.message, pending: !refused });
   }
 }
 
@@ -179,10 +271,7 @@ async function claimDrawRewards(client, config, player, context, initial) {
     if (!active() || !getSettings().heroRaid.rewards) { ledger.cancel(token); return; }
     const reply = await client.request('HeroRaidGotRewardRequest', { raidId: initial.raidId }, 'HeroRaidGotRewardResponse'); acknowledged = true;
     if (!drawValid(reply?.gotInfo) || !tiers.some(row => row.index === reply.gotInfo.gotIndex) || reply.gotInfo.times < before.times || !receiptHasReward(reply)) throw Error('超凡英雄累计抽取领奖结果未确认');
-    const current = state.raids.get(initial.raidId);
-    if (current && period(current) === period(initial) && (!drawValid(current.drawTimesInfo) || current.drawTimesInfo.gotIndex <= reply.gotInfo.gotIndex)) {
-      state.raids.set(initial.raidId, { ...current, drawTimesInfo: { times: reply.gotInfo.times, gotIndex: reply.gotInfo.gotIndex } }); state.revision++;
-    }
+    applyDraw(state, initial, reply.gotInfo);
     ledger.confirm(token); report({ key: 'heroRaid', label: '超凡英雄 · 已领取累计抽取奖励', ok: true });
   } catch (error) {
     const refused = !acknowledged && error.notSent === true || error.prompt && error.request === 'HeroRaidGotRewardRequest';
@@ -191,7 +280,7 @@ async function claimDrawRewards(client, config, player, context, initial) {
   }
 }
 
-export async function runHeroRaidAutomation(client, protocol, config, player, { getSettings, ledger, enabled = () => true, report = () => {} } = {}) {
+export async function runHeroRaidAutomation(client, protocol, config, player, { getSettings, ledger, enabled = () => true, report = () => {}, wait } = {}) {
   if (!getSettings?.()?.heroRaid?.enabled || !enabled() || busy.has(client)) return [];
   if (!ledger) throw Error('超凡英雄自动化需要持久账本');
   const state = watchHeroRaidPushes(client), actor = identity(player), policy = JSON.stringify(getSettings().heroRaid), results = [];
@@ -200,10 +289,12 @@ export async function runHeroRaidAutomation(client, protocol, config, player, { 
   if (!state.observed || state.invalid) { emit({ key: 'heroRaid', label: '超凡英雄活动', skipped: true, reason: '等待本次连接的完整活动推送' }); return results; }
   if (!exactAutomationId(player?.worldId) || !exactAutomationId(player?.playerId)) return results;
   for (const name of ['HeroRaidFinishOrderRequest', 'HeroRaidGotOrderRewardRequest', 'HeroRaidOrderResponse', 'HeroRaidGotRewardRequest', 'HeroRaidGotRewardResponse']) if (!protocol?.[name]) throw Error('本地协议缺少 ' + name);
+  if (getSettings().heroRaid.challenge && (!protocol?.HeroRaidChallengeRequest || !protocol?.HeroRaidChallengeResponse)) throw Error('本地协议缺少超凡英雄挑战接口');
+  if (getSettings().heroRaid.lottery && (!protocol?.HeroRaidPrizeRequest || !protocol?.HeroRaidPrizeResponse)) throw Error('本地协议缺少超凡英雄转盘接口');
   busy.add(client);
   try {
     reconcile(state, player, ledger);
-    const context = { state, getSettings, ledger, active, report: emit };
+    const context = { state, getSettings, ledger, active, report: emit, wait };
     const ids = [...state.raids.keys()].sort((a, b) => a - b);
     if (!ids.some(id => open(state.raids.get(id), nowOf(client)))) emit({ key: 'heroRaid', label: '超凡英雄活动', skipped: true, reason: '当前没有服务器确认开放的超凡英雄活动' });
     for (const raidId of ids) {
@@ -211,7 +302,13 @@ export async function runHeroRaidAutomation(client, protocol, config, player, { 
       if (!active() || !open(raid, nowOf(client))) continue;
       if (unresolved(ledger, player, raid)) { emit({ key: 'heroRaid', label: '超凡英雄活动', skipped: true, reason: '前次活动操作结果待确认，等待真实活动推送' }); continue; }
       try {
+        if (getSettings().heroRaid.challenge) await challengeStage(client, config, player, context, raid);
+        raid = state.raids.get(raidId);
+        if (!active() || !raid || unresolved(ledger, player, raid)) continue;
         if (getSettings().heroRaid.orders) await finishOrder(client, protocol, config, player, context, raid);
+        raid = state.raids.get(raidId);
+        if (!active() || !raid || unresolved(ledger, player, raid)) continue;
+        if (getSettings().heroRaid.lottery) await drawLottery(client, protocol, config, player, context, raid);
         raid = state.raids.get(raidId);
         if (!active() || !raid || unresolved(ledger, player, raid) || !getSettings().heroRaid.rewards) continue;
         await claimOrderRewards(client, config, player, context, raid);

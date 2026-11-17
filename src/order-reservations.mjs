@@ -316,12 +316,12 @@ export async function readOrderReservedStock(client, protocol, config, { player,
   for (const activity of times) {
     if (!Number.isSafeInteger(activity?.type) || !Number.isSafeInteger(activity.startTime)
       || !Number.isSafeInteger(activity.endTime) || activity.endTime <= activity.startTime
-      || !Number.isSafeInteger(activity.period) || activity.period < 1) throw new Error('无法确认周订单活动时间');
+      || !Number.isSafeInteger(activity.period) || activity.period < 1) throw new Error('无法确认商人订单活动时间');
   }
   const active = times.filter(row => row.startTime <= time && row.endTime > time);
-  if (active.filter(row => row.type === 5).length > 1) throw new Error('周订单活动记录不唯一');
+  if (active.filter(row => row.type === 5).length > 1) throw new Error('商人订单活动记录不唯一');
   if (active.some(row => row.type === 5)) {
-    if (!protocol.WeekOrderInfoRequest || !protocol.WeekOrderInfoResponse) throw new Error('本地协议缺少周订单查询');
+    if (!protocol.WeekOrderInfoRequest || !protocol.WeekOrderInfoResponse) throw new Error('本地协议缺少商人订单查询');
     check();
     const week = await readWeekOrder(client, active, config);
     check();

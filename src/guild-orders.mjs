@@ -125,7 +125,7 @@ export async function readGuildOrderView(client, protocol, config, { player, ena
     return { id, name: displayMaterial(config, id), need, have, reserved, ...held, available, missing: Math.max(0, need - available) };
   });
   const missing = view.requirements.filter(row => row.missing > 0);
-  if (missing.length) return { ...view, reason: '留足周订单、贸易港和居民订单后，还缺' + missing.map(row =>
+  if (missing.length) return { ...view, reason: '留足商人订单、贸易港和居民订单后，还缺' + missing.map(row =>
     row.name + ' ×' + row.missing + '（库存 ' + row.have + '，已预留 ' + row.reserved + '）').join('、') };
   return { ...view, state: 'ready', canFinish: true };
 }

@@ -15,12 +15,13 @@ export const EXTENDED_DEFAULTS = {
   guildFort: { enabled: false, materials: [], reserve: 0, dailyLimit: 0 },
   silicon: { enabled: false, dailyRewardLimit: 0, windows: [], petrolReserve: 10000, dailyPetrolLimit: 0,
     dailyDiamondLimit: 0, pursuitMinutes: 10, fleets: [1, 2, 3].map(id => siliconFleetDefaults(id + '远征船')) },
-  heroRaid: { enabled: false, orders: false, rewards: true },
+  heroRaid: { enabled: false, challenge: false, retryTimes: 10, orders: false, lottery: false, rewards: true },
 };
 const int = (max = 1000000000, min = 0) => ({ kind: 'number', min, max });
 const list = (max = 100) => ({ kind: 'list', max });
 const choice = (...values) => ({ kind: 'choice', values });
 export const EXTENDED_CONSTRAINTS = {
+  'heroRaid.retryTimes': int(100),
   'alliance.recruitDailyLimit': int(1000), 'alliance.mutualMode': choice('custom', 'exchange'),
   'alliance.allowedMaterials': list(), 'alliance.blockedMaterials': list(), 'alliance.requestMaterials': list(),
   'alliance.memberKeywords': list(30), 'alliance.stockReserve': int(), 'alliance.helpDailyLimit': int(1000),

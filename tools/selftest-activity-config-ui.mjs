@@ -43,10 +43,33 @@ await test('服务端已过滤任务时静态联动与广告入口仍隐藏', ()
 
 await test('周期、风采、新手及其他任务不受联动下线影响', () => {
   const keys = new Set(keysOf(renderGroups(dataFor())));
-  for (const key of ['armsRaceRewards', 'merchantTrade', 'merchantRewards', 'beautyVotes', 'beautyGift', 'newbieLogin', 'weekOrderSubmit', 'pirateRankRewards', 'warRankRewards']) {
+  for (const key of ['armsRaceRewards', 'merchantTrade', 'merchantRewards', 'beautyVotes', 'beautyGift', 'newbieLogin', 'pirateRankRewards', 'warRankRewards']) {
     assert(keys.has('schedule.' + key), key);
   }
   assert(keys.has('building.enabled'));
+});
+
+await test('商人三个开关在活动页编辑，静态配置与任务补齐不会生成重复入口', () => {
+  const merchantFields = ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal'];
+  const merchantTasks = new Set(['weekOrderSubmit', 'weekOrderFinal']);
+  for (const data of [dataFor(), dataFor([]), dataFor([], automationTasks.filter(task => !merchantTasks.has(task.key)))]) {
+    data.settings.weekOrder = { allowDiamonds: true };
+    data.settings.schedule.weekOrderSubmit = true;
+    data.settings.schedule.weekOrderFinal = false;
+    const before = structuredClone(data), groups = renderGroups(data), keys = keysOf(groups);
+    assert(!groups.some(group => group.id === 'rich-merchant'));
+    for (const field of merchantFields) assert(!keys.includes(field), field);
+    assert.deepEqual(data, before, '移动编辑入口保留原账号设置与任务定义');
+  }
+});
+
+await test('超凡英雄配置集中在活动页，游戏配置保留原账号数据且没有重复入口', () => {
+  const data = dataFor([]);
+  data.settings.heroRaid = { enabled: true, challenge: false, retryTimes: 10, orders: true, lottery: false, rewards: true };
+  const before = structuredClone(data), groups = renderGroups(data);
+  assert(!groups.some(group => group.id === 'hero-raid'));
+  assert(!keysOf(groups).some(key => key.startsWith('heroRaid.')));
+  assert.deepEqual(data, before);
 });
 
 await test('复开后全部入口和参数恢复，原配置定义未被过滤污染', () => {

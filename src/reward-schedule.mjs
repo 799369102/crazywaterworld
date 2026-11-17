@@ -1,5 +1,7 @@
 // A new game connection always verifies the server again. Stopping and starting
 // idle on the same connection keeps its confirmed cooldowns.
+import { activityTimeTasks } from './activity-availability.mjs';
+
 const schedules = new WeakMap();
 // 红点类型与自动领奖任务的兼容映射，保留旧版事件驱动调度入口。
 export const redPointTasks = {
@@ -101,11 +103,7 @@ export function rewardSchedule(client) {
       case 'SCNewCampaignReport': clearTask('campaignReports'); break;
       case 'SCOpenRankRedDot': clearTask('openRankRewards'); break;
       case 'SCAllActivity':
-        clearTasks(['festivalSign', 'festivalActive', 'festivalGifts', 'snowballFree', 'compassSpin']);
-        clearTask('weekGift');
-        clearTask('weekTimes');
-        clearTask('weekPass');
-        clearTask('newbieLogin');
+        clearTasks(activityTimeTasks);
         break;
       case 'SCNewbieActivityUpdate': clearTask('newbieLogin'); break;
       case 'SCTrialRaidUpdate':

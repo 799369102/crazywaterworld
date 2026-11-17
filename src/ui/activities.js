@@ -5,13 +5,26 @@ let activitiesData = null;
 let activitiesAccount = null;
 let activitiesReceivedAt = 0;
 let selectedActivity = null;
+let activityGroupSignature = '';
 let discoveryVersion = 0;
 const activitySelections = new Map();
 const pendingActivities = new Set();
 const activityTaskEdits = new Map();
+const expandedActivityGroups = new Map();
+let merchantSettingsData = null, merchantSettingsOwner = null, merchantSettingsVersion = 0;
+let merchantSettingsStatus = '';
+const savingMerchantSettings = new Set();
+let heroRaidSettingsData = null, heroRaidSettingsOwner = null, heroRaidSettingsVersion = 0;
+let heroRaidSettingsStatus = '';
+const savingHeroRaidSettings = new Set();
+
+function isHeroRaidActivity(row) {
+  const id = row.sourceId ?? row.id;
+  return id === 'hero-raid' || id.startsWith('hero-raid:') || row.type === 'heroRaid';
+}
 
 function activityNow() {
-  return activitiesData.serverNow + (Date.now() - activitiesReceivedAt) / 1000;
+  return activitiesData?.serverNow ? activitiesData.serverNow + (Date.now() - activitiesReceivedAt) / 1000 : Date.now() / 1000;
 }
 
 const activityKinds = {
@@ -20,14 +33,53 @@ const activityKinds = {
   permanent: { tag: '常驻', group: '常驻活动' },
 };
 
-// Groups render in this order, and arrow keys follow the same list.
+const activityStates = { upcoming: '待开放', ended: '已结束', unknown: '时间待确认' };
+
+function activityLifecycle(row) {
+  if (row.settingsOnly || row.kind === 'permanent') return 'active';
+  const now = activityNow();
+  if (row.startTime > 0 && row.endTime > 0 && row.endTime <= row.startTime) return 'unknown';
+  if (row.endTime > 0 && row.endTime <= now) return 'ended';
+  if (row.startTime > now && row.endTime > row.startTime) return 'upcoming';
+  if (row.observed === false || row.lifecycle === 'unknown') return 'unknown';
+  if (row.endTime > now) return 'active';
+  return row.lifecycle || 'unknown';
+}
+
+function activityDate(time) {
+  return time > 0 ? new Date(time * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '待确认';
+}
+
+function activityTimeLabel(row) {
+  if (row.settingsOnly) return activitiesData && !activitiesData.catalogOnly ? '当前未开放' : '连接后读取活动状态';
+  const state = activityLifecycle(row);
+  if (state === 'upcoming') return activityDate(row.startTime) + ' 开始';
+  if (state === 'ended') return activityDate(row.endTime) + ' 结束';
+  if (state === 'unknown') return '开放状态待同步';
+  return activityRemaining(row.endTime);
+}
+
+function activityGroupOpen(state) {
+  return expandedActivityGroups.get(current)?.has(state) ?? false;
+}
+
+// Arrow keys follow the visible activities and skip collapsed groups.
 function activityRows() {
-  const rows = activitiesData?.activities.filter(row => row.endTime > activityNow()) || [];
-  if (activitiesData) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
+  const rows = [...(activitiesData?.activities || [])];
+  if (current && !rows.some(row => row.weekType === 5)) {
+    rows.push({ id: 'rich-merchant', name: '不差钱商人', kind: 'weekly', weekType: 5, settingsOnly: true, taskKeys: [] });
+  }
+  if (current && !rows.some(isHeroRaidActivity)) {
+    rows.push({ id: 'hero-raid', name: '超凡英雄活动', kind: 'limited', settingsOnly: true, taskKeys: [] });
+  }
+  if (activitiesData && !activitiesData.catalogOnly) rows.push({ id: 'fish', name: '钓鱼图鉴', kind: 'permanent', taskKeys: ['fishBook'] });
   if (activitiesData?.vipLevel > 0) rows.push({ id: 'vip', name: 'VIP 每日奖励', kind: 'permanent', taskKeys: ['vipDaily'] });
   rows.push({ id: 'pirates', name: '海盗首杀', kind: 'permanent', taskKeys: !activitiesData ? [] : activitiesData.status?.pirates?.rankOpen ? ['campaignReports', 'openRankRewards'] : ['campaignReports'] });
   const order = Object.keys(activityKinds);
-  return rows.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || (a.group || '').localeCompare(b.group || '') || (a.endTime ?? 0) - (b.endTime ?? 0));
+  const states = ['active', 'upcoming', 'ended', 'unknown'];
+  return rows.sort((a, b) => states.indexOf(activityLifecycle(a)) - states.indexOf(activityLifecycle(b))
+    || order.indexOf(a.kind) - order.indexOf(b.kind) || (a.group || '').localeCompare(b.group || '')
+    || (activityLifecycle(a) === 'ended' ? (b.endTime ?? 0) - (a.endTime ?? 0) : (a.startTime ?? 0) - (b.startTime ?? 0)));
 }
 
 function activityBadge(kind) {
@@ -48,17 +100,46 @@ function paintActivityTime(node, endTime) {
 
 function renderActivityTabs() {
   const rows = activityRows(), tabs = clear($('activity-tabs'));
-  if (!rows.some(row => row.id === selectedActivity)) selectedActivity = rows[0]?.id;
+  activityGroupSignature = rows.map(row => row.id + ':' + activityLifecycle(row)).join('|');
+  const visible = rows.filter(row => activityLifecycle(row) === 'active' || activityGroupOpen(activityLifecycle(row)));
+  if (!visible.some(row => row.id === selectedActivity)) selectedActivity = visible[0]?.id;
   activitySelections.set(current, selectedActivity);
-  let group;
+  const active = el('div', 'activity-current-tabs');
+  tabs.appendChild(active);
+  const containers = new Map([['active', active]]);
+  for (const [state, label] of Object.entries(activityStates)) {
+    const count = rows.filter(row => activityLifecycle(row) === state).length;
+    if (!count) continue;
+    const section = el('div', 'activity-state-group');
+    const toggle = el('button', 'activity-state-toggle');
+    toggle.type = 'button';
+    toggle.dataset.activityGroup = state;
+    toggle.setAttribute('aria-expanded', String(activityGroupOpen(state)));
+    const content = el('div', 'activity-state-tabs');
+    content.id = 'activity-group-' + state;
+    content.hidden = !activityGroupOpen(state);
+    toggle.setAttribute('aria-controls', content.id);
+    toggle.append(el('span', null, label), el('span', 'dim', String(count)));
+    toggle.onclick = () => {
+      const expanded = expandedActivityGroups.get(current) || new Set();
+      if (expanded.has(state)) expanded.delete(state); else expanded.add(state);
+      expandedActivityGroups.set(current, expanded);
+      renderActivityTabs();
+      $('activity-tabs').querySelector('[data-activity-group=' + state + ']')?.focus();
+    };
+    section.append(toggle, content);
+    tabs.appendChild(section);
+    containers.set(state, content);
+  }
+  const groups = new Map();
   rows.forEach((row, index) => {
+    const state = activityLifecycle(row), container = containers.get(state);
     const title = row.group || activityKinds[row.kind].group;
-    if (title !== group) {
-      group = title;
-      const heading = el('div', 'activity-group', group);
-      if (row.group) heading.appendChild(el('span', 'activity-group-time', activityRemaining(row.endTime)));
+    if (title !== groups.get(state)) {
+      groups.set(state, title);
+      const heading = el('div', 'activity-group', title);
       heading.setAttribute('aria-hidden', 'true');
-      tabs.appendChild(heading);
+      container.appendChild(heading);
     }
     const button = el('button', 'activity-tab');
     button.type = 'button';
@@ -70,33 +151,40 @@ function renderActivityTabs() {
     button.tabIndex = row.id === selectedActivity ? 0 : -1;
     const head = el('span', 'activity-tab-head');
     head.append(el('span', 'activity-tab-name', row.name));
-    if (activitiesData?.status?.[row.id]?.ready) head.appendChild(el('span', 'activity-ready', activitiesData.status[row.id].badge));
+    if (state === 'active' && activitiesData?.status?.[row.id]?.ready) head.appendChild(el('span', 'activity-ready', activitiesData.status[row.id].badge));
     head.appendChild(activityBadge(row.kind));
     button.appendChild(head);
-    if (!row.group) {
-      const time = el('span', 'activity-tab-time');
-      if (row.endTime) time.dataset.end = String(row.endTime);
-      paintActivityTime(time, row.endTime);
-      button.appendChild(time);
-    }
+    const time = el('span', 'activity-tab-time', activityTimeLabel(row));
+    if (state === 'active' && row.endTime) time.dataset.end = String(row.endTime);
+    button.appendChild(time);
     button.onclick = () => selectActivity(row.id, true);
     button.onkeydown = event => {
-      const offsets = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1, Home: -index, End: rows.length - index - 1 };
+      const position = visible.findIndex(item => item.id === row.id);
+      const offsets = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1, Home: -position, End: visible.length - position - 1 };
       if (!(event.key in offsets)) return;
       event.preventDefault();
-      selectActivity(rows[(index + offsets[event.key] + rows.length) % rows.length].id, true);
+      selectActivity(visible[(position + offsets[event.key] + visible.length) % visible.length].id, true);
     };
-    tabs.appendChild(button);
+    container.appendChild(button);
   });
   renderActivityDetail();
 }
 
 setInterval(() => {
   if (!activitiesData) return;
+  const signature = activityRows().map(row => row.id + ':' + activityLifecycle(row)).join('|');
+  if (signature !== activityGroupSignature) { renderActivityTabs(); return; }
   for (const node of document.querySelectorAll('#activity-tabs [data-end]')) paintActivityTime(node, Number(node.dataset.end));
 }, 30000);
 
 function selectActivity(id, focus = false) {
+  const row = activityRows().find(item => item.id === id);
+  const state = row && activityLifecycle(row);
+  if (state && state !== 'active') {
+    const expanded = expandedActivityGroups.get(current) || new Set();
+    expanded.add(state);
+    expandedActivityGroups.set(current, expanded);
+  }
   selectedActivity = id;
   activitySelections.set(current, id);
   ++discoveryVersion;
@@ -117,9 +205,25 @@ function renderActivityDetail() {
   panel.setAttribute('aria-labelledby', $('activity-tabs').querySelector('[aria-selected=true]').id);
   $('activity-title').textContent = row.group ? row.group + ' · ' + row.name : row.name;
   clear($('activity-kind')).appendChild(activityBadge(row.kind));
-  $('activity-end').textContent = row.endTime ? '结束时间 · ' + new Date(row.endTime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) + '（北京时间）' : '长期开放';
+  $('activity-end').textContent = row.settingsOnly ? (activitiesData && !activitiesData.catalogOnly ? '当前未开放，可预先配置' : '连接后读取活动状态，可预先配置')
+    : row.kind === 'permanent' ? '长期开放' : '开始 ' + activityDate(row.startTime) + ' · 结束 ' + activityDate(row.endTime) + '（北京时间）';
+  if (row.rewardEndTime > row.endTime && row.endTime > 0) $('activity-end').textContent += ' · 奖励展示截至 ' + activityDate(row.rewardEndTime);
   $('activity-pirates').hidden = row.id !== 'pirates';
+  if (row.weekType === 5) renderMerchantSettings(box);
+  if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
+  if (row.settingsOnly) return;
   if (!activitiesData) return;
+  const active = activityLifecycle(row) === 'active' && !activitiesData.catalogOnly;
+  if (!active) {
+    const messages = { upcoming: '活动尚未开放，已开启的自动任务将在开放后随挂机执行。',
+      ended: '本期活动已结束，自动任务已暂停。保存的开关用于后续开放期次。',
+      unknown: '活动开放状态待同步，连接后刷新可核对最新时间。' };
+    box.appendChild(el('p', 'dim', messages[activityLifecycle(row)] || '连接后刷新活动状态。'));
+    for (const task of (row.taskKeys || []).map(key => activitiesData.eventTasks.find(task => task.key === key)).filter(Boolean)) {
+      if (row.weekType !== 5) renderActivityTask(box, row, task);
+    }
+    return;
+  }
   for (const line of activitiesData.status?.[row.id]?.lines ?? []) box.appendChild(el('p', null, line));
   if (row.weekType === 4) {
     const lottery = activitiesData.lottery;
@@ -135,9 +239,12 @@ function renderActivityDetail() {
     if (newbie) box.appendChild(el('p', null, '已登录 ' + newbie.loginDays + ' 天 · ' + (newbie.available.length ? '可领第 ' + newbie.available.join('、') + ' 天奖励' : '当前奖励已领完')));
   }
   const tasks = (row.taskKeys || []).map(key => activitiesData.eventTasks.find(task => task.key === key)).filter(Boolean);
-  for (const task of tasks) renderActivityTask(box, row, task);
-  if (tasks.length) box.appendChild(el('p', 'dim', '单次执行只处理本项。开启自动运行后，随当前账号挂机执行。'));
-  else if (row.weekType !== 5 && row.id !== 'pirates') box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
+  for (const task of tasks) {
+    if (row.weekType === 5 && task.key === 'weekOrderSubmit') continue;
+    renderActivityTask(box, row, task);
+  }
+  if (tasks.length && row.weekType !== 5) box.appendChild(el('p', 'dim', '已开启的自动任务随挂机执行，并按活动开放时间自动启停。'));
+  else if (row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row)) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
   if (row.weekType === 5) renderActivityOrder();
 }
 
@@ -169,20 +276,21 @@ function renderActivityTask(box, row, task) {
     weekChipFree: '领取本期免费礼包。',
     weekUniqueFree: '领取本期免费礼包，翻牌需要手动选择目标，不自动进行。',
     weekOrderFinal: '全部档位完成后领取最终奖励。',
-    weekOrderSubmit: '材料备齐后提交一次周订单，会消耗预留的材料。',
+    weekOrderSubmit: '材料备齐后提交一次商人订单。',
     vipDaily: '领取已达到 VIP 等级的每日免费奖励。',
     campaignReports: '海盗战斗等奖励留在战报里，这里一键领取。开启后收到新战报会马上领，不用开挂机。',
     openRankRewards: '领取各个开服冲榜已达标的积分奖励。排名奖励由游戏在活动结束后发放。',
   };
   if (descriptions[task.key]) item.appendChild(el('p', 'dim', descriptions[task.key]));
   const bar = el('div', 'activity-controls');
-  const button = smallButton(pendingActivities.has(key) ? '执行中…' : task.key === 'edict' ? '解符一次（最多 1 份贡品）' : task.key === 'weekOrderSubmit' ? '提交周订单' : '执行一次');
+  const button = smallButton(pendingActivities.has(key) ? '执行中…' : task.key === 'edict' ? '解符一次（最多 1 份贡品）' : task.key === 'weekOrderSubmit' ? '提交商人订单' : task.key === 'weekOrderFinal' ? '领取最终奖励' : '执行一次');
   button.dataset.activityRun = task.key;
-  button.disabled = pendingActivities.has(key) || snapshot.paused || disconnected.has(account);
+  button.disabled = pendingActivities.has(key) || snapshot.connected !== true || snapshot.paused || disconnected.has(account)
+    || activityLifecycle(row) !== 'active' || activitiesData.catalogOnly;
   const spinInput = task.key === 'compassSpin' ? spinCountInput(account) : null;
   button.onclick = async () => {
     if (button.disabled || account !== current || snapshot.paused || disconnected.has(account) || pendingActivities.has(key)) return;
-    if (row.endTime && row.endTime <= activityNow()) { refreshActivities(); return; }
+    if (activityLifecycle(row) !== 'active' || activitiesData.catalogOnly) { refreshActivities(); return; }
     if (task.key === 'weekOrderSubmit') { confirmWeekOrderAction('submit'); return; }
     const spinCount = spinInput ? spinInput.valueAsNumber : undefined;
     if (spinInput && !spinInput.checkValidity()) { reportError(new Error('抽奖券张数必须是 1 到 ' + spinInput.max + ' 的整数'), '风水罗盘抽奖'); return; }
@@ -196,23 +304,26 @@ function renderActivityTask(box, row, task) {
       if (account === current) refreshActivities();
     }
   };
-  const auto = el('label', 'activity-auto');
-  const toggle = component('ui-event-switch');
-  toggle.dataset.autoTask = task.key;
-  toggle.dataset.eventTask = 'true';
-  toggle.dataset.account = account;
-  toggle.setAttribute('aria-label', task.label + ' · 自动运行');
-  setTaskSwitch(toggle, task.enabled);
-  toggle.disabled = savingTasks.has(account + ':' + task.key);
-  toggle.onclick = () => { if (current === account) toggleAutoTask(toggle); };
-  auto.append(toggle, el('span', null, '自动运行'));
   if (spinInput) {
     const field = el('label', 'activity-auto');
     field.append(el('span', null, '每次使用'), spinInput, el('span', null, '张'));
     bar.append(field);
     if (activitiesData.compassSpinEditable === false) bar.appendChild(el('span', 'dim', '在游戏配置中修改'));
   }
-  bar.append(button, auto);
+  bar.appendChild(button);
+  if (row.weekType !== 5) {
+    const auto = el('label', 'activity-auto');
+    const toggle = component('ui-event-switch');
+    toggle.dataset.autoTask = task.key;
+    toggle.dataset.eventTask = 'true';
+    toggle.dataset.account = account;
+    toggle.setAttribute('aria-label', task.label + ' · 自动运行');
+    setTaskSwitch(toggle, task.enabled);
+    toggle.disabled = savingTasks.has(account + ':' + task.key);
+    toggle.onclick = () => { if (current === account) toggleAutoTask(toggle); };
+    auto.append(toggle, el('span', null, '自动运行'));
+    bar.appendChild(auto);
+  }
   item.appendChild(bar);
   box.appendChild(item);
 }
@@ -252,12 +363,200 @@ function syncActivityTask(key, enabled, account) {
   if (task) task.enabled = enabled;
 }
 
+function renderMerchantSettings(box) {
+  const account = current;
+  if (merchantSettingsOwner !== account || !merchantSettingsData) {
+    box.appendChild(el('p', 'dim', merchantSettingsStatus || '正在读取商人活动配置…'));
+    return;
+  }
+  const settings = merchantSettingsData.settings;
+  const section = el('div', 'activity-settings');
+  for (const [key, label] of [
+    ['autoSubmit', '自动完成商人订单'],
+    ['allowDiamonds', '缺材料时允许消耗钻石'],
+    ['autoFinal', '自动领取最终奖励'],
+  ]) {
+    const row = el('label', 'activity-auto');
+    const toggle = component('ui-event-switch');
+    toggle.dataset.merchantSetting = key;
+    toggle.setAttribute('aria-label', label);
+    setTaskSwitch(toggle, settings[key]);
+    toggle.disabled = savingMerchantSettings.has(account) || (key === 'allowDiamonds' && !settings.autoSubmit);
+    toggle.onclick = () => {
+      if (current === account && !toggle.disabled) return saveMerchantSetting(key, !settings[key]);
+    };
+    row.append(toggle, el('span', null, label));
+    section.appendChild(row);
+  }
+  section.appendChild(el('p', 'dim', '配置按账号自动保存，随挂机执行。钻石补料受全局钻石开关、每日预算和保留量限制。'));
+  const status = el('p', 'dim', savingMerchantSettings.has(account) ? '正在保存…' : merchantSettingsStatus);
+  status.setAttribute('role', 'status');
+  section.appendChild(status);
+  box.appendChild(section);
+}
+
+async function refreshMerchantSettings(account) {
+  if (!account || savingMerchantSettings.has(account)) return;
+  const version = ++merchantSettingsVersion;
+  try {
+    const data = await call('/api/week-order/settings?account=' + encodeURIComponent(account));
+    if (account !== current || merchantSettingsOwner !== account || version !== merchantSettingsVersion) return;
+    merchantSettingsData = data;
+    merchantSettingsStatus = '';
+  } catch (error) {
+    if (account !== current || merchantSettingsOwner !== account || version !== merchantSettingsVersion) return;
+    merchantSettingsStatus = '商人活动配置读取失败，请刷新重试。';
+  }
+}
+
+async function saveMerchantSetting(key, enabled) {
+  const account = current;
+  if (!account || merchantSettingsOwner !== account || !merchantSettingsData || savingMerchantSettings.has(account)) return;
+  const version = ++merchantSettingsVersion;
+  savingMerchantSettings.add(account);
+  merchantSettingsStatus = '';
+  renderActivityDetail();
+  let failure = null;
+  try {
+    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+    if (account !== current || merchantSettingsOwner !== account || version !== merchantSettingsVersion) return;
+    const latest = await call('/api/week-order/settings?account=' + encodeURIComponent(account));
+    if (account !== current || merchantSettingsOwner !== account || version !== merchantSettingsVersion) return;
+    const saved = await call('/api/week-order/settings?account=' + encodeURIComponent(account), {
+      method: 'POST', body: JSON.stringify({ key, enabled, revision: latest.revision, baseRevision: latest.baseRevision, confirm: true }),
+    });
+    if (account === current && merchantSettingsOwner === account && version === merchantSettingsVersion) {
+      merchantSettingsData = saved;
+      loopSettingsRevision = saved.revision;
+    }
+  } catch (error) {
+    failure = error;
+    if (account === current && merchantSettingsOwner === account) reportError(error, '保存商人活动配置');
+  } finally {
+    savingMerchantSettings.delete(account);
+    if (account === current && merchantSettingsOwner === account) {
+      await refreshMerchantSettings(account);
+      if (account === current && merchantSettingsOwner === account) {
+        if (failure) merchantSettingsStatus = failure.message;
+        renderActivityTabs();
+      }
+    }
+  }
+}
+
+function renderHeroRaidSettings(box) {
+  const account = current;
+  if (heroRaidSettingsOwner !== account || !heroRaidSettingsData) {
+    box.appendChild(el('p', 'dim', heroRaidSettingsStatus || '正在读取超凡英雄活动配置…'));
+    return;
+  }
+  const settings = heroRaidSettingsData.settings;
+  const section = el('div', 'activity-settings');
+  const fields = [
+    ['enabled', '总开关', '关闭后暂停超凡英雄自动执行，保留各项选择。'],
+    ['challenge', '自动挑战', '每轮挑战一个已解锁关卡或重试一次，连续战败次数跨轮累计。'],
+    ['retryTimes', '战败重试次数', '本期同一关卡首次战败后的重试上限，0 表示战败即停止。'],
+    ['orders', '自动完成订单', '材料足够时提交当前已解锁订单，缺料由工厂生产配置处理。'],
+    ['lottery', '自动转盘抽奖', '消耗已有英雄副本抽卡券，每轮按库存抽取 1 次或 10 次。'],
+    ['rewards', '自动领取达标奖励', '领取已达成的累计订单奖励和累计抽奖奖励。'],
+  ];
+  for (const [key, label, help] of fields) {
+    const row = el('label', 'activity-auto');
+    const control = component(key === 'retryTimes' ? 'ui-number' : 'ui-event-switch');
+    control.dataset.heroRaidSetting = key;
+    control.setAttribute('aria-label', label);
+    control.setAttribute('aria-describedby', 'hero-raid-help-' + key);
+    control.disabled = savingHeroRaidSettings.has(account);
+    if (key === 'retryTimes') {
+      control.min = 0;
+      control.max = 100;
+      control.step = 1;
+      control.required = true;
+      control.value = settings[key];
+      control.onchange = () => {
+        if (account !== current || control.disabled) return;
+        const value = control.valueAsNumber;
+        if (!Number.isInteger(value) || value < 0 || value > 100) {
+          control.value = settings[key];
+          reportError(new Error('战败重试次数必须是 0 到 100 的整数'), '设置超凡英雄挑战');
+          return;
+        }
+        if (value !== settings[key]) return saveHeroRaidSetting(key, value);
+      };
+      row.append(el('span', null, label), control);
+    } else {
+      setTaskSwitch(control, settings[key]);
+      control.onclick = () => {
+        if (account === current && !control.disabled) return saveHeroRaidSetting(key, !settings[key]);
+      };
+      row.append(control, el('span', null, label));
+    }
+    const description = el('p', 'dim', help);
+    description.id = 'hero-raid-help-' + key;
+    section.append(row, description);
+  }
+  section.appendChild(el('p', 'dim', '配置按账号自动保存，活动开放后随挂机执行。'));
+  const status = el('p', 'dim', savingHeroRaidSettings.has(account) ? '正在保存…' : heroRaidSettingsStatus);
+  status.setAttribute('role', 'status');
+  section.appendChild(status);
+  box.appendChild(section);
+}
+
+async function refreshHeroRaidSettings(account) {
+  if (!account || savingHeroRaidSettings.has(account)) return;
+  const version = ++heroRaidSettingsVersion;
+  try {
+    const data = await call('/api/hero-raid/settings?account=' + encodeURIComponent(account));
+    if (account !== current || heroRaidSettingsOwner !== account || version !== heroRaidSettingsVersion) return;
+    heroRaidSettingsData = data;
+    heroRaidSettingsStatus = '';
+  } catch {
+    if (account !== current || heroRaidSettingsOwner !== account || version !== heroRaidSettingsVersion) return;
+    heroRaidSettingsStatus = '超凡英雄活动配置读取失败，请刷新重试。';
+  }
+}
+
+async function saveHeroRaidSetting(key, value) {
+  const account = current;
+  if (!account || heroRaidSettingsOwner !== account || !heroRaidSettingsData || savingHeroRaidSettings.has(account)) return;
+  const version = ++heroRaidSettingsVersion;
+  savingHeroRaidSettings.add(account);
+  heroRaidSettingsStatus = '';
+  renderActivityDetail();
+  let failure = null;
+  try {
+    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+    if (account !== current || heroRaidSettingsOwner !== account || version !== heroRaidSettingsVersion) return;
+    const latest = await call('/api/hero-raid/settings?account=' + encodeURIComponent(account));
+    if (account !== current || heroRaidSettingsOwner !== account || version !== heroRaidSettingsVersion) return;
+    const saved = await call('/api/hero-raid/settings?account=' + encodeURIComponent(account), {
+      method: 'POST', body: JSON.stringify({ key: 'heroRaid.' + key, value, revision: latest.revision, baseRevision: latest.baseRevision, confirm: true }),
+    });
+    if (account === current && heroRaidSettingsOwner === account && version === heroRaidSettingsVersion) {
+      heroRaidSettingsData = saved;
+      loopSettingsRevision = saved.revision;
+    }
+  } catch (error) {
+    failure = error;
+    if (account === current && heroRaidSettingsOwner === account) reportError(error, '保存超凡英雄活动配置');
+  } finally {
+    savingHeroRaidSettings.delete(account);
+    if (account === current && heroRaidSettingsOwner === account) {
+      await refreshHeroRaidSettings(account);
+      if (account === current && heroRaidSettingsOwner === account) {
+        if (failure) heroRaidSettingsStatus = failure.message;
+        renderActivityTabs();
+      }
+    }
+  }
+}
+
 function renderActivityOrder() {
   const materials = clear($('activities-order')), data = activitiesData;
   if (data.order?.materials.length && !data.order.finished) {
     materials.appendChild(el('p', 'dim', data.order.ready
-      ? '周订单材料已齐，已预留整单用量，可点上方「提交周订单」或开启自动运行。'
-      : '周订单尚缺材料。已备齐的居民订单可先用所需份额，挂机再按缺口补产。'));
+      ? '商人订单材料已齐，已预留整单用量，可提交订单或开启自动运行。'
+      : '商人订单尚缺材料，可按下方报价购买，也可由已开启的自动完成按配置补料。'));
     const submit = smallButton('提交整单');
     submit.disabled = !data.order.ready;
     submit.onclick = () => confirmWeekOrderAction('submit');
@@ -270,7 +569,7 @@ function renderActivityOrder() {
         row.seed ? row.farmStatus : !row.factory ? '—' : row.factory.level === null ? '等级未知' : row.factory.level ? row.factory.level + ' 级' + (row.factory.constructing ? ' · 升级中' : '') : row.factory.constructing ? '建造中' : '未建造',
         row.missing && row.price ? buy : row.missing ? '无售价' : '—'];
     })));
-  } else materials.textContent = data.orderError ? '未能读取材料，详情见运行日志' : !data.order ? '本期未开放周订单' : data.order.finalReady ? '本期周订单已全部交付，可在游戏内领取最终奖励。' : data.order.finished ? '本期周订单已完成' : '当前没有材料需求';
+  } else materials.textContent = data.orderError ? '未能读取材料，详情见运行日志' : !data.order ? '不差钱商人活动未开放' : data.order.finalReady ? '本期商人订单已全部交付，可领取最终奖励。' : data.order.finished ? '本期商人订单已完成' : '当前没有材料需求';
 }
 
 function confirmWeekOrderAction(action, payload = {}) {
@@ -281,7 +580,7 @@ function confirmWeekOrderAction(action, payload = {}) {
     ? row.name + ' ×' + payload.quantity + '，共 ' + payload.cost + ' 钻石'
     : order.materials.map(item => item.name + ' ×' + item.required).join('、');
   const key = account + ':week-order:' + action + ':' + (payload.itemId || '');
-  openConfirm(action === 'buy' ? '钻石购买材料' : '提交整份周订单', [el('p', '', detail)], async () => {
+  openConfirm(action === 'buy' ? '钻石购买商人订单材料' : '提交整份商人订单', [el('p', '', detail)], async () => {
     if (account !== current || account !== activitiesAccount) throw Error('账号已切换，请刷新');
     if (snapshot.paused || disconnected.has(account)) throw Error('请先连接账号并恢复运行');
     if (pendingActivities.has(key)) return;
@@ -310,15 +609,36 @@ async function refreshActivities() {
     clear($('activity-tabs'));
     $('activity-panel').hidden = true;
     for (const id of ['activities-list', 'activities-order', 'pirate-board-view']) clear($(id));
+    merchantSettingsOwner = account;
+    merchantSettingsData = null;
+    merchantSettingsStatus = '';
+    ++merchantSettingsVersion;
+    heroRaidSettingsOwner = account;
+    heroRaidSettingsData = null;
+    heroRaidSettingsStatus = '';
+    ++heroRaidSettingsVersion;
   }
   if ($('tab-activities').classList.contains('hidden')) return;
   const status = $('activities-status');
-  const unavailable = !account || snapshot.paused || disconnected.has(account);
+  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account)]);
+  if (version !== activitiesVersion || account !== current) return;
+  const unavailable = !account || snapshot.connected !== true || snapshot.paused || disconnected.has(account);
   if (unavailable) {
     activitiesData = null;
+    if (account) {
+      try {
+        const data = await call('/api/activities/catalog?account=' + encodeURIComponent(account));
+        if (version !== activitiesVersion || account !== current) return;
+        activitiesData = data;
+        activitiesReceivedAt = Date.now();
+      } catch {
+        if (version !== activitiesVersion || account !== current) return;
+      }
+    }
     clear($('activity-tabs'));
     $('activity-panel').hidden = true;
-    status.textContent = !account ? '请先选择账号' : snapshot.paused ? '账号已暂停' : '请先连接账号';
+    status.textContent = !account ? '请先选择账号' : snapshot.paused ? '账号已暂停，可修改活动配置' : '账号未连接，可先配置活动';
+    if (account) renderActivityTabs();
     return;
   }
   status.textContent = '正在读取活动…';
@@ -332,18 +652,27 @@ async function refreshActivities() {
     }
     activitiesData = data;
     activitiesReceivedAt = Date.now();
-    status.textContent = data.activities.length ? '' : '当前没有开放的限时或周期活动';
+    status.textContent = [data.catalogError, ...(data.notes || [])].filter(Boolean).join(' ')
+      || (data.activities.length ? '' : '当前没有已下发的限时或周期活动');
     renderActivityTabs();
     if (selectedActivity === 'pirates') refreshProgression('pirate-board');
-    const endTimes = data.activities.filter(row => row.endTime > activityNow()).map(row => row.endTime);
-    if (endTimes.length) activityExpiryTimer = setTimeout(() => {
+    const boundaries = data.activities.flatMap(row => [row.startTime, row.endTime]).filter(time => time > activityNow());
+    if (boundaries.length) activityExpiryTimer = setTimeout(() => {
       renderActivityTabs();
       refreshActivities();
-    }, Math.min(2147483647, Math.max(1, Math.ceil((Math.min(...endTimes) - activityNow()) * 1000))));
+    }, Math.min(2147483647, Math.max(1, Math.ceil((Math.min(...boundaries) - activityNow()) * 1000))));
   } catch {
     if (version !== activitiesVersion || account !== current) return;
     activitiesData = null;
-    status.textContent = '活动读取失败，请刷新重试。详情见运行日志';
+    try {
+      const data = await call('/api/activities/catalog?account=' + encodeURIComponent(account));
+      if (version !== activitiesVersion || account !== current) return;
+      activitiesData = data;
+      activitiesReceivedAt = Date.now();
+    } catch {
+      if (version !== activitiesVersion || account !== current) return;
+    }
+    status.textContent = activitiesData?.activities.length ? '活动同步失败，当前展示已保存的活动时间。请刷新重试。' : '活动读取失败，请刷新重试。详情见运行日志';
     renderActivityTabs();
     if (selectedActivity === 'pirates') refreshProgression('pirate-board');
   }

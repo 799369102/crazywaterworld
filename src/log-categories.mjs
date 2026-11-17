@@ -1,11 +1,11 @@
 // 根据功能名和请求类型分类，不改动原始日志正文、错误详情与清空水位。
-export const LOG_CATEGORIES = { radar:'联盟情报',pirate:'海盗首杀与扫荡',boss:'世界Boss',merchant:'海商王',forge:'装备锻造',fleet:'舰队与维修',codes:'礼包兑换',orders:'周订单',gather:'采集与打捞',system: '系统与连接', idle: '挂机', building: '建设', production: '生产', events: '基地事件',
+export const LOG_CATEGORIES = { radar:'联盟情报',pirate:'海盗首杀与扫荡',boss:'世界Boss',merchant:'海商王',forge:'装备锻造',fleet:'舰队与维修',codes:'礼包兑换',orders:'不差钱商人',gather:'采集与打捞',system: '系统与连接', idle: '挂机', building: '建设', production: '生产', events: '基地事件',
   base: '基础养成', treasure: '万吨巨轮', alliance: '联盟/城战', heroes: '英雄', daily: '日常领奖', activity: '活动', trials: '试炼', stages: '主线推关' };
 export const LOG_GROUPS = {
   '系统':['system','idle','codes'],
-  '基地与资源':['building','production','gather','forge','events','base','orders'],
+  '基地与资源':['building','production','gather','forge','events','base'],
   '世界与联盟':['treasure','radar','pirate','boss','fleet','alliance'],
-  '日常与活动':['heroes','daily','activity','merchant','trials','stages']
+  '日常与活动':['heroes','daily','activity','merchant','orders','trials','stages']
 };
 export function classifyLog(message, extra = {}) {
   if (Object.hasOwn(LOG_CATEGORIES, extra?.category)) return extra.category;
@@ -18,7 +18,8 @@ export function classifyLog(message, extra = {}) {
   if (/锻造|MakeEquip/.test(text)) return 'forge';
   if (/战后维修|普通维修|舰队调度/.test(text)) return 'fleet';
   if (/礼包码|礼包兑换|GiftCode/.test(text)) return 'codes';
-  if (/周订单|WeekOrder/.test(text)) return 'orders';
+  if (/不差钱商人|商人订单|周订单|WeekOrder/.test(text)) return 'orders';
+  if (/超凡英雄|HeroRaid/.test(text)) return 'activity';
   if (/钓鱼|潜水|拾荒|打捞|漂浮物/.test(text)) return 'gather';
   if (/万吨|巨轮|TreasureLoot/.test(text)) return 'treasure';
   if (/城战|联盟|Guild|WorldOnline|MoveFleetsToCity/.test(text)) return 'alliance';

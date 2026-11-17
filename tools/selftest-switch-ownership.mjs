@@ -31,10 +31,10 @@ let passed = 0;
 const check = async (name, run) => { await run(); passed++; console.log('通过：' + name); };
 
 try {
-  await check('挂机只显示34个自动执行入口，详细开关与参数在配置且两页没有重复字段', () => {
+  await check('挂机只显示33个自动执行入口，详细开关与参数在配置且两页没有重复字段', () => {
     const html = idlePanel(automationControls), rendered = [...html.matchAll(/data-auto-task="([^"]+)"/g)].map(match => match[1]);
     const idleKeys = idleAutomationControls.map(control => control.key), movedFields = idleAutomationControls.flatMap(control => control.fields);
-    assert.equal(idleKeys.length, 34, '保留原有紧凑模块和独立任务入口');
+    assert.equal(idleKeys.length, 33, '超凡英雄统一在活动页编辑，其余紧凑模块和独立任务入口保留');
     assert.equal(rendered.length, new Set(rendered).size, '每个入口只显示一次');
     assert.deepEqual(new Set(rendered), new Set(idleKeys));
     assert.deepEqual(new Set(settingsUiRules().controlFields), new Set(movedFields));
@@ -67,6 +67,20 @@ try {
       'treasure.fleetIds', 'merchant.pointerDailyDiamondLimit', 'resources.diamondDailyLimit', 'heroes.heroIds']) {
       assert(configKeys.has(key), key + ' 参数应保留'); assert(!idleFields.has(key));
     }
+  });
+
+  await check('商人与超凡英雄配置由活动页管理，挂机和游戏配置均无重复编辑入口', () => {
+    const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
+    for (const key of ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
+      'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']) {
+      assert(!configKeys.has(key), key);
+      assert(!idleFields.has(key), key);
+      assert.equal(typeof read(defaultSettings(), key), 'boolean', '原配置仍可持久保存');
+    }
+    assert(!configGroups.some(group => group.id === 'rich-merchant'));
+    assert(!configGroups.some(group => group.id === 'hero-raid'));
+    assert(!configKeys.has('heroRaid.retryTimes'));
+    assert(!idleFields.has('heroRaid.retryTimes'));
   });
 
   await check('关闭基地模块只暂停主控，混合细项和参数往返不变', () => {

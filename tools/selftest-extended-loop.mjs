@@ -18,6 +18,8 @@ try {
   const { createUsageLedger } = await import('../src/automation-settings.mjs');
   const { watchFleetMaintenance } = await import('../src/fleet-maintenance.mjs');
   const { dispatchReservationReason } = await import('../src/fleet-availability.mjs');
+  const { watchHeroRaidPushes } = await import('../src/hero-raid-automation.mjs');
+  const { loadConfig } = await import('../src/config.mjs');
   const { siliconFixture, siliconSettings } = await import('./fixtures/silicon.mjs');
 
   function integration({ rounds = 1, mainEveryMs = 3600000 } = {}) {
@@ -87,6 +89,84 @@ try {
   const dispatches = f => f.client.writes.filter(row => row.name === 'ChipMineSendFleetRequest');
   const fillHighMine = f => { for (let index = 0; index < 3; index++) f.enemy(index, '占位船长' + index, 100000); };
   const stopAfterDispatch = (f, count = 1) => f.reportHook(() => { if (dispatches(f).length >= count) f.stop.aborted = true; });
+
+  function withHeroRaid(f) {
+    f.settings.silicon.enabled = false;
+    Object.assign(f.settings.heroRaid, { enabled: true, challenge: true, lottery: true, orders: false, rewards: false });
+    const config = loadConfig();
+    f.config.tables.HeroRaidStageCfg = config.tables.HeroRaidStageCfg;
+    f.config.tables.HeroRaidLotteryCfg = config.tables.HeroRaidLotteryCfg;
+    f.config.tables.CargoUnlockCfg = config.tables.CargoUnlockCfg;
+    const now = Math.floor(wall / 1000);
+    const raid = { raidId: 1001, startTime: now - 86400, finishTime: now + 86400,
+      passedStage: 0, drawTimesInfo: { times: 0, gotIndex: 0 } };
+    let tickets = 10;
+    const wire = (name, body) => f.protocol[name].decode(f.protocol[name].encode(body).finish());
+    watchHeroRaidPushes(f.client);
+    f.client.emit('message', { name: 'SCAllActivity', body: wire('SCAllActivity', { raid: [raid] }) });
+    f.beforeRead = (name, body) => {
+      let reply;
+      if (name === 'HeroRaidChallengeRequest') {
+        assert.equal(body.raidId, raid.raidId);
+        raid.passedStage = body.stageId;
+        tickets++;
+        reply = { raidId: raid.raidId, stageId: body.stageId, initialData: { leftTeam: {}, rightTeams: [{}] },
+          reward: { asset: [{ type: 0, id: '英雄副本抽卡券', num: 1 }] } };
+        f.client.writes.push({ name, body: wire(name, body) });
+      } else if (name === 'HeroRaidPrizeRequest') {
+        assert.equal(body.raidId, raid.raidId);
+        assert(tickets >= body.times);
+        tickets -= body.times;
+        raid.drawTimesInfo.times += body.times;
+        reply = { prizeIndex: 1, gotInfo: structuredClone(raid.drawTimesInfo),
+          reward: { asset: [{ type: 0, id: '红技能书', num: 2 }] } };
+        f.client.writes.push({ name, body: wire(name, body) });
+      } else if (name === 'AllItemRequest') reply = { items: [{ itemId: '英雄副本抽卡券', num: tickets }] };
+      else if (name === 'WeekInfoRequest') reply = { activityTime: [] };
+      else if (name === 'CargoShipsRequest') reply = { ship: [] };
+      else return undefined;
+      return wire(name.replace(/Request$/, 'Response'), reply);
+    };
+    return f;
+  }
+
+  await test('只开超凡英雄时完整循环串行挑战与转盘抽奖，并保存确认记录', async () => {
+    const f = withHeroRaid(integration());
+    assert(Object.values(f.settings.schedule).every(value => value === false));
+    assert.equal(f.settings.loop.world, false);
+    await f.run();
+    assert.deepEqual(f.client.writes.map(row => row.name), ['HeroRaidChallengeRequest', 'HeroRaidPrizeRequest'], JSON.stringify(f.reports));
+    assert.equal(f.client.writes[1].body.times, 10);
+    assert.equal(f.scheduled(), 1);
+    const records = Object.values(f.ledger.keyRecords());
+    assert.deepEqual(records.map(row => row.details.kind).sort(), ['heroRaidChallenge', 'heroRaidLottery']);
+    assert(records.every(row => row.confirmed));
+    const persisted = createUsageLedger('虚构扩展循环账号-' + serial, { file: path.join(folder, serial + '.json') });
+    assert.deepEqual(persisted.keyRecords(), f.ledger.keyRecords());
+    f.clean();
+  });
+
+  await test('超凡英雄活动设置唤醒独立任务，关闭的基地总开关不阻断执行', async () => {
+    const f = withHeroRaid(integration({ rounds: 2 }));
+    f.settings.heroRaid.enabled = false;
+    f.sleepHook(() => {
+      assert.equal(f.isScheduled(), false);
+      assert.equal(f.protocolCalls.length, 0, JSON.stringify(f.protocolCalls));
+      wall += 1000;
+      const next = structuredClone(f.getSettings());
+      next.heroRaid.enabled = true;
+      f.setSettings(next);
+      f.client.emit('automationSettingsChanged');
+      assert.equal(f.protocolCalls.length, 0, '保存设置只唤醒调度');
+    });
+    f.reportHook(() => { if (f.client.writes.some(row => row.name === 'HeroRaidPrizeRequest')) f.stop.aborted = true; });
+    await f.run();
+    assert.deepEqual(f.sleeps, [3600000]);
+    assert.equal(wall - base, 1000);
+    assert.deepEqual(f.client.writes.map(row => row.name), ['HeroRaidChallengeRequest', 'HeroRaidPrizeRequest']);
+    assert.equal(f.scheduled(), 2);
+    f.clean();
+  });
 
   await test('原生任务全关时三舰队仍由完整循环独立派遣，预算落盘', async () => {
     const f = integration();
