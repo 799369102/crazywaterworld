@@ -16,6 +16,15 @@ const template = PAGE.match(/<template id="ui-account-card">([\s\S]*?)<\/templat
 assert.ok(template, '构建后的页面提供账号卡片模板');
 const fields = [...template.matchAll(/data-account-field="([^"]+)"/g)].map(match => match[1]);
 const actions = [...template.matchAll(/data-account-action="([^"]+)"/g)].map(match => match[1]);
+const worldMarkup = template.match(/<dd\b[^>]*class="[^"]*\baccount-card-world\b[^"]*"[^>]*>([\s\S]*?)<\/dd>/)?.[1];
+assert.ok(worldMarkup, '区服资料行提供名称与状态标签的共同容器');
+assert.equal(fields.filter(name => name === 'status').length, 1, '每张卡片只保留一个连接状态标签');
+assert.ok(worldMarkup.indexOf('data-account-field="world"') >= 0
+  && worldMarkup.indexOf('data-account-field="world"') < worldMarkup.indexOf('data-account-field="status"'),
+  '连接状态标签跟在区服名称后面');
+const statusMarkup = worldMarkup.match(/<[^>]+data-account-field="status"[^>]*>/)?.[0];
+assert.match(statusMarkup || '', /class="[^"]*\bchip\b/, '状态标签保留chip样式');
+const statusClass = statusMarkup.match(/class="([^"]*)"/)[1];
 let passed = 0;
 
 async function test(name, run) {
@@ -110,9 +119,18 @@ function fixture(initial = sampleAccounts()) {
     assert.equal(name, 'ui-account-card');
     const card = makeNode('article', 'account-card');
     for (const name of fields) {
+      if (name === 'status') continue;
       const field = makeNode('span');
       field.dataset.accountField = name;
-      if (['role', 'world', 'level', 'power'].includes(name)) {
+      if (name === 'world') {
+        const row = makeNode('div');
+        const value = makeNode('dd', 'account-card-world');
+        const status = makeNode('span', statusClass);
+        status.dataset.accountField = 'status';
+        value.append(field, status);
+        row.append(value);
+        card.append(row);
+      } else if (['role', 'level', 'power'].includes(name)) {
         const row = makeNode('div');
         row.append(field);
         card.append(row);
@@ -222,6 +240,33 @@ await test('账号公开描述保留原始备注字段', async () => {
   assert.equal(description.label, '人工备注');
   assert.equal(description.title, '人工备注 · 角色名 · 海灯785服');
   assert.equal(describeAccount({ ...account, label: undefined }).label, null);
+});
+
+await test('状态标签紧跟区服且按账号原位更新，不重复创建', async () => {
+  const env = fixture();
+  const firstWorld = env.field('fixture-private-a', 'world');
+  const firstStatus = env.field('fixture-private-a', 'status');
+  const secondWorld = env.field('fixture-private-b', 'world');
+  const secondStatus = env.field('fixture-private-b', 'status');
+  for (const [world, status] of [[firstWorld, firstStatus], [secondWorld, secondStatus]]) {
+    assert.equal(world.parentNode, status.parentNode);
+    assert.equal(world.parentNode.classList.contains('account-card-world'), true);
+    assert.deepEqual(world.parentNode.children, [world, status]);
+    assert.equal(status.classList.contains('chip'), true);
+  }
+  assert.equal(firstStatus.textContent, '已连接');
+  assert.match(secondStatus.textContent, /已暂停/);
+  env.api.setAccountStatus('fixture-private-a', { connected: false });
+  env.api.setAccountStatus('fixture-private-b', { connected: true });
+  env.api.renderAccounts();
+  assert.equal(firstStatus.textContent, '未连接');
+  assert.equal(secondStatus.textContent, '已连接');
+  assert.equal(firstWorld.textContent, '海港10服');
+  assert.equal(secondWorld.textContent, '海港2服');
+  assert.equal(env.field('fixture-private-a', 'status'), firstStatus);
+  assert.equal(env.field('fixture-private-b', 'status'), secondStatus);
+  assert.deepEqual(firstWorld.parentNode.children, [firstWorld, firstStatus]);
+  assert.deepEqual(secondWorld.parentNode.children, [secondWorld, secondStatus]);
 });
 
 await test('空态和历史缺省资料可显示，删除最后一个账号后恢复空态', async () => {

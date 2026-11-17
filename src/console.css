@@ -232,6 +232,8 @@ label[for=gift-code-input] { display:block; margin-bottom:8px }
 .account-card-data dt { margin-bottom:4px; font-size:12px }
 .account-card-data dd { margin:0; overflow-wrap:anywhere; font-size:14px; font-weight:500 }
 .account-card-data>div:nth-child(-n+2) { grid-column:1 / -1 }
+.account-card-world { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px }
+.account-card-world>[data-account-field=world] { min-width:0 }
 .account-card-footer { flex-direction:column; align-items:stretch; gap:16px; margin-top:auto }
 .account-card-footer [data-account-field=seen] { font-size:12px; overflow-wrap:anywhere }
 .account-card-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px }

@@ -94,7 +94,7 @@ export function templates() {
       <Card className="account-card">
         <CardHeader>
           <div className="account-card-heading">
-            <div className="account-card-badges"><Badge data-account-field="status" className="chip" variant="outline" /><Badge data-account-field="current" variant="secondary" hidden>当前</Badge></div>
+            <div className="account-card-badges"><Badge data-account-field="current" variant="secondary" hidden>当前</Badge></div>
             <details className="account-card-menu">
               <summary aria-label="更多账号操作"><MoreHorizontal aria-hidden="true" /></summary>
               <div className="account-menu-content">
@@ -110,7 +110,7 @@ export function templates() {
         <CardContent>
           <dl className="account-card-data">
             <div><dt>角色</dt><dd data-account-field="role" /></div>
-            <div><dt>区服</dt><dd data-account-field="world" /></div>
+            <div><dt>区服</dt><dd className="account-card-world"><span data-account-field="world" /><Badge data-account-field="status" className="chip rounded-md max-w-full whitespace-normal text-left" variant="outline" /></dd></div>
             <div><dt>等级</dt><dd data-account-field="level" /></div>
             <div><dt>战力</dt><dd data-account-field="power" /></div>
           </dl>
