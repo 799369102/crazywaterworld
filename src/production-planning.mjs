@@ -1,6 +1,7 @@
 import { optimizeProductionSchedule } from './production-optimizer.mjs';
 import { createProductionTiming } from './production-timing.mjs';
 import { resourceReserve, worldPreferenceEnabled } from './automation-policy.mjs';
+import { activityProductionEnabled } from './activity-automation.mjs';
 
 const rows = (config, key) => config?.tables?.[key]?.data ?? [];
 const sourceNames = { resident: '居民订单', merchant: '不差钱商人', cargo: '贸易港', guildRecruit: '联盟招募',
@@ -27,7 +28,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   const relative = time => Math.max(0, (time ?? now) - now);
   const timing = createProductionTiming({ config, ...snapshot.timing, serverNow: now });
   const prioritySources = unique(settings.factory?.demandPriority ?? []);
-  const orderRows = snapshot.orders.filter(order => order.kind === 'order'
+  const orderRows = snapshot.orders.filter(order => activityProductionEnabled(settings, order.source)).filter(order => order.kind === 'order'
     || order.kind === 'consumption' && prioritySources.includes(order.source)
       && (order.source !== 'building' || settings.building?.supply && worldPreferenceEnabled(settings, 'buildSupply')))
     .map(order => ({ ...order, priority: prioritySources.includes(order.source)
@@ -152,7 +153,7 @@ export function buildProductionModel(snapshot, config, settings, { pendingMateri
   const orders = orderRows.map(order => ({ id: order.id, source: order.source, priority: order.priority,
     requirements: order.requirements.map(item => ({ itemId: item.id, quantity: item.num })),
     consumeOnCompletion: order.kind === 'order' && (order.source === 'merchant'
-      ? settings.schedule?.weekOrderSubmit === true : order.metadata?.enabled === true),
+      ? activityProductionEnabled(settings, 'merchant') && settings.schedule?.weekOrderSubmit === true : order.metadata?.enabled === true),
     ...(order.deadline ? { deadline: order.deadline - now } : {}),
   }));
   return {
@@ -215,7 +216,7 @@ export function planProduction(snapshot, config, settings, options = {}) {
       ...(estimated ? ['候选方案比较含估算耗时或生产位条件，生产加成与容量变化后需重新读取计算'] : [])]),
     assumptions: [
       '以需求优先级列表为顺序，先优化高级需求及其上游材料，再逐级优化后续需求的齐套时间',
-      '范围包括当前订单与已开启来源的消费备料，未列入优先级列表的当前订单置于最后一级',
+      '范围包括活动总开关允许的当前订单与已开启来源的消费备料，未列入优先级列表的当前订单置于最后一级',
       '建筑等消费备料齐套后独占保留，常规备货水位由库存策略处理',
       '固定当前生产加成、现有设施等级和已排队任务，新增任务按原料到齐立即开工估算',
       '生产、收获和已启用订单提交按零操作延迟计算，关闭提交的订单材料独占保留',

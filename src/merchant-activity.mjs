@@ -156,7 +156,7 @@ export async function merchantActivity(client, config, ctx) {
   }
   const actor = () => JSON.stringify([ctx.player?.playerId, ctx.player?.worldId, ctx.player?.guildId]);
   const identity = actor();
-  const allowed = () => ctx.enabled() && client.connected !== false && actor() === identity && moduleOpen(config, ctx.player, '海商王') &&
+  const allowed = () => ctx.enabled() && ctx.settings?.()?.merchant?.enabled !== false && client.connected !== false && actor() === identity && moduleOpen(config, ctx.player, '海商王') &&
     windowOpen(client.tradeWindow, clock(client)) && client.tradeWindow?.period === event?.period &&
     client.tradeWindow.startTime === event.startTime && client.tradeWindow.endTime === event.endTime;
   if (!event?.period || !allowed()) return waiting(ctx, '海商王本期尚未开放');

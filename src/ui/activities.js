@@ -20,6 +20,9 @@ const savingHeroRaidSettings = new Set();
 let seaMerchantSettingsData = null, seaMerchantSettingsOwner = null, seaMerchantSettingsVersion = 0;
 let seaMerchantSettingsStatus = '';
 const savingSeaMerchantSettings = new Set();
+let activityAutomationData = null, activityAutomationOwner = null, activityAutomationVersion = 0;
+let activityAutomationStatus = '';
+const savingActivityAutomation = new Set();
 
 function isSeaMerchantActivity(row) {
   return (row.sourceId ?? row.id) === 'merchant';
@@ -223,6 +226,7 @@ function renderActivityDetail() {
   if (row.weekType === 5) renderMerchantSettings(box);
   if (isHeroRaidActivity(row)) renderHeroRaidSettings(box);
   if (isSeaMerchantActivity(row)) renderSeaMerchantSettings(box);
+  if (row.weekType !== 5 && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row)) renderActivityAutomation(box, row);
   if (row.settingsOnly) return;
   if (!activitiesData) return;
   const active = activityLifecycle(row) === 'active' && !activitiesData.catalogOnly;
@@ -257,7 +261,7 @@ function renderActivityDetail() {
     renderActivityTask(box, row, task);
   }
   if (tasks.length && row.weekType !== 5 && !isSeaMerchantActivity(row)) box.appendChild(el('p', 'dim', '已开启的自动任务随挂机执行，并按活动开放时间自动启停。'));
-  else if (row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row)) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
+  else if (row.weekType !== 5 && row.id !== 'pirates' && !isHeroRaidActivity(row) && !isSeaMerchantActivity(row) && !row.automation) box.appendChild(el('p', 'dim', '当前活动暂未接入单次操作，可在游戏内参与。'));
   if (row.weekType === 5) renderActivityOrder();
 }
 
@@ -291,7 +295,7 @@ function renderActivityTask(box, row, task) {
     weekOrderFinal: '全部档位完成后领取最终奖励。',
     weekOrderSubmit: '材料备齐后提交一次商人订单。',
     vipDaily: '领取已达到 VIP 等级的每日免费奖励。',
-    campaignReports: '海盗战斗等奖励留在战报里，这里一键领取。开启后收到新战报会马上领，不用开挂机。',
+    campaignReports: '海盗战斗等奖励留在战报里，这里一键领取。账号挂机运行且本活动自动挂机与战报领取均开启时，收到新战报会自动领取。',
     openRankRewards: '领取各个开服冲榜已达标的积分奖励。排名奖励由游戏在活动结束后发放。',
   };
   if (descriptions[task.key]) item.appendChild(el('p', 'dim', descriptions[task.key]));
@@ -376,6 +380,95 @@ function syncActivityTask(key, enabled, account) {
   if (task) task.enabled = enabled;
 }
 
+function renderActivityAutomation(box, row) {
+  const account = current;
+  if (activityAutomationOwner !== account || !activityAutomationData) {
+    if (!row.automation && !row.taskKeys?.length) return;
+    box.appendChild(el('p', 'dim', activityAutomationStatus || '正在读取活动自动挂机配置…'));
+    if (activityAutomationStatus) {
+      const retry = smallButton('重新读取');
+      retry.onclick = refreshActivities;
+      box.appendChild(retry);
+    }
+    return;
+  }
+  const controls = activityAutomationData.controls.filter(control => control.key === row.automation?.key
+    || control.taskKeys.some(key => row.taskKeys?.includes(key)));
+  if (!controls.length) return;
+  const section = el('div', 'activity-settings');
+  for (const control of controls) {
+    const label = controls.length === 1 ? '开启自动挂机' : control.label + ' · 开启自动挂机';
+    const field = el('label', 'activity-auto');
+    const toggle = component('ui-event-switch');
+    const enabled = activityAutomationData.settings[control.key];
+    toggle.dataset.activityAutomation = control.key;
+    toggle.setAttribute('aria-label', label);
+    setTaskSwitch(toggle, enabled);
+    toggle.disabled = savingActivityAutomation.has(account);
+    toggle.onclick = () => {
+      if (account === current && !toggle.disabled) return saveActivityAutomation(control.key, !enabled);
+    };
+    field.append(toggle, el('span', null, label));
+    section.appendChild(field);
+  }
+  section.appendChild(el('p', 'dim', row.kind === 'permanent'
+    ? '开启后随账号挂机执行已选项目。关闭后保留各项配置。'
+    : '开启后在账号挂机运行且活动开放时执行已选项目。关闭后保留各项配置，后续期次沿用保存的开关。'));
+  const status = el('p', 'dim', savingActivityAutomation.has(account) ? '正在保存…' : activityAutomationStatus);
+  status.setAttribute('role', 'status');
+  section.appendChild(status);
+  box.appendChild(section);
+}
+
+async function refreshActivityAutomation(account) {
+  if (!account || savingActivityAutomation.has(account)) return;
+  const version = ++activityAutomationVersion;
+  try {
+    const data = await call('/api/activities/settings?account=' + encodeURIComponent(account));
+    if (account !== current || activityAutomationOwner !== account || version !== activityAutomationVersion) return;
+    activityAutomationData = data;
+    activityAutomationStatus = '';
+  } catch {
+    if (account !== current || activityAutomationOwner !== account || version !== activityAutomationVersion) return;
+    activityAutomationStatus = '活动自动挂机配置读取失败，请重试。';
+  }
+}
+
+async function saveActivityAutomation(key, value) {
+  const account = current;
+  if (!account || activityAutomationOwner !== account || !activityAutomationData || savingActivityAutomation.has(account)) return;
+  const version = ++activityAutomationVersion;
+  savingActivityAutomation.add(account);
+  activityAutomationStatus = '';
+  renderActivityDetail();
+  let failure = null;
+  try {
+    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+    if (account !== current || activityAutomationOwner !== account || version !== activityAutomationVersion) return;
+    const latest = await call('/api/activities/settings?account=' + encodeURIComponent(account));
+    if (account !== current || activityAutomationOwner !== account || version !== activityAutomationVersion) return;
+    const saved = await call('/api/activities/settings?account=' + encodeURIComponent(account), {
+      method: 'POST', body: JSON.stringify({ key, value, revision: latest.revision, baseRevision: latest.baseRevision, confirm: true }),
+    });
+    if (account === current && activityAutomationOwner === account && version === activityAutomationVersion) {
+      activityAutomationData = saved;
+      loopSettingsRevision = saved.revision;
+    }
+  } catch (error) {
+    failure = error;
+    if (account === current && activityAutomationOwner === account) reportError(error, '保存活动自动挂机配置');
+  } finally {
+    savingActivityAutomation.delete(account);
+    if (account === current && activityAutomationOwner === account) {
+      await refreshActivityAutomation(account);
+      if (account === current && activityAutomationOwner === account) {
+        if (failure) activityAutomationStatus = failure.message;
+        renderActivityTabs();
+      }
+    }
+  }
+}
+
 function renderMerchantSettings(box) {
   const account = current;
   if (merchantSettingsOwner !== account || !merchantSettingsData) {
@@ -385,6 +478,7 @@ function renderMerchantSettings(box) {
   const settings = merchantSettingsData.settings;
   const section = el('div', 'activity-settings');
   for (const [key, label] of [
+    ['enabled', '开启自动挂机'],
     ['autoSubmit', '自动完成商人订单'],
     ['allowDiamonds', '缺材料时允许消耗钻石'],
     ['autoFinal', '自动领取最终奖励'],
@@ -401,7 +495,7 @@ function renderMerchantSettings(box) {
     row.append(toggle, el('span', null, label));
     section.appendChild(row);
   }
-  section.appendChild(el('p', 'dim', '配置按账号自动保存，随挂机执行。钻石补料受全局钻石开关、每日预算和保留量限制。'));
+  section.appendChild(el('p', 'dim', '开启自动挂机后，在账号挂机运行且活动开放时执行已选项目。关闭后保留各项配置。钻石补料受全局钻石开关、每日预算和保留量限制。'));
   const status = el('p', 'dim', savingMerchantSettings.has(account) ? '正在保存…' : merchantSettingsStatus);
   status.setAttribute('role', 'status');
   section.appendChild(status);
@@ -466,7 +560,7 @@ function renderHeroRaidSettings(box) {
   const settings = heroRaidSettingsData.settings;
   const section = el('div', 'activity-settings');
   const fields = [
-    ['enabled', '总开关', '关闭后暂停超凡英雄自动执行，保留各项选择。'],
+    ['enabled', '开启自动挂机', '账号挂机运行、活动处于服务端开放时间内时，执行下方已开启的项目。关闭后暂停本活动，保留各项选择。'],
     ['challenge', '自动挑战', '每轮挑战一个已解锁关卡或重试一次，连续战败次数跨轮累计。'],
     ['retryTimes', '战败重试次数', '本期同一关卡首次战败后的重试上限，0 表示战败即停止。'],
     ['orders', '自动完成订单', '材料足够时提交当前已解锁订单，缺料由工厂生产配置处理。'],
@@ -768,10 +862,14 @@ async function refreshActivities() {
     seaMerchantSettingsData = null;
     seaMerchantSettingsStatus = '';
     ++seaMerchantSettingsVersion;
+    activityAutomationOwner = account;
+    activityAutomationData = null;
+    activityAutomationStatus = '';
+    ++activityAutomationVersion;
   }
   if ($('tab-activities').classList.contains('hidden')) return;
   const status = $('activities-status');
-  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account), refreshSeaMerchantSettings(account)]);
+  await Promise.all([refreshMerchantSettings(account), refreshHeroRaidSettings(account), refreshSeaMerchantSettings(account), refreshActivityAutomation(account)]);
   if (version !== activitiesVersion || account !== current) return;
   const unavailable = !account || snapshot.connected !== true || snapshot.paused || disconnected.has(account);
   if (unavailable) {

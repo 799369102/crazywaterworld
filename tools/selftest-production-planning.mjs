@@ -32,6 +32,17 @@ function fixture() {
 let passed = 0;
 function test(name, run) { run(); passed++; console.log('通过：' + name); }
 
+test('关闭活动总开关后排程移除对应备料订单，其他订单继续参与', () => {
+  const { snapshot, settings } = fixture();
+  snapshot.orders.push(...['merchant', 'heroRaid'].map(source => ({
+    ...snapshot.orders[0], id: source + ':1', source,
+  })));
+  settings.heroRaid.enabled = true;
+  assert.equal(buildProductionModel(snapshot, config, settings).orderRows.length, 3);
+  settings.heroRaid.enabled = settings.weekOrder.enabled = false;
+  assert.deepEqual(buildProductionModel(snapshot, config, settings).orderRows.map(row => row.source), ['resident']);
+});
+
 test('共享库存只分配一次，现有队列按服务器时间贡献', () => {
   const { snapshot, plan } = fixture();
   snapshot.inventory.push({ id: '面包', num: 1 });

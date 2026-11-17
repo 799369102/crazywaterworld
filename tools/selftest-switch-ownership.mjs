@@ -13,11 +13,12 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([
 const { automationControls, idleAutomationControls, automationControlView, setAutomationControl } = await import('../src/automation-controls.mjs');
 const { defaultSettings, validateSettings, saveAutomationSettings, loadAutomationSettings, settingsUiRules } = await import('../src/automation-settings.mjs');
 const { automationTasks } = await import('../src/automation.mjs');
+const { activityAutomationFields } = await import('../src/activity-automation.mjs');
 const { idlePanel } = await import('../src/ui/dist/console.mjs');
 const script = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const definitions = script.slice(0, script.indexOf('function configGet('));
 const { staticGroups, merchantFields } = new Function(definitions + '\nreturn { staticGroups: configGroups, merchantFields: merchantActivityFields };')();
-const activityKeys = new Set([...merchantFields.map(field => field.key),
+const activityKeys = new Set([...merchantFields.map(field => field.key), ...activityAutomationFields.map(field => field.key),
   'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const renderStart = script.indexOf('function configRender()');
@@ -74,7 +75,7 @@ try {
 
   await check('商人、超凡英雄和海商王由活动页管理，全部海商王开关与参数均可编辑', () => {
     const idleFields = new Set(idleAutomationControls.flatMap(control => control.fields));
-    for (const key of ['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
+    for (const key of ['weekOrder.enabled', 'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
       'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']) {
       assert(!configKeys.has(key), key);
       assert(!idleFields.has(key), key);
@@ -96,6 +97,18 @@ try {
       if (typeof value === 'boolean') assert.equal(field.kind, 'switch', field.key + ' 开关可编辑');
       else if (typeof value === 'number') assert.equal(field.kind, 'number', field.key + ' 数值可编辑');
       else assert(['choice', 'time'].includes(field.kind), field.key + ' 策略或时间可编辑');
+    }
+  });
+
+  await check('每个活动自动挂机总开关仅由活动配置管理，挂机面板不生成入口', () => {
+    const idleKeys = new Set(idleAutomationControls.flatMap(control => control.fields));
+    const html = idlePanel(automationControls);
+    for (const field of activityAutomationFields) {
+      assert.equal(typeof read(defaultSettings(), field.key), 'boolean', field.key + ' 有持久化布尔值');
+      assert(!idleKeys.has(field.key), field.key + ' 不在挂机入口');
+      assert(!html.includes('data-auto-task="' + field.key + '"'), field.key + ' 不重复渲染');
+      assert(!configKeys.has(field.key), field.key + ' 不在通用配置重复编辑');
+      assert(activityKeys.has(field.key), field.key + ' 由活动配置拥有');
     }
   });
 

@@ -297,4 +297,16 @@ await test('生产诊断保留期待数量与前后证据，日志观察者报�
   assert(failures.some(row => row.event === 'factory-production-verification' && !row.confirmed && row.expected['产品甲'] === 1));
   assert.equal(pendingOrderMaterialSpends(g.player).length, 1);
 });
+await test('活动备料批次中途关闭总开关后停止后续开工并结算已发送生产', async () => {
+  for (const source of ['merchant', 'heroRaid']) {
+    const f = fixture(); f.settings.heroRaid.enabled = true;
+    const steps = Array.from({ length: 3 }, () => ({ ...f.step(), demandSources: [source] }));
+    f.state.afterSend = count => {
+      if (count === 1) f.settings[source === 'merchant' ? 'weekOrder' : 'heroRaid'].enabled = false;
+    };
+    await f.batch(steps);
+    assert.equal(f.state.writes.length, 1, source);
+    assert.equal(pendingOrderMaterialSpends(f.player).length, 0, source);
+  }
+});
 console.log('生产批次专项 ' + passed + '/' + passed + ' 通过');

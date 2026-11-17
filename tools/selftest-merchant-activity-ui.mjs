@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { defaultSettings, settingsUiRules } from '../src/automation-settings.mjs';
+import { activityAutomationFields } from '../src/activity-automation.mjs';
 
 const script = fs.readFileSync(new URL('../src/ui/activities.js', import.meta.url), 'utf8');
 const configScript = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
@@ -85,7 +86,7 @@ function fixture() {
     return nodes.get(id);
   };
   const settings = (values = {}, revision = 1) => ({
-    settings: { autoSubmit: false, allowDiamonds: false, autoFinal: true, ...values },
+    settings: { enabled: true, autoSubmit: false, allowDiamonds: false, autoFinal: true, ...values },
     revision, baseRevision: 'base-' + revision,
   });
   const saved = new Map([['merchant-a', settings()], ['merchant-b', settings({ autoFinal: false }, 3)]]);
@@ -100,6 +101,13 @@ function fixture() {
     rules: { numbers: settingsUiRules().numbers }, revision, baseRevision: 'base-' + revision,
   });
   const seaSaved = new Map([['merchant-a', seaSettings()], ['merchant-b', seaSettings({ profitLimit: 100 }, { merchantRewards: false }, 3)]]);
+  const automationSettings = (values = {}, revision = 1) => ({
+    settings: { ...Object.fromEntries(activityAutomationFields.map(({ key }) =>
+      [key, key.split('.').reduce((value, part) => value[part], defaultSettings())])), ...values },
+    controls: activityAutomationFields, revision, baseRevision: 'base-' + revision,
+  });
+  const automationSaved = new Map([['merchant-a', automationSettings()],
+    ['merchant-b', automationSettings({ 'activityAutomation.weekLottery': false }, 3)]]);
   const now = Math.floor(state.now / 1000);
   const catalog = { activities: [], eventTasks: [], status: {}, serverNow: now, catalogOnly: true };
   const activities = {
@@ -193,6 +201,22 @@ function fixture() {
         }
         return clone(seaSaved.get(account));
       }
+      if (request.route === '/api/activities/settings') {
+        if (request.method === 'POST') {
+          const previous = automationSaved.get(account), payload = request.body;
+          assert.equal(payload.revision, previous.revision);
+          assert.equal(payload.baseRevision, previous.baseRevision);
+          assert.equal(payload.confirm, true);
+          assert(activityAutomationFields.some(field => field.key === payload.key));
+          assert.equal(typeof payload.value, 'boolean');
+          const next = clone(previous);
+          next.settings[payload.key] = payload.value;
+          next.revision++;
+          next.baseRevision = 'base-' + next.revision;
+          automationSaved.set(account, next);
+        }
+        return clone(automationSaved.get(account));
+      }
       if (request.route === '/api/activities') return clone(activities);
       if (request.route === '/api/activities/catalog') return clone(catalog);
       throw Error('未声明前端测试请求 ' + request.route);
@@ -213,12 +237,16 @@ function fixture() {
     get seaOwner() { return seaMerchantSettingsOwner; },
     selectSea() { selectActivity(activityRows().find(isSeaMerchantActivity)?.id); },
     readSeaSettings: refreshSeaMerchantSettings, saveSea: saveSeaMerchantSetting,
+    get automationSettings() { return activityAutomationData; },
+    get automationOwner() { return activityAutomationOwner; },
+    readAutomationSettings: refreshActivityAutomation, saveAutomation: saveActivityAutomation,
   })`, context);
   const controls = () => node('activities-list').querySelectorAll('[data-merchant-setting]');
   const heroControls = () => node('activities-list').querySelectorAll('[data-hero-raid-setting]');
   const seaControls = () => node('activities-list').querySelectorAll('[data-sea-merchant-setting]');
+  const automationControls = () => node('activities-list').querySelectorAll('[data-activity-automation]');
   return { api, context, state, node, saved, settings, activities, catalog, controls, heroSaved, heroSettings, heroControls,
-    seaSaved, seaSettings, seaControls,
+    seaSaved, seaSettings, seaControls, automationSaved, automationSettings, automationControls,
     input: key => controls().find(input => input.dataset.merchantSetting === key),
     heroInput: key => heroControls().find(input => input.dataset.heroRaidSetting === key),
     async clickHero(key) { const input = this.heroInput(key); assert(input && !input.disabled, key + ' 开关应可编辑'); await input.onclick(); },
@@ -231,6 +259,8 @@ function fixture() {
       else { input.value = value; await input.onchange(); }
     },
     async click(key) { const input = this.input(key); assert(input && !input.disabled, key + ' 开关应可编辑'); await input.onclick(); },
+    automationInput: key => automationControls().find(input => input.dataset.activityAutomation === key),
+    async clickAutomation(key) { const input = this.automationInput(key); assert(input && !input.disabled, key + ' 开关应可编辑'); await input.onclick(); },
   };
 }
 
@@ -242,7 +272,8 @@ async function test(name, work) {
 await test('活动详情仅呈现一套商人设置，回读原账号保存值', async () => {
   const f = fixture();
   await f.api.refresh(); f.api.selectMerchant();
-  assert.deepEqual(f.controls().map(input => input.dataset.merchantSetting), ['autoSubmit', 'allowDiamonds', 'autoFinal']);
+  assert.deepEqual(f.controls().map(input => input.dataset.merchantSetting), ['enabled', 'autoSubmit', 'allowDiamonds', 'autoFinal']);
+  assert.equal(f.input('enabled').getAttribute('aria-label'), '开启自动挂机');
   assert.equal(f.input('autoSubmit').getAttribute('aria-checked'), 'false');
   assert.equal(f.input('allowDiamonds').getAttribute('aria-checked'), 'false');
   assert.equal(f.input('allowDiamonds').disabled, true);
@@ -259,7 +290,7 @@ await test('三个开关直接保存单字段并回读，关闭自动完成仍�
   assert.equal(f.input('allowDiamonds').disabled, false);
   await f.click('allowDiamonds');
   await f.click('autoFinal');
-  assert.deepEqual(f.saved.get('merchant-a').settings, { autoSubmit: true, allowDiamonds: true, autoFinal: false });
+  assert.deepEqual(f.saved.get('merchant-a').settings, { enabled: true, autoSubmit: true, allowDiamonds: true, autoFinal: false });
   await f.click('autoSubmit');
   assert.equal(f.input('autoSubmit').getAttribute('aria-checked'), 'false');
   assert.equal(f.input('allowDiamonds').getAttribute('aria-checked'), 'true');
@@ -279,13 +310,13 @@ await test('暂停、断开及首次未连接时可配置商人，游戏读取�
     await f.api.refresh(); f.api.selectMerchant();
     const merchant = f.api.rows().find(row => row.weekType === 5);
     assert.equal(merchant.settingsOnly, true);
-    assert.equal(f.controls().length, 3);
+    assert.equal(f.controls().length, 4);
     assert(!f.state.calls.some(call => call.route === '/api/activities'));
     assert.equal(f.node('activities-list').querySelectorAll('[data-activity-run]').length, 0);
     assert.equal(f.node('activities-order').querySelectorAll('button').length, 0);
     await f.click('autoSubmit');
     assert.equal(f.saved.get('merchant-a').settings.autoSubmit, true);
-    assert(f.state.calls.every(call => ['/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/catalog'].includes(call.route)));
+    assert(f.state.calls.every(call => ['/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/activities/catalog'].includes(call.route)));
   }
 });
 
@@ -301,7 +332,7 @@ await test('读取商人配置期间暂停或断开后，不继续读取游戏�
     };
     await f.api.refresh(); f.api.selectMerchant();
     assert(!f.state.calls.some(call => call.route === '/api/activities'));
-    assert.equal(f.controls().length, 3);
+    assert.equal(f.controls().length, 4);
     assert.equal(f.api.rows().find(row => row.weekType === 5).settingsOnly, true);
   }
 });
@@ -331,7 +362,7 @@ await test('保存前刷新版本，仅修改所点开关并保留其他页面�
   await f.click('autoFinal');
   const write = f.state.calls.find(call => call.method === 'POST');
   assert.equal(write.body.revision, 8);
-  assert.deepEqual(f.saved.get('merchant-a').settings, { autoSubmit: true, allowDiamonds: true, autoFinal: false });
+  assert.deepEqual(f.saved.get('merchant-a').settings, { enabled: true, autoSubmit: true, allowDiamonds: true, autoFinal: false });
   assert.deepEqual(clone(f.api.settings.settings), f.saved.get('merchant-a').settings);
 });
 
@@ -507,7 +538,7 @@ await test('离线读取账号活动留档，过期条目收起且不调用游�
   await f.api.refresh();
   assert.equal(f.node('activity-tabs').querySelector('#activity-group-ended').hidden, true);
   f.api.select('archive:merchant');
-  assert.equal(f.controls().length, 3);
+  assert.equal(f.controls().length, 4);
   await f.click('autoSubmit');
   assert.equal(f.saved.get('merchant-a').settings.autoSubmit, true);
   assert(!f.state.calls.some(call => call.route === '/api/activities'));
@@ -925,6 +956,185 @@ await test('海商王迟到读取不会覆盖新保存，保存回复丢失后�
   await f.setSea('merchant.profitLimit', 800);
   assert.equal(f.seaInput('merchant.profitLimit').valueAsNumber, 800);
   assert(f.seaControls().every(control => !control.disabled));
+});
+
+await test('不差钱和海商王的自动挂机总开关独立保存，关闭后保留执行细项', async () => {
+  const f = fixture();
+  f.saved.set('merchant-a', f.settings({ autoSubmit: true, allowDiamonds: true, autoFinal: false }));
+  f.seaSaved.set('merchant-a', f.seaSettings({ autoShareIntel: false, profitLimit: 300 },
+    { merchantTrade: true, merchantRewards: false, tradeTasks: true }));
+  await f.api.refresh(); f.api.selectMerchant();
+  const merchantBefore = clone(f.saved.get('merchant-a').settings);
+  await f.click('enabled');
+  assert.deepEqual(f.saved.get('merchant-a').settings, { ...merchantBefore, enabled: false });
+  assert.equal(f.input('enabled').getAttribute('aria-checked'), 'false');
+  assert.equal(f.input('autoSubmit').disabled, false, '暂停活动后仍可预选执行细项');
+  await f.click('enabled');
+  assert.deepEqual(f.saved.get('merchant-a').settings, merchantBefore);
+  f.api.selectSea();
+  const seaBefore = clone(f.seaSaved.get('merchant-a').settings);
+  assert.equal(f.seaInput('merchant.enabled').getAttribute('aria-label'), '开启自动挂机');
+  await f.setSea('merchant.enabled');
+  assert.deepEqual(f.seaSaved.get('merchant-a').settings,
+    { ...seaBefore, merchant: { ...seaBefore.merchant, enabled: false } });
+  assert.equal(f.seaInput('schedule.merchantTrade').disabled, false);
+  await f.setSea('merchant.enabled');
+  assert.deepEqual(f.seaSaved.get('merchant-a').settings, seaBefore);
+  assert(f.state.calls.filter(call => call.method === 'POST').every(call =>
+    call.body.key === 'enabled' || call.body.key === 'merchant.enabled'));
+});
+
+function lotteryFixture() {
+  const f = fixture(), now = Math.floor(f.state.now / 1000);
+  f.activities.activities = [{ id: 'weekly:4:1001:1', name: '幸运转盘', kind: 'weekly', weekType: 4,
+    startTime: now - 100, endTime: now + 3600,
+    taskKeys: ['weekGift', 'weekTimes', 'weekLotterySpin'],
+    automation: { key: 'activityAutomation.weekLottery', enabled: true } }];
+  f.activities.eventTasks = [
+    { key: 'weekGift', label: '免费礼包', enabled: true },
+    { key: 'weekTimes', label: '次数奖励', enabled: true },
+    { key: 'weekLotterySpin', label: '使用周转盘币', enabled: false },
+  ];
+  f.selectLottery = () => f.api.select('weekly:4:1001:1');
+  return f;
+}
+
+await test('普通活动每期复用一个总开关，保存只修改所选活动且保留细项', async () => {
+  const f = lotteryFixture();
+  await f.api.refresh(); f.selectLottery();
+  assert.equal(f.automationControls().length, 1);
+  const key = 'activityAutomation.weekLottery';
+  assert.equal(f.automationInput(key).getAttribute('aria-label'), '开启自动挂机');
+  const tasks = clone(f.activities.eventTasks), before = clone(f.automationSaved.get('merchant-a').settings);
+  f.automationSaved.set('merchant-a', f.automationSettings({ 'activityAutomation.beauty': false }, 9));
+  await f.clickAutomation(key);
+  assert.equal(f.automationInput(key).getAttribute('aria-checked'), 'false');
+  assert.deepEqual(f.automationSaved.get('merchant-a').settings,
+    { ...before, [key]: false, 'activityAutomation.beauty': false });
+  assert.deepEqual(f.activities.eventTasks, tasks);
+  const post = f.state.calls.find(call => call.method === 'POST');
+  assert.equal(post.route, '/api/activities/settings');
+  assert.deepEqual(post.body, { key, value: false, revision: 9, baseRevision: 'base-9', confirm: true });
+  await f.clickAutomation(key);
+  assert.equal(f.automationInput(key).getAttribute('aria-checked'), 'true');
+  assert.deepEqual(f.activities.eventTasks, tasks);
+  assert(!f.state.calls.some(call => call.route === '/api/loop/start' || call.route === '/api/activities/run'));
+});
+
+await test('普通活动在未开放、结束、暂停或离线时均可保存自动挂机开关', async () => {
+  for (const state of ['upcoming', 'ended', 'paused', 'disconnected']) {
+    const f = lotteryFixture(), now = Math.floor(f.state.now / 1000);
+    if (state === 'upcoming') Object.assign(f.activities.activities[0], { startTime: now + 60, endTime: now + 3600 });
+    if (state === 'ended') Object.assign(f.activities.activities[0], { startTime: now - 3600, endTime: now - 1 });
+    if (state === 'paused') f.context.snapshot.paused = true;
+    if (state === 'disconnected') f.context.snapshot.connected = false;
+    f.catalog.activities = clone(f.activities.activities);
+    f.catalog.eventTasks = clone(f.activities.eventTasks);
+    await f.api.refresh(); f.selectLottery();
+    const input = f.automationInput('activityAutomation.weekLottery');
+    assert(input && !input.disabled, state + ' 可以编辑总开关');
+    assert(f.node('activities-list').querySelectorAll('[data-activity-run]').every(button => button.disabled));
+    await f.clickAutomation('activityAutomation.weekLottery');
+    assert.equal(f.automationSaved.get('merchant-a').settings['activityAutomation.weekLottery'], false);
+    if (state === 'paused' || state === 'disconnected') assert(!f.state.calls.some(call => call.route === '/api/activities'));
+  }
+});
+
+await test('普通活动配置保存期间锁定总开关，账号切换后迟到回复不串号', async () => {
+  const f = lotteryFixture();
+  await f.api.refresh(); f.selectLottery();
+  const entered = deferred(), release = deferred();
+  f.state.respond = request => {
+    if (request.route === '/api/activities/settings' && request.method === 'POST') {
+      entered.resolve(); return release.promise;
+    }
+  };
+  const saving = f.clickAutomation('activityAutomation.weekLottery');
+  await entered.promise;
+  assert(f.automationControls().every(control => control.disabled));
+  await f.api.saveAutomation('activityAutomation.weekLottery', true);
+  await f.api.refresh(); f.selectLottery();
+  assert(f.automationControls().every(control => control.disabled));
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').length, 1);
+  f.context.current = 'merchant-b';
+  await f.api.refresh(); f.selectLottery();
+  assert.equal(f.api.automationOwner, 'merchant-b');
+  release.resolve(f.automationSettings({ 'activityAutomation.weekLottery': false }, 2));
+  await saving;
+  assert.deepEqual(clone(f.api.automationSettings), f.automationSaved.get('merchant-b'));
+  assert.equal(f.automationInput('activityAutomation.weekLottery').getAttribute('aria-checked'), 'false');
+  assert.equal(f.automationInput('activityAutomation.weekLottery').disabled, false);
+});
+
+await test('普通活动总开关保存失败后回读恢复，草稿保存失败阻止写入', async () => {
+  const f = lotteryFixture();
+  await f.api.refresh(); f.selectLottery();
+  f.state.respond = request => {
+    if (request.route === '/api/activities/settings' && request.method === 'POST') throw Error('总开关保存失败');
+  };
+  await f.clickAutomation('activityAutomation.weekLottery');
+  assert.equal(f.automationInput('activityAutomation.weekLottery').getAttribute('aria-checked'), 'true');
+  assert.equal(f.automationInput('activityAutomation.weekLottery').disabled, false);
+  assert(f.state.errors.some(error => error.message === '总开关保存失败'));
+  const writes = f.state.calls.filter(call => call.method === 'POST').length;
+  f.state.respond = null;
+  f.context.configFlush = async () => false;
+  await f.clickAutomation('activityAutomation.weekLottery');
+  assert.equal(f.state.calls.filter(call => call.method === 'POST').length, writes);
+  assert.equal(f.automationInput('activityAutomation.weekLottery').disabled, false);
+});
+
+await test('普通活动旧读取不覆盖新总开关，保存回包丢失由回读确认', async () => {
+  const f = lotteryFixture();
+  await f.api.refresh(); f.selectLottery();
+  const entered = deferred(), release = deferred();
+  let delayed = false;
+  f.state.respond = request => {
+    if (!delayed && request.route === '/api/activities/settings' && request.method === 'GET') {
+      delayed = true; entered.resolve(); return release.promise;
+    }
+  };
+  const before = clone(f.automationSaved.get('merchant-a'));
+  const reading = f.api.readAutomationSettings('merchant-a');
+  await entered.promise;
+  await f.clickAutomation('activityAutomation.weekLottery');
+  const revision = f.api.automationSettings.revision;
+  release.resolve(before); await reading;
+  assert.equal(f.api.automationSettings.settings['activityAutomation.weekLottery'], false);
+  assert.equal(f.api.automationSettings.revision, revision);
+  f.state.respond = request => {
+    if (request.route === '/api/activities/settings' && request.method === 'POST') {
+      const next = clone(f.automationSaved.get('merchant-a'));
+      next.settings[request.body.key] = request.body.value;
+      next.revision++;
+      next.baseRevision = 'base-' + next.revision;
+      f.automationSaved.set('merchant-a', next);
+      throw Error('保存回复丢失');
+    }
+  };
+  await f.clickAutomation('activityAutomation.weekLottery');
+  assert.equal(f.automationInput('activityAutomation.weekLottery').getAttribute('aria-checked'), 'true');
+  assert.equal(f.automationInput('activityAutomation.weekLottery').disabled, false);
+});
+
+await test('活动元数据可定位无任务列表的已接入开关，纯展示活动不生成开关', async () => {
+  const f = lotteryFixture(), now = Math.floor(f.state.now / 1000);
+  f.activities.activities.push(
+    { id: 'beauty', name: '海上风采大赛', kind: 'limited', startTime: now - 100, endTime: now + 1000,
+      taskKeys: [], automation: { key: 'activityAutomation.beauty', enabled: true } },
+    { id: 'magicOcean', name: '神奇海洋', kind: 'limited', startTime: now - 100, endTime: now + 1000, taskKeys: [] },
+  );
+  await f.api.refresh(); f.api.select('beauty');
+  assert.equal(f.automationControls().length, 1);
+  assert(f.automationInput('activityAutomation.beauty'));
+  f.api.select('magicOcean');
+  assert.equal(f.automationControls().length, 0);
+  f.activities.status.pirates = { rankOpen: true };
+  await f.api.refresh(); f.api.select('pirates');
+  assert.deepEqual(f.automationControls().map(control => control.dataset.activityAutomation),
+    ['activityAutomation.pirates', 'activityAutomation.openRank']);
+  assert(f.automationInput('activityAutomation.pirates').getAttribute('aria-label').includes('海盗战报奖励'));
+  assert(f.automationInput('activityAutomation.openRank').getAttribute('aria-label').includes('开服冲榜'));
 });
 
 console.log('活动分组与集中配置专项 ' + passed + '/' + passed + ' 通过');

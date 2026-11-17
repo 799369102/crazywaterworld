@@ -691,7 +691,7 @@ export async function runWeekOrder(client,config,settings,ledger,enabled,action,
 
 export async function runAutomaticWeekOrder(client, config, { player, getSettings, ledger, enabled, report }) {
   const publish = entry => report({ key: 'weekOrderSubmit', label: '不差钱商人订单', ...entry });
-  const active = () => enabled() && getSettings()?.schedule?.weekOrderSubmit === true;
+  const active = () => enabled() && getSettings()?.weekOrder?.enabled !== false && getSettings()?.schedule?.weekOrderSubmit === true;
   if (!active()) return publish({ skipped: true, reason: '自动完成商人订单已关闭' });
   const stamp = JSON.stringify(weekOrderActor(player));
   const check = () => {

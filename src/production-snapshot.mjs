@@ -7,6 +7,7 @@ import { readWeekOrder, weekSchedule } from './activities.mjs';
 import { baseDemands } from './base-automation.mjs';
 import { readGuildShips } from './guild-ships.mjs';
 import { watchHeroRaidPushes } from './hero-raid-automation.mjs';
+import { activityProductionEnabled } from './activity-automation.mjs';
 
 const rows = (config, table) => config?.tables?.[table]?.data ?? [];
 const list = value => Array.isArray(value) ? value : [];
@@ -41,7 +42,9 @@ function requirements(value) {
 
 /** Build a JSON-safe, fixed set of currently observed production demands. No I/O. */
 export function buildProductionSnapshot(raw, config, settings = {}) {
-  const reads = (raw.reads ?? []).map(entry => ({ ...entry }));
+  const merchantEnabled = activityProductionEnabled(settings, 'merchant');
+  const reads = (raw.reads ?? []).filter(entry => merchantEnabled || !['WeekInfoRequest', 'WeekOrderInfoRequest', 'weekOrder'].includes(entry.request))
+    .map(entry => ({ ...entry }));
   const issues = [];
   const incomplete = (request, reason) => issues.push({ request, status: 'missing', reason });
   const serverNow = timestamp(raw.serverNow);
@@ -130,7 +133,7 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
     addOrder('resident', String(order.index ?? 0) + ':' + digest([order.workerId, order.textId, order.requirements]), order.requirements,
       null, { index: order.index ?? 0, refreshTime: timestamp(order.refreshTime), enabled: settings.resident?.enabled !== false });
   }
-  if (raw.weekOrder && !raw.weekOrder.finished) {
+  if (merchantEnabled && raw.weekOrder && !raw.weekOrder.finished) {
     const items = raw.weekOrder.needed instanceof Map ? [...raw.weekOrder.needed].map(([id, num]) => ({ id, num })) : raw.weekOrder.requirements;
     addOrder('merchant', raw.weekOrder.orderKey ?? digest(raw.weekOrder.evidence ?? items), items ?? [], raw.weekOrder.evidence?.endTime,
       { evidence: raw.weekOrder.evidence ?? null });
@@ -155,7 +158,7 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
     addOrder('guildShip', [raw.guildShipView.period, shipCandidate.shipId, shipCandidate.crewId].join(':'), shipCandidate.costs,
       shipCandidate.preparedEndTime, { shipId: shipCandidate.shipId, crewId: shipCandidate.crewId, candidate: true }, 'consumption');
   }
-  {
+  if (activityProductionEnabled(settings, 'heroRaid')) {
     if (!raw.heroRaids?.observed || raw.heroRaids.invalid) incomplete('SCAllActivity', '超凡英雄活动推送尚未完整观察');
     for (const raid of raw.heroRaids?.raids ?? []) {
       if (!(raid.startTime <= serverNow && raid.finishTime > serverNow)) continue;
@@ -305,7 +308,7 @@ export async function readProductionSnapshot(client, protocol, config, player, s
     try { raw[key] = await request(name); }
     catch (error) { if (error.code === 'PRODUCTION_SNAPSHOT_CHANGED') throw error; raw[key] = null; }
   };
-  const heroState = watchHeroRaidPushes(client);
+  const heroState = activityProductionEnabled(settings, 'heroRaid') ? watchHeroRaidPushes(client) : null;
   const transport = new Set(['PingRequest', 'Ack', 'Nack']);
   const changingPushes = new Set(['SCUpdateItem', 'SCUpdateResource', 'SCUpdateWaterBuilding', 'SCWorkerOrder', 'SCGuildOrder',
     'SCAllActivity', 'SCGameEffectUpdate', 'SCUpdateHero', 'SCVipUpdate', 'SCPlayerExpUpdate', 'SCPlayerLevelGrade',
@@ -329,16 +332,18 @@ export async function readProductionSnapshot(client, protocol, config, player, s
       return typeof value === 'function' ? value.bind(target) : value;
     } });
     const now = () => Math.floor(((options.now?.() ?? Date.now()) + (client.serverClockOffsetMs || 0)) / 1000);
-    try {
-      raw.weekSchedule = await weekSchedule(readonly);
-      if (!Array.isArray(cache.get('WeekInfoRequest')?.activityTime)) throw new Error('周活动列表未完整返回');
-      if (raw.weekSchedule.some(row => ['type', 'startTime', 'endTime', 'period'].some(key => amount(row[key]) === null)
-        || row.endTime <= row.startTime)) throw new Error('周活动期次或开放时间未完整返回');
-      const current = raw.weekSchedule.filter(row => row.startTime <= now() && row.endTime > now());
-      raw.weekOrder = await readWeekOrder(readonly, current, config);
-    } catch (error) {
-      if (error.code === 'PRODUCTION_SNAPSHOT_CHANGED') throw error;
-      reads.push({ request: 'weekOrder', status: 'missing', reason: error.message });
+    if (activityProductionEnabled(settings, 'merchant')) {
+      try {
+        raw.weekSchedule = await weekSchedule(readonly);
+        if (!Array.isArray(cache.get('WeekInfoRequest')?.activityTime)) throw new Error('周活动列表未完整返回');
+        if (raw.weekSchedule.some(row => ['type', 'startTime', 'endTime', 'period'].some(key => amount(row[key]) === null)
+          || row.endTime <= row.startTime)) throw new Error('周活动期次或开放时间未完整返回');
+        const current = raw.weekSchedule.filter(row => row.startTime <= now() && row.endTime > now());
+        raw.weekOrder = await readWeekOrder(readonly, current, config);
+      } catch (error) {
+        if (error.code === 'PRODUCTION_SNAPSHOT_CHANGED') throw error;
+        reads.push({ request: 'weekOrder', status: 'missing', reason: error.message });
+      }
     }
     const cargoLevels = rows(config, 'CargoUnlockCfg').map(row => amount(row.playerLevel)).filter(level => level !== null);
     const cargoLevel = cargoLevels.length ? Math.min(...cargoLevels) : null;

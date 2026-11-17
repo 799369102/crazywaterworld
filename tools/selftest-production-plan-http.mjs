@@ -27,6 +27,7 @@ const { GameClient } = await import('../src/client.mjs');
 const { saveStore, loadStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { defaultSettings, saveAutomationSettings } = await import('../src/automation-settings.mjs');
+const { watchHeroRaidPushes } = await import('../src/hero-raid-automation.mjs');
 const requests = ['OnWater', 'AllItem', 'AllResource', 'GameEffect', 'MonthCard', 'AllHero', 'WeekInfo', 'WeekOrderInfo', 'CargoShips', 'GuildOrder', 'RadarInfo'];
 const protocol = createDeclaredProtocol(requests.flatMap(name => [name + 'Request', name + 'Response']));
 const states = new Map(), live = new Set(), apps = new Set();
@@ -98,6 +99,7 @@ async function fixture() {
   settings.factory.demandPriority = [];
   settings.farm.enabled = true;
   settings.schedule.guildOrders = true;
+  settings.heroRaid.enabled = true;
   saveAutomationSettings(id, settings, { revision: 0 });
   const app = createConsole({ port: 0, protocol });
   apps.add(app);
@@ -152,6 +154,67 @@ try {
       assert(!JSON.stringify(result).includes('"raw"'));
       assert.deepEqual(f.state.sends, []);
       assert(f.state.requests.every(name => requests.some(prefix => name === prefix + 'Request')));
+      assert.equal(f.state.logins, 1);
+    } finally { await f.close(); }
+  });
+  await test('活动HTTP总开关逐项控制联合排产需求，恢复后沿用细项并保持零游戏写入', async () => {
+    const f = await fixture();
+    try {
+      await f.api('connect', {});
+      f.state.requests.length = 0;
+      f.state.sends.length = 0;
+      const selections = (await f.api('settings')).settings.schedule;
+      const toggle = async (key, value) => {
+        const view = await f.api('activities/settings');
+        await f.api('activities/settings', { key, value, revision: view.revision, baseRevision: view.baseRevision, confirm: true });
+        return f.api('world/production-plan');
+      };
+      const initial = await f.api('world/production-plan');
+      assert.equal(initial.orders.length, 8);
+      assert(initial.orders.some(order => order.source === 'heroRaid'));
+      assert(initial.orders.some(order => order.source === 'merchant'));
+
+      const heroOff = await toggle('heroRaid.enabled', false);
+      assert.equal(heroOff.orders.length, 7);
+      assert(!heroOff.orders.some(order => order.source === 'heroRaid'));
+      assert(heroOff.orders.some(order => order.source === 'merchant'));
+      const bothOff = await toggle('weekOrder.enabled', false);
+      assert.equal(bothOff.orders.length, 6);
+      assert(!bothOff.orders.some(order => ['merchant', 'heroRaid'].includes(order.source)));
+      assert.deepEqual([...new Set(bothOff.orders.map(order => order.source))].sort(), ['cargo', 'guildRecruit', 'refugee', 'resident']);
+
+      const heroOn = await toggle('heroRaid.enabled', true);
+      assert.equal(heroOn.orders.length, 7);
+      assert(heroOn.orders.some(order => order.source === 'heroRaid'));
+      assert(!heroOn.orders.some(order => order.source === 'merchant'));
+      const restored = await toggle('weekOrder.enabled', true);
+      assert.deepEqual(restored.orders.map(order => order.id), initial.orders.map(order => order.id));
+      assert.deepEqual((await f.api('settings')).settings.schedule, selections);
+      assert.equal(f.session().loop.running, false);
+      assert.deepEqual(f.state.sends, []);
+      assert(f.state.requests.every(name => requests.some(prefix => name === prefix + 'Request')));
+      assert.equal(f.state.logins, 1);
+    } finally { await f.close(); }
+  });
+  await test('关闭活动的数据缺失或读取失败不会阻断其它来源的HTTP排程', async () => {
+    const f = await fixture();
+    try {
+      await f.api('connect', {});
+      await updateSettings(f, settings => { settings.heroRaid.enabled = settings.weekOrder.enabled = false; });
+      const heroState = watchHeroRaidPushes(f.session().client);
+      heroState.observed = false; heroState.invalid = true; heroState.raids.clear();
+      f.state.requests.length = 0;
+      f.state.sends.length = 0;
+      f.state.onRequest = name => {
+        if (['WeekInfoRequest', 'WeekOrderInfoRequest'].includes(name)) throw new Error('已关闭活动的读取不可用');
+      };
+      const result = await f.api('world/production-plan');
+      assert.equal(result.status, 'optimal');
+      assert.deepEqual(result.missingReads, []);
+      assert.equal(result.orders.length, 6);
+      assert.deepEqual([...new Set(result.orders.map(order => order.source))].sort(), ['cargo', 'guildRecruit', 'refugee', 'resident']);
+      assert(!f.state.requests.some(name => ['WeekInfoRequest', 'WeekOrderInfoRequest'].includes(name)));
+      assert.deepEqual(f.state.sends, []);
       assert.equal(f.state.logins, 1);
     } finally { await f.close(); }
   });

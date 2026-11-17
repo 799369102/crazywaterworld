@@ -1,7 +1,7 @@
 // 游戏配置编辑器：按账号合并连续输入，校验后自动保存，预览仍使用独立只读接口。
 const configEditor = { owner: null, data: null, draft: null, baseline: null, category: 'base', busy: false, loading: false, serial: 0, saveTimer: null, savePromise: null, saving: false, saveError: null, saveRetries: 0, fields: new Map(), widgets: new Map(), groups: new Map(), selectedGroups: {}, errors: {}, playerData: null, playerRequest: null, playerError: '', playerWidgets: [] };
 const configCategories = { base: '基地', world: '世界', heroes: '英雄', daily: '日常与活动' };
-const activityOwnedSettings = new Set(['schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
+const activityOwnedSettings = new Set(['weekOrder.enabled', 'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const baseFamilies = [
   { id: 'construction', title: '建设', groups: ['building'] },
@@ -28,6 +28,7 @@ const configZeroHints={
  'trials.maxSingleCost':'0 表示禁止付费扫荡。','trials.dailyDiamondBudget':'0 表示禁止付费扫荡。'
 };
 const merchantActivityFields = [
+    configField('merchant.enabled','开启自动挂机','switch',{help:'账号挂机运行、活动处于服务端开放时间内时，执行下方已开启的项目。关闭后暂停本活动，保留各项配置。'}),
     configField('schedule.merchantTrade','按整船收益自动走商','switch',{help:'周期活动。按批次成本、资金、舱位和本港库存规划多商品组合，比较整船预期收益选港；没有成员共享紧缺货也可选择已知普通港口，本港盈利出售不依赖商情。远端价格可能是估算，到港重新核价；临近结束停止无法及时卖出的采购。'}),
     configField('merchant.autoShareIntel','到港自动共享情报','switch',{help:'默认开启，仅随已开启的走商及所属分组执行。确认到港后共享本港尚未共享的紧缺情报，已有共享直接跳过；每日紧缺更新后重新检查，不按每次价格刷新重复发送。回读确认后才记为已共享，未知结果保留防重记录，失败不阻塞买卖；达到利润上限仍可共享当前港口。'}),
     configField('schedule.tradeTasks','领取海商王联盟任务奖励','switch',{help:'保留原联盟任务领奖开关，按本期联盟任务达成进度自动领取。'}),

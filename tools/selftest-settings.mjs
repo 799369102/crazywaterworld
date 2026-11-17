@@ -362,6 +362,22 @@ try {
     state.orderOfTheDay.orderNum = 1; assert.equal(planWorld(state, { config, settings }).actions.length, 0);
   });
 
+  await check('活动总开关关闭后停止不差钱与超凡英雄备料，重新开启沿用需求选择', () => {
+    const settings = quiet(); settings.factory.produce = true; settings.factory.keepStock = 0;
+    const state = survey({ 木材: 20 }, [building('食品厂', { factory: { factoryQ: [], finishedProducts: [] } })]);
+    state.weekOrder.set('产品甲', 2);
+    const extraDemand = [{ source: 'heroRaid', requirements: [{ id: '产品乙', num: 2 }] }];
+    const plan = () => planWorld(state, { config, settings, extraDemand });
+    assert.equal(plan().actions.find(row => row.kind === 'startProduce')?.body.productId, '产品甲');
+    settings.weekOrder.enabled = false;
+    assert(!plan().actions.some(row => row.kind === 'startProduce'));
+    assert(!plan().demands.some(row => row.sources.includes('merchant') || row.sources.includes('heroRaid')));
+    settings.heroRaid.enabled = true;
+    assert.equal(plan().actions.find(row => row.kind === 'startProduce')?.body.productId, '产品乙');
+    settings.weekOrder.enabled = true;
+    assert(plan().demands.some(row => row.sources.includes('merchant')));
+  });
+
   await check('生产优先级排序、清空来源与禁用工厂实际改变计划', () => {
     const settings = quiet(); settings.resident.enabled = true; settings.factory.produce = true; settings.factory.keepStock = 0;
     const factory = building('食品厂', { factory: { factoryQ: [], finishedProducts: [] } });

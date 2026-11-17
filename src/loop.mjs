@@ -237,8 +237,10 @@ export async function runLoop(client, protocol, {
       riverScore:['snowballFree'], riverHelp:['snowballFree'],
       pirateRankRewards:['openRankRewards'], warRankRewards:['openRankRewards'] };
     // 战报旧开关在未保存详细设置时也走统一账本，与手动和推送领奖共享未知结果保护。
-    const serviceEnabled = key => isActivityTaskAvailable(key, client) && (enabled(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(enabled)));
-    const serviceActive = key => isActivityTaskAvailable(key, client) && (active(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(active)));
+    const serviceEnabled = key => isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key)
+      && (enabled(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(enabled)));
+    const serviceActive = key => isActivityTaskAvailable(key, client) && nativePreferenceEnabled(getSettings(), key)
+      && (active(key) || Boolean((getSettings() || key === 'battleReportRewards') && aliases[key]?.some(active)));
     const takeoverReason = key => {
       const s = getSettings();
       if (s?.radar?.runEnabled !== false && s?.radar?.enabled && ['radarAuto','radarRepair'].includes(key)) return '联盟情报';
@@ -626,7 +628,7 @@ export async function runLoop(client, protocol, {
         for(const [key,service] of [['vipDailyGift',claimVipDaily],['guildTitleReward',claimGuildTitleReward],['limitedFreeGifts',claimLimitedFree],['weekHeroStar',claimWeekHeroStar],['pirateRankRewards',(c,f,o)=>claimOpenRank(c,f,o,3)],['warRankRewards',(c,f,o)=>claimOpenRank(c,f,o,4)],['festivalActiveRewards',claimFestivalActive],['battleReportRewards',claimReportRewards],['leagueCollect',claimLeagueCollect],['leaguePassRewards',claimLeaguePass],['weekSupplyFree',claimWeekSupply],['worldBossRewards',claimWorldBossDamage],['comicDrama',claimComicDrama],['tournamentDailyGift',claimTournamentDaily]]) {
           await checkFactoryDue({ checkpoint: true });
           if (!settings && key === 'weekHeroStar') continue;
-          if(serviceEnabled(key))try{let reports=0;await service(client,config,{player,allLevels:active('vipDaily'),enabled:()=>serviceActive(key),ledger:usageLedger,scheduler:rewards,report:entry=>{reports++;extraReport({...entry,taskKey:key});}});if(!reports)extraReport({taskKey:key,label:automationTasks.find(t=>t.key===key).label,skipped:true,reason:'已检查，当前没有新增可执行的领取动作'});}catch(error){extraReport({taskKey:key,label:automationTasks.find(t=>t.key===key).label,ok:false,error:error.message});}
+          if(serviceEnabled(key))try{let reports=0;await service(client,config,{player,getSettings,allLevels:active('vipDaily'),enabled:()=>serviceActive(key),ledger:usageLedger,scheduler:rewards,report:entry=>{reports++;extraReport({...entry,taskKey:key});}});if(!reports)extraReport({taskKey:key,label:automationTasks.find(t=>t.key===key).label,skipped:true,reason:'已检查，当前没有新增可执行的领取动作'});}catch(error){extraReport({taskKey:key,label:automationTasks.find(t=>t.key===key).label,ok:false,error:error.message});}
         }
         const activityServices = { armsRaceRewards:militaryRewards, riverScore:riverActivity, riverPass:riverActivity, edictPass:edictPassActivity, seasonChest:openSeasonChests,
           riverHelp:riverActivity, compassDaily:compassActivity, compassAdGift:compassActivity, compassSpin:compassActivity, compassReward:compassActivity,

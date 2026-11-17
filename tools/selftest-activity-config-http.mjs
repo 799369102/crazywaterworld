@@ -18,14 +18,28 @@ const { saveStore } = await import('../src/accounts.mjs');
 const { createConsole } = await import('../src/server.mjs');
 const { activityAvailability } = await import('../src/activity-availability.mjs');
 const { catalogEntry, rememberActivityCatalog } = await import('../src/activity-catalog.mjs');
+const { defaultSettings, loadAutomationSettings } = await import('../src/automation-settings.mjs');
+const { activityAutomationFields } = await import('../src/activity-automation.mjs');
+const { rewardSchedule } = await import('../src/reward-schedule.mjs');
 const retiredKeys = activityAvailability().hiddenTasks;
 const keepKeys = ['beautyVotes', 'beautyGift', 'merchantTrade', 'armsRaceRewards', 'newbieLogin', 'pirateRankRewards', 'warRankRewards', 'weekPass'];
-saveStore({ activeId: 'event-a', accounts: ['event-a', 'event-b', 'merchant-default', 'merchant-legacy'].map(id => ({
+saveStore({ activeId: 'event-a', accounts: ['event-a', 'event-b', 'merchant-default', 'merchant-legacy', 'activity-default', 'activity-legacy'].map(id => ({
   id, label: id, url: 'ws://invalid.invalid', login: {}, automation: { enabled: false,
     ...(id === 'merchant-legacy' ? { tasks: { weekOrderSubmit: true, weekOrderFinal: false } } : {}),
   },
 })) });
-const app = createConsole({ port: 0 });
+const legacyActivitySettings = defaultSettings();
+delete legacyActivitySettings.activityAutomation;
+delete legacyActivitySettings.merchant.enabled;
+delete legacyActivitySettings.weekOrder.enabled;
+legacyActivitySettings.schedule.merchantTrade = true;
+legacyActivitySettings.schedule.weekOrderSubmit = true;
+legacyActivitySettings.schedule.weekOrderFinal = false;
+legacyActivitySettings.heroRaid.enabled = true;
+fs.writeFileSync(path.join(directory, 'automation-settings.json'), JSON.stringify({ version: 1, accounts: {
+  'activity-legacy': { settings: legacyActivitySettings, revision: 4, savedAt: 'legacy' },
+} }));
+const app = createConsole({ port: 0, protocol: {} });
 const root = await app.listen();
 let passed = 0;
 const test = async (name, work) => { await work(); passed++; console.log('通过：' + name); };
@@ -161,11 +175,11 @@ try {
 
   await test('商人活动配置在未连接时读取默认值和旧挂机选择', async () => {
     const defaults = ok(await api('week-order/settings', null, 'merchant-default'));
-    assert.deepEqual(defaults.settings, { autoSubmit: false, allowDiamonds: false, autoFinal: true });
+    assert.deepEqual(defaults.settings, { enabled: true, autoSubmit: false, allowDiamonds: false, autoFinal: true });
     assert.equal(defaults.revision, 0);
     assert.equal(typeof defaults.baseRevision, 'string');
     const legacy = ok(await api('week-order/settings', null, 'merchant-legacy'));
-    assert.deepEqual(legacy.settings, { autoSubmit: true, allowDiamonds: false, autoFinal: false });
+    assert.deepEqual(legacy.settings, { enabled: true, autoSubmit: true, allowDiamonds: false, autoFinal: false });
     for (const id of ['merchant-default', 'merchant-legacy']) {
       assert.equal(app.sessions.get(id).client, null);
       assert.equal(app.sessions.get(id).loop.running, false);
@@ -178,6 +192,7 @@ try {
     let current = ok(await api('week-order/settings', null, 'merchant-legacy'));
     const expected = structuredClone(before.settings);
     for (const [key, enabled, group, field] of [
+      ['enabled', false, 'weekOrder', 'enabled'],
       ['allowDiamonds', true, 'weekOrder', 'allowDiamonds'],
       ['autoSubmit', false, 'schedule', 'weekOrderSubmit'],
       ['autoFinal', true, 'schedule', 'weekOrderFinal'],
@@ -268,9 +283,127 @@ try {
     const document = ok(await api('settings/export', null, 'merchant-legacy'));
     const imported = ok(await api('settings/validate', { document }, 'merchant-legacy'));
     assert.equal(imported.settings.schedule.weekOrderSubmit, before.settings.autoSubmit);
+    assert.equal(imported.settings.weekOrder.enabled, before.settings.enabled);
     assert.equal(imported.settings.weekOrder.allowDiamonds, before.settings.allowDiamonds);
     assert.equal(imported.settings.schedule.weekOrderFinal, before.settings.autoFinal);
     assert.equal(app.sessions.get('merchant-legacy').client, null);
+  });
+
+  await test('活动总开关离线读取，旧配置补全时保留原有细项和超凡英雄总开关', async () => {
+    const view = ok(await api('activities/settings', null, 'activity-default'));
+    assert.deepEqual(view.controls, activityAutomationFields);
+    assert.equal(view.revision, 0);
+    assert.equal(typeof view.baseRevision, 'string');
+    assert.equal(Object.keys(view.settings).length, activityAutomationFields.length);
+    assert.equal(view.settings['heroRaid.enabled'], false);
+    for (const { key } of activityAutomationFields.filter(control => control.key !== 'heroRaid.enabled')) {
+      assert.equal(view.settings[key], true, key);
+    }
+    const legacy = ok(await api('activities/settings', null, 'activity-legacy'));
+    assert.equal(legacy.revision, 4);
+    assert.equal(legacy.settings['heroRaid.enabled'], true);
+    assert.equal(legacy.settings['merchant.enabled'], true);
+    assert.equal(legacy.settings['weekOrder.enabled'], true);
+    const all = ok(await api('settings', null, 'activity-legacy'));
+    assert.equal(all.settings.schedule.merchantTrade, true);
+    assert.equal(all.settings.schedule.weekOrderSubmit, true);
+    assert.equal(all.settings.schedule.weekOrderFinal, false);
+    assert.equal(app.sessions.get('activity-default').client, null);
+    assert.equal(app.sessions.get('activity-legacy').client, null);
+    assert.doesNotMatch(JSON.stringify(view), /invalid\.invalid|"login"|"token"/);
+  });
+
+  await test('活动总开关逐项保存与重启回读，关闭保留细项且账号互相隔离', async () => {
+    const account = 'activity-legacy';
+    const before = ok(await api('settings', null, account));
+    const other = ok(await api('settings', null, 'activity-default'));
+    const expected = structuredClone(before.settings);
+    let current = ok(await api('activities/settings', null, account));
+    for (const { key } of activityAutomationFields) {
+      for (const value of [false, true]) {
+        const saved = ok(await api('activities/settings', {
+          key, value, revision: current.revision, baseRevision: current.baseRevision, confirm: true,
+        }, account));
+        const [group, field] = key.split('.');
+        expected[group][field] = value;
+        assert.equal(saved.revision, current.revision + 1);
+        assert.equal(saved.settings[key], value);
+        assert.deepEqual(ok(await api('settings', null, account)).settings, expected);
+        assert.deepEqual(loadAutomationSettings(account).settings, expected);
+        current = saved;
+      }
+    }
+    assert.deepEqual(ok(await api('settings', null, 'activity-default')), other);
+    assert.equal(app.sessions.get(account).loop.running, false);
+    assert.equal(app.sessions.get(account).client, null);
+    const exported = ok(await api('settings/export', null, account));
+    const validated = ok(await api('settings/validate', { document: exported }, account));
+    assert.deepEqual(validated.settings, expected);
+  });
+
+  await test('活动总开关严格限定布尔白名单，拒绝旧版本及首存快照冲突', async () => {
+    const account = 'activity-default';
+    const before = ok(await api('activities/settings', null, account));
+    const payload = { key: 'merchant.enabled', value: false, revision: before.revision, baseRevision: before.baseRevision, confirm: true };
+    for (const invalid of [[], { ...payload, key: '__proto__' }, { ...payload, key: 'activityAutomation.__proto__' },
+      { ...payload, key: 'resources.allowDiamonds' }, { ...payload, key: 'schedule.merchantTrade' },
+      { ...payload, key: 'activityAutomation.unknown' }, { ...payload, value: 'false' }, { ...payload, value: 0 },
+      { ...payload, value: null }, { ...payload, value: undefined }, { ...payload, confirm: false },
+      { ...payload, enabled: true }, { ...payload, revision: String(before.revision) }]) {
+      const result = await api('activities/settings', invalid, account);
+      assert.equal(result.status, 400, JSON.stringify(invalid));
+    }
+    assert.deepEqual(ok(await api('activities/settings', null, account)), before);
+    ok(await api('loop/task', { key: 'merchantTrade', enabled: true, confirm: true }, account));
+    const baseConflict = await api('activities/settings', payload, account);
+    assert.equal(baseConflict.status, 400);
+    assert(baseConflict.data.fields.revision);
+    const current = ok(await api('activities/settings', null, account));
+    const changes = await Promise.all([false, true].map(value => api('activities/settings', {
+      ...payload, value, revision: current.revision, baseRevision: current.baseRevision,
+    }, account)));
+    assert.deepEqual(changes.map(result => result.status).sort(), [200, 400]);
+    const saved = changes.find(result => result.status === 200).data;
+    assert.deepEqual(ok(await api('activities/settings', null, account)), saved);
+    const conflict = await api('activities/settings', { ...payload, revision: current.revision, baseRevision: current.baseRevision }, account);
+    assert.equal(conflict.status, 400);
+    assert(conflict.data.fields.revision);
+  });
+
+  await test('暂停和生产同步期间保存活动总开关，唤醒奖励调度并回显目录状态', async () => {
+    const account = 'activity-legacy', session = app.sessions.get(account);
+    const client = new EventEmitter();
+    let changed = 0;
+    Object.assign(client, { connected: false, stop() {}, request() { throw Error('设置操作不可发送游戏请求'); } });
+    client.on('automationSettingsChanged', () => changed++);
+    session.client = client;
+    session.paused = true;
+    session.syncingProduction = true;
+    const schedule = rewardSchedule(client);
+    const control = activityAutomationFields.find(field => field.key === 'activityAutomation.weekLottery');
+    for (const key of [...control.taskKeys, 'weekSupplyFree']) schedule.defer(key, schedule.now() + 3600);
+    try {
+      const current = ok(await api('activities/settings', null, account));
+      const saved = ok(await api('activities/settings', {
+        key: control.key, value: false, revision: current.revision, baseRevision: current.baseRevision, confirm: true,
+      }, account));
+      assert.equal(saved.settings[control.key], false);
+      assert.equal(changed, 1);
+      for (const key of [...control.taskKeys, 'weekSupplyFree']) assert(schedule.due(key), key);
+      const now = Math.floor(Date.now() / 1000);
+      rememberActivityCatalog(account, [catalogEntry({ id: 'weekly:4:12:' + (now - 60), name: '幸运转盘',
+        weekType: 4, kind: 'weekly', taskKeys: ['weekGift', 'weekTimes', 'weekLotterySpin'],
+        startTime: now - 60, endTime: now + 600 }, now)], now);
+      const catalog = ok(await api('activities/catalog', null, account));
+      assert.deepEqual(catalog.activities[0].automation, { key: control.key, enabled: false });
+      assert.equal(session.paused, true);
+      assert.equal(session.syncingProduction, true);
+      assert.equal(session.loop.running, false);
+      assert.equal(session.client, client);
+    } finally {
+      session.syncingProduction = false;
+      session.paused = false;
+    }
   });
   console.log('活动下线HTTP专项 ' + passed + '/' + passed + ' 通过');
 } finally {

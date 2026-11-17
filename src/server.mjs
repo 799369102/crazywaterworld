@@ -31,6 +31,7 @@ import { watchFreeRewardClock } from './extra-free-rewards.mjs';
 import { createPirateAdvanceTask } from './pirate-advance.mjs';
 import { automationControlView, setAutomationControl } from './automation-controls.mjs';
 import { activityAvailability, isActivityTaskAvailable } from './activity-availability.mjs';
+import { activityAutomationFields, activityAutomationControl } from './activity-automation.mjs';
 import http from 'node:http';
 import { setTimeout as recoveryWait } from 'node:timers/promises';
 import fs from 'node:fs';
@@ -476,6 +477,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const current = settingsView(session);
     return {
       settings: {
+        enabled: current.settings.weekOrder.enabled,
         autoSubmit: current.settings.schedule.weekOrderSubmit,
         allowDiamonds: current.settings.weekOrder.allowDiamonds,
         autoFinal: current.settings.schedule.weekOrderFinal,
@@ -507,11 +509,29 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const current = settingsView(session);
     const keys = new Set(['fishBook', 'vipDaily', 'campaignReports', 'openRankRewards', ...activities.flatMap(row => row.taskKeys ?? [])]);
     return {
-      activities, catalogOnly,
+      activities: activities.map(row => {
+        const control = activityAutomationControl(row);
+        if (!control) return row;
+        const [group, field] = control.key.split('.');
+        return { ...row, automation: { key: control.key, enabled: current.settings[group][field] } };
+      }), catalogOnly,
       eventTasks: automationTasks.filter(task => keys.has(task.key)).map(({ key, label }) => ({ key, label, enabled: session.loop.tasks[key] })),
       compassSpinCount: current.settings.eventActions.compassDrawCount,
       compassSpinEditable: !session.preferences,
       serverNow: (Date.now() + (session.client?.serverClockOffsetMs || 0)) / 1000,
+    };
+  }
+
+  function activitySettingsView(session) {
+    const current = settingsView(session);
+    return {
+      settings: Object.fromEntries(activityAutomationFields.map(({ key }) => {
+        const [group, field] = key.split('.');
+        return [key, current.settings[group][field]];
+      })),
+      controls: activityAutomationFields,
+      revision: current.revision,
+      baseRevision: current.baseRevision,
     };
   }
 
@@ -573,9 +593,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if(name==='SCNewCampaignReport'){
         invalidateFleetReports(instance);
         if(session.client===instance)emit(session,'info','收到新战报',{pirateUpdated:true});
-        // 沿用原主分支的推送领奖：未启动挂机时也生效，但仍经过账号队列和持久防重账本。
+        // 推送领奖遵循当前挂机状态与活动开关，排队和发送前继续核对。
         const generation=session.generation;
-        const enabled=()=>current()&&generation===session.generation&&session.loop.tasks.campaignReports&&nativePreferenceEnabled(session.preferences,'campaignReports');
+        const enabled=()=>current()&&generation===session.generation&&session.loop.running&&session.loop.tasks.campaignReports&&nativePreferenceEnabled(session.preferences,'campaignReports');
         if(enabled()&&!session.reportClaim){
           session.reportClaim=enqueue(session,()=>claimReportRewards(instance,loadConfigSafe(),{
             enabled,ledger:usageFor(session),report:entry=>emit(session,entry.ok||entry.skipped?'info':'warn',
@@ -1357,7 +1377,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -1395,6 +1415,42 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(settingsView(session));
         return;
       }
+      if (route === 'GET /api/activities/settings') {
+        const { session } = scoped_(parsed);
+        json(activitySettingsView(session));
+        return;
+      }
+      if (route === 'POST /api/activities/settings') {
+        const payload = jsonBody();
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || typeof payload.key !== 'string' || typeof payload.value !== 'boolean'
+          || Object.keys(payload).some(key => !['key', 'value', 'revision', 'baseRevision', 'confirm'].includes(key))) {
+          throw new SettingsError({ settings: '请选择有效的活动自动挂机开关' });
+        }
+        const control = activityAutomationFields.find(field => field.key === payload.key);
+        if (!control) throw new SettingsError({ settings: '请选择有效的活动自动挂机开关' });
+        needConfirm(payload);
+        const { session } = scoped_(parsed);
+        const current = settingsView(session);
+        if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
+          || !current.revision && payload.baseRevision !== current.baseRevision) {
+          throw new SettingsError({ revision: '活动设置已变化，请重新读取后再保存' });
+        }
+        const next = structuredClone(current.settings);
+        const [group, field] = control.key.split('.');
+        next[group][field] = payload.value;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+        if (session.client) {
+          for (const key of control.taskKeys) rewardSchedule(session.client).clearTask(key);
+          if (['activityAutomation.weekLottery', 'activityAutomation.weekChip', 'activityAutomation.weekUnique'].includes(control.key)) {
+            rewardSchedule(session.client).clearTask('weekSupplyFree');
+          }
+          if (control.key === 'merchant.enabled') watchMerchant(session.client).invalidate('海商王自动挂机设置已变化');
+        }
+        emit(session, 'info', control.label + '自动挂机设置已保存');
+        json(activitySettingsView(session));
+        return;
+      }
       if (route === 'GET /api/week-order/settings') {
         const { session } = scoped_(parsed);
         json(weekOrderSettingsView(session));
@@ -1403,6 +1459,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/week-order/settings') {
         const payload = jsonBody();
         const fields = {
+          enabled: ['weekOrder', 'enabled'],
           autoSubmit: ['schedule', 'weekOrderSubmit'],
           allowDiamonds: ['weekOrder', 'allowDiamonds'],
           autoFinal: ['schedule', 'weekOrderFinal'],

@@ -6,6 +6,7 @@ import { assertFarmPlantingReady, farmInventory, farmPlantArgs, readFarmMaterial
 import { museumMaterialDetails, readMuseumMaterialState, settleMuseumMaterialState } from './museum-materials.mjs';
 import { captureSpendOperation } from './spend-evidence.mjs';
 import { createOperationLog } from './operation-log.mjs';
+import { activityTaskEnabled, activityProductionEnabled } from './activity-automation.mjs';
 
 export class AutomationSkip extends Error {
   constructor(message) { super(message); this.code = 'AUTOMATION_SKIP'; }
@@ -31,6 +32,7 @@ const museumActions = new Set(['museumCollect', 'museumExplore', 'museumAchievem
 
 export function worldPreferenceEnabled(settings, kind) {
   if (!settings) return true;
+  if (!activityTaskEnabled(settings, kind)) return false;
   if (museumActions.has(kind) && settings.museum?.runEnabled === false) return false;
   if (['radarAuto', 'radarRepair'].includes(kind) && settings.radar?.runEnabled === false) return false;
   if (gatherTasks.has(kind) && (!settings.loop.world || settings.gather.enabled === false)) return false;
@@ -60,6 +62,7 @@ export function needsCargoDemand(settings) {
 
 export function nativePreferenceEnabled(settings, key) {
   if (!settings) return true;
+  if (!activityTaskEnabled(settings, key)) return false;
   if (settings.alliance?.enabled && ['guildOrders', 'guildAidHelp', 'guildWelfare'].includes(key)) return false;
   if (settings.alliance?.enabled && settings.alliance.mutual && key === 'guildAidCollect') return false;
   if (gatherTasks.has(key) && settings.gather.enabled === false) return false;
@@ -110,6 +113,7 @@ export function resourceReserve(settings, id) {
 export function worldActionAllowed(settings, step, config) {
   if (!settings) return true;
   if (!worldPreferenceEnabled(settings, step.kind)) return false;
+  if (step.demandSources?.length && !step.demandSources.some(source => activityProductionEnabled(settings, source))) return false;
   const id = step.body?.buildingId;
   const type = typeof id === 'string' ? (config?.tables?.BuildingCfg?.data ?? []).map(row => row.buildingType).sort((a, b) => b.length - a.length).find(t => id.endsWith(t)) : null;
   if (['build', 'upgrade', 'weekFactory'].includes(step.kind) && settings.building.disabledTypes.some(value => value === id || value === type)) return false;

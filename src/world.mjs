@@ -24,6 +24,7 @@ import { readWeekOrder } from './activities.mjs';
 import { RESOURCE, displayMaterial } from './config.mjs';
 import { captureFarmMaterialState, farmInventory, settleFarmMaterialState } from './farm-planting.mjs';
 import { runFactoryProductionBatch, confirmFactoryProductionBeforeHarvest } from './factory-production.mjs';
+import { activityProductionEnabled } from './activity-automation.mjs';
 
 // 与客户端FactoryUtil一致：活动工坊只使用服务器limitTimeItem开放窗口。
 export function factoryRecipeAvailability(recipe, festivals, now) {
@@ -408,7 +409,7 @@ export function planWorld(survey, {
   const weeklyGap = new Map();
   const weeklyHeld = new Map();
   const borrowedTotals = new Map();
-  const weeklyNeeds = [...(survey.weekOrder ?? [])];
+  const weeklyNeeds = activityProductionEnabled(settings, 'merchant') ? [...(survey.weekOrder ?? [])] : [];
   const weeklyIncomplete = !survey.orderCheckError && weeklyNeeds.every(([id, num]) => id && Number.isSafeInteger(num) && num > 0)
     && weeklyNeeds.some(([id, num]) => have(id) < num);
   for (const [id, required] of weeklyNeeds) {
@@ -736,12 +737,12 @@ export function planWorld(survey, {
   ] : [];
   const demandPriority = settings ? [...new Set([...settings.factory.demandPriority, ...independentSources])] : [];
   const detailedNeeds = settings ? settingDemands(survey, config, [
-    { source: 'merchant', requirements: [...(survey.weekOrder ?? [])].map(([id, num]) => ({ id, num })) },
+    { source: 'merchant', requirements: weeklyNeeds.map(([id, num]) => ({ id, num })) },
     { source: 'cargo', requirements: [...(survey.cargoOrder ?? [])].map(([id, num]) => ({ id, num })) },
     ...survey.orders.filter((order, i) => ['reserved', 'missing', 'disabled'].includes(orderDecisions[i]?.status))
       .map(order => ({ source: 'resident', requirements: order.requirements })),
     ...buildingSupplies,
-    ...extraDemand,
+    ...extraDemand.filter(demand => activityProductionEnabled(settings, demand.source)),
   ], demandPriority) : null;
   const productionNeeded = id => (detailedNeeds?.get(id)?.num ?? 0) > 0 && (settings?.factory.demandFirst ||
     detailedNeeds.get(id).sources.some(source => independentSources.includes(source)));
@@ -778,6 +779,7 @@ export function planWorld(survey, {
       actions.push({ kind: 'farm', request: 'FarmPlantRequest', response: 'OkResponse',
         body: { args: [{ buildingId: b.buildingId, productId: crop.id }] },
         costs: [{ id: crop.material[0], num: crop.material[1] }],
+        ...(!custom && need ? { demandSources: detailedNeeds?.get(crop.id)?.sources ?? [] } : {}),
         label: '农田播种 ' + name(crop.id) + (need ? '（订单缺 ' + need + '）' : ''),
       });
     }
@@ -809,6 +811,7 @@ export function planWorld(survey, {
       if (best && best.itemId !== b.factory.autoProductId) {
         actions.push({kind:'startProduce',request:'SetFactoryAutoProduceRequest',response:null,
           body:{buildingId:b.buildingId,productId:best.itemId},previousProduct:b.factory.autoProductId,eligibilityKey:factoryRecipeAvailability(best,survey.festivals,survey.serverNow??now).signature+':'+b.level,
+          demandSources:detailedNeeds.get(best.itemId).sources,
           label:buildingName(b)+'：原生自动目标改为'+name(best.itemId)+'，保留当前生产队列',costs:[]});
         factoryReasons.set(b.buildingId,'按需求调整原生自动目标，当前队列继续完成');
       } else factoryReasons.set(b.buildingId, '游戏自动生产 '+name(b.factory.autoProductId)+(settings?.factory.cooperateNative?(shortages.length?'；等待所需原料':'；当前目标无需调整或需求已在产'):'；需求协同未开启'));
@@ -855,6 +858,8 @@ export function planWorld(survey, {
       const cargoNeed = cargoGap.get(best.itemId) ?? 0;
       const buildNeed = constructionGap(best.itemId);
       const forDemand = !settings || productionNeeded(best.itemId);
+      const demandSources = forDemand ? Object.entries(detailedNeeds?.get(best.itemId)?.productionBySource ?? {})
+        .filter(([, quantity]) => quantity > 0).map(([source]) => source) : [];
       const projected = projectedStock(best.itemId);
       // The account may already be at its storage limit. Only run a dependent
       // job after enough resident deliveries have actually freed that stock.
@@ -890,6 +895,7 @@ export function planWorld(survey, {
         costs: (best.costItem ?? []).map(([id, num]) => ({ id, num: Number(num) })),
         ...(needsConfirmedBorrow ? { needsConfirmedBorrow } : {}),
         demandDriven: settings ? forDemand : !!(need || weeklyNeed || cargoNeed || buildNeed),
+        ...(demandSources.length ? { demandSources } : {}),
         displayFactory, displayProduct,
         label: `${displayFactory}安排生产${displayProduct} 1 件，耗时 ${durationText(best.produceTime)}。${reason}`,
       });
@@ -983,10 +989,12 @@ export function planWorld(survey, {
     for (const b of survey.factories) {
       if (settings && (!enabled('speedUpProduce') || blockedFactory(b))) continue;
       for (const job of b.factory.factoryQ ?? []) {
+        let demandSources = [];
         if (settings) {
           const specific = settings.factory.speedUp && (!settings.factory.speedUpItems.length || settings.factory.speedUpItems.includes(job.productId));
           const need = detailedNeeds.get(job.productId);
           if (!specific && !(need?.unfilled > 0 && need.sources.some(source => settings.factory.speedUpSources.includes(source)))) continue;
+          if (!specific) demandSources = need.sources.filter(source => settings.factory.speedUpSources.includes(source));
         }
         if (job.finishTime <= now || left <= 0) continue;
         const minutes = Math.ceil((job.finishTime - now) / 60);
@@ -999,6 +1007,7 @@ export function planWorld(survey, {
           response: null,
           body: { buildingId: b.buildingId, index: job.idx, speedUp: { type: SPEED_UP_ITEM_TYPE, useNum } },
           costs: [{ id: SPEED_UP_ITEM, num: useNum }],
+          ...(demandSources.length ? { demandSources } : {}),
           label: `使用 ${useNum} 个${name(SPEED_UP_ITEM)}加速${buildingName(b)}生产`,
         });
       }
@@ -1011,6 +1020,7 @@ export function planWorld(survey, {
         const useNum = Math.min(left, Math.ceil((b.farm.ripeTime - (survey.serverNow ?? now)) / 60));
         left -= useNum;
         actions.push({ kind: 'farm', request: 'FarmSpeedUpRequest', response: null, body: { buildingId: b.buildingId, param: { type: SPEED_UP_ITEM_TYPE, useNum } },
+          ...(!settings.farm.customPlant ? { demandSources: detailedNeeds.get(b.farm.productId)?.sources ?? [] } : {}),
           costs: [{ id: SPEED_UP_ITEM, num: useNum }], label: `使用 ${useNum} 个加速器催熟${name(b.farm.productId)}` });
       }
     }

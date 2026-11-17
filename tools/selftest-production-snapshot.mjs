@@ -22,6 +22,7 @@ function fixture() {
   const settings = defaultSettings();
   settings.factory.keepStock = 0;
   settings.factory.demandPriority = ['merchant', 'cargo', 'resident'];
+  settings.heroRaid.enabled = true;
   const raw = {
     capturedAt: '2026-11-16T00:00:00.000Z', serverNow: 1000,
     player: { playerId: '9007199254740993', worldId: 1000001, guildId: 0, level: 25 }, reads: [],
@@ -322,6 +323,42 @@ await test('只读采集使用完整协议对象，周订单独立于贸易港�
   assert(client.calls.every(name => Object.hasOwn(protocol, name)));
 });
 
+await test('关闭活动来源后未知英雄推送和失败周订单不阻断其它快照需求', async () => {
+  const { raw, settings } = fixture();
+  settings.heroRaid.enabled = settings.weekOrder.enabled = false;
+  raw.heroRaids = { observed: false, invalid: true, raids: [] };
+  raw.weekOrder = { requirements: null };
+  raw.reads = [{ request: 'WeekOrderInfoRequest', status: 'failed', reason: '关闭来源的旧失败' }];
+  const { client, protocol } = fakeClient(raw);
+  const original = client.request;
+  client.request = async function(name) {
+    assert(!['WeekInfoRequest', 'WeekOrderInfoRequest'].includes(name), '关闭活动无需读取周订单');
+    return original.call(this, name);
+  };
+  for (const snapshot of [buildProductionSnapshot(raw, config, settings),
+    await readProductionSnapshot(client, protocol, config, raw.player, settings, { now: () => 1000_000 })]) {
+    assert.equal(snapshot.complete, true, JSON.stringify(snapshot.missingReads));
+    assert.deepEqual([...new Set(snapshot.orders.map(row => row.source))].sort(), ['cargo', 'resident']);
+    assert.equal(snapshot.orders.length, 3);
+    assert.deepEqual(snapshot.missingReads, []);
+  }
+});
+
+await test('未提供设置的既有调用仍读取并展示当前周订单和英雄订单', async () => {
+  const { raw } = fixture();
+  raw.heroRaids.raids = [{ raidId: 1, startTime: 900, finishTime: 1800,
+    order: { orderId: 2, gotOrderId: 1, gotTimes: 0 } }];
+  const { client, protocol } = fakeClient(raw);
+  for (const snapshot of [buildProductionSnapshot(raw, config),
+    await readProductionSnapshot(client, protocol, config, raw.player, undefined, { now: () => 1000_000 })]) {
+    assert.equal(snapshot.complete, true, JSON.stringify(snapshot.missingReads));
+    assert(snapshot.orders.some(row => row.source === 'merchant'));
+    assert(snapshot.orders.some(row => row.source === 'heroRaid'));
+  }
+  assert(client.calls.includes('WeekInfoRequest'));
+  assert(client.calls.includes('WeekOrderInfoRequest'));
+});
+
 await test('单项读取失败保留其他真实订单并标明缺失', async () => {
   const { raw, settings } = fixture();
   const { client, protocol } = fakeClient(raw);
@@ -340,7 +377,8 @@ await test('当前订单读取独立于生产优先级和自动提交开关', as
   settings.cargo.enabled = false;
   settings.alliance.enabled = false;
   settings.schedule.guildOrders = true;
-  settings.heroRaid.enabled = false;
+  settings.heroRaid.enabled = true;
+  settings.heroRaid.orders = false;
   raw.player.guildId = '9007199254740995';
   raw.guildOrder = { order: { requirements: [{ id: '小麦', num: 2 }], nextRefreshTime: 1500 } };
   raw.heroRaids.raids = [{ raidId: 1, startTime: 900, finishTime: 1800, order: { orderId: 2, gotOrderId: 1, gotTimes: 0 } }];
