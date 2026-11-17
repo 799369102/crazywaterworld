@@ -30,37 +30,26 @@ function fixture() {
   const timers = new Map();
   const nodes = new Map();
   const state = { id: 'scan-1', phase: 'waiting', qrImage, expiresAt: fixedNow + 300_000 };
-  const choices = [{ id: 'role-1', accountId: 'alipay:account', nickname: '支付宝角色', level: 35, power: 123456,
-    worldId: 3000000123, worldName: '海港123服', roleWorldId: 3000000123, roleWorldName: '海港123服', matched: false }];
   const env = {
     calls: [], selections: [], accounts: [{ id: 'old-account', title: '已有账号' }],
     disconnected: new Set(), allowed: true, mayChangeCalls: [], loadCalls: [], detailsAtSelection: [],
   };
-  function makeNode() {
-    const attributes = new Map();
-    let text = '';
-    return {
-      hidden: false, disabled: false, className: '', src: '', children: [], value: '',
-      get textContent() { return text + this.children.map(child => child.textContent).join(''); },
-      set textContent(value) { text = String(value ?? ''); this.children = []; },
-      setAttribute(key, value) { attributes.set(key, String(value)); },
-      getAttribute(key) { return attributes.get(key); },
-      removeAttribute(key) { attributes.delete(key); if (key === 'src') this.src = ''; },
-      append(...children) { this.children.push(...children); },
-      appendChild(child) { this.children.push(child); return child; },
-    };
-  }
   function node(id) {
-    if (!nodes.has(id)) nodes.set(id, makeNode());
+    if (!nodes.has(id)) {
+      const attributes = new Map();
+      nodes.set(id, {
+        hidden: false, disabled: false, textContent: '', className: '', src: '',
+        setAttribute(key, value) { attributes.set(key, String(value)); },
+        getAttribute(key) { return attributes.get(key); },
+        removeAttribute(key) { attributes.delete(key); if (key === 'src') this.src = ''; },
+      });
+    }
     return nodes.get(id);
   }
-  env.respond = async (route, payload) => {
-    if (route === prefix + '/start' || route.startsWith(prefix + '/status') || route === prefix + '/roles') return { ...state };
+  env.respond = async (route) => {
+    if (route === prefix + '/start' || route.startsWith(prefix + '/status')) return { ...state };
     if (route === prefix + '/cancel') return { ok: true };
-    if (route === prefix + '/save') {
-      const choice = state.choices?.find(item => item.id === payload?.choiceId) || choices[0];
-      return { ok: true, account: { id: choice.accountId, title: choice.nickname, status: { connected: false } }, selectedRole: choice };
-    }
+    if (route === prefix + '/save') return { ok: true, account: { id: 'alipay:account', title: '支付宝角色', status: { connected: false } } };
     assert.fail('未预期请求 ' + route);
   };
   env.call = async (route, options) => {
@@ -69,14 +58,6 @@ function fixture() {
     return env.respond(route, payload);
   };
   env.node = node;
-  env.element = (tag, className, text) => {
-    const element = makeNode();
-    element.tagName = tag;
-    element.className = className || '';
-    element.textContent = text;
-    return element;
-  };
-  env.clear = element => { element.textContent = ''; return element; };
   env.now = () => now;
   env.setTimer = (callback, delay) => {
     const id = ++nextTimer;
@@ -91,7 +72,7 @@ function fixture() {
   env.load = async reload => { env.loadCalls.push(reload); await env.onLoad?.(); };
   new Function('env', `
     'use strict';
-    const $ = env.node, call = env.call, el = env.element, clear = env.clear;
+    const $ = env.node, call = env.call;
     const Date = { now: env.now };
     const setTimeout = env.setTimer, clearTimeout = env.clearTimer;
     const accounts = env.accounts, disconnected = env.disconnected;
@@ -104,24 +85,12 @@ function fixture() {
     }
     ${script}
   `)(env);
-  function descendants(element) {
-    return element.children.flatMap(child => [child, ...descendants(child)]);
-  }
   return {
-    env, node, state, choices, timers,
+    env, node, state, timers,
     click(id) { return node(id).onclick(); },
     calls(suffix) { return env.calls.filter(entry => entry.route.startsWith(prefix + suffix)); },
-    roles() { return descendants(node('alipay-roles')).filter(element => element.type === 'radio'); },
-    chooseRole(index) {
-      const roles = this.roles();
-      assert.ok(roles[index]);
-      for (const role of roles) role.checked = false;
-      roles[index].checked = true;
-      roles[index].onchange();
-    },
-    async captured(selectedChoices = choices) {
-      Object.assign(state, { phase: 'captured', choices: selectedChoices, roleError: null,
-        account: { id: 'alipay:account', title: '账号 abcdef0123' }, expiresAt: now + 600_000 });
+    async captured() {
+      Object.assign(state, { phase: 'captured', account: { id: 'alipay:account', title: '支付宝角色' }, expiresAt: now + 600_000 });
       await this.tick(1500);
     },
     async tick(milliseconds) {
@@ -183,7 +152,7 @@ await test('生成响应丢失后可重新获取后台等待中的二维码', as
   assert.equal(f.node('alipay-qr').src, qrImage);
   await f.captured();
   await f.click('alipay-save');
-  assert.deepEqual(f.calls('/save')[0].payload, { confirm: true, id: 'scan-1', choiceId: 'role-1' });
+  assert.deepEqual(f.calls('/save')[0].payload, { confirm: true, id: 'scan-1' });
   assert.match(f.node('alipay-hint').textContent, /账号已保存并切换/);
 });
 
@@ -215,7 +184,7 @@ await test('轮询展示扫码确认和已捕获，成功后停止网络轮询',
   await f.captured();
   assert.equal(f.node('alipay-save').hidden, false);
   assert.equal(f.node('alipay-save').disabled, false);
-  assert.equal(f.node('alipay-result').textContent, '已选择 支付宝角色 · 海港123服');
+  assert.equal(f.node('alipay-result').textContent, '支付宝角色');
   const polls = f.calls('/status').length;
   await f.tick(5000);
   assert.equal(f.calls('/status').length, polls);
@@ -324,7 +293,7 @@ await test('保存前尊重未保存配置，允许后保存并切换账户', as
   assert.match(f.node('alipay-hint').textContent, /配置尚未保存/);
   f.env.allowed = true;
   await f.click('alipay-save');
-  assert.deepEqual(f.calls('/save')[0].payload, { confirm: true, id: 'scan-1', choiceId: 'role-1' });
+  assert.deepEqual(f.calls('/save')[0].payload, { confirm: true, id: 'scan-1' });
   assert.deepEqual(f.env.selections, ['alipay:account']);
   assert.deepEqual(f.env.detailsAtSelection, [null]);
   assert.ok(f.env.disconnected.has('alipay:account'));
@@ -416,181 +385,12 @@ await test('保存成功后列表刷新失败仍展示已保存结果', async ()
   assert.deepEqual(f.env.selections, ['alipay:account']);
 });
 
-await test('自动读取角色时继续轮询，单个角色自动选中并展示名称区服', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  f.state.phase = 'reading-roles';
-  await f.tick(1500);
-  assert.match(f.node('alipay-hint').textContent, /读取.*区服和游戏角色/);
-  assert.equal(f.node('alipay-save').disabled, true);
-  assert.equal(f.node('alipay-flow').getAttribute('aria-busy'), 'true');
-  await f.captured();
-  assert.equal(f.roles().length, 1);
-  assert.equal(f.roles()[0].checked, true);
-  assert.match(f.node('alipay-roles').textContent, /支付宝角色.*海港123服.*等级 35.*战力 123,456/);
-  assert.doesNotMatch(f.node('alipay-result').textContent, /abcdef/);
-  assert.equal(f.node('alipay-save').disabled, false);
-});
-
-for (const selected of [1, 2]) {
-  await test('展示全部角色并保存第' + (selected + 1) + '个角色', async () => {
-    const f = fixture();
-    await f.click('alipay-start');
-    const choices = [1, 2, 3].map(index => ({ ...f.choices[0], id: 'choice-' + index, nickname: '角色' + index,
-      worldId: 3000000100 + index, worldName: '海港' + index + '服', roleWorldId: 3000000100 + index, roleWorldName: '海港' + index + '服' }));
-    await f.captured(choices);
-    assert.equal(f.roles().length, 3);
-    assert.ok(f.roles().every(role => !role.checked));
-    assert.equal(f.node('alipay-save').disabled, true);
-    await f.click('alipay-save');
-    assert.equal(f.calls('/save').length, 0);
-    f.chooseRole(selected);
-    assert.equal(f.node('alipay-save').disabled, false);
-    await f.click('alipay-save');
-    assert.equal(f.calls('/save')[0].payload.choiceId, choices[selected].id);
-    assert.deepEqual(f.env.mayChangeCalls, [choices[selected].accountId]);
-    assert.equal(f.node('alipay-result').textContent, choices[selected].nickname + ' · ' + choices[selected].worldName);
-  });
-}
-
-await test('伪造单选值不能启用保存或提交角色', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  await f.captured([f.choices[0], { ...f.choices[0], id: 'role-2', worldId: 3000000124 }]);
-  const input = f.roles()[0];
-  input.value = 'forged-role';
-  input.checked = true;
-  input.onchange();
-  assert.equal(f.node('alipay-save').disabled, true);
-  await f.click('alipay-save');
-  assert.equal(f.calls('/save').length, 0);
-});
-
-await test('无角色显示说明和重读入口，读取失败时禁止保存', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  await f.captured([]);
-  assert.match(f.node('alipay-roles').textContent, /暂无可选择的游戏角色/);
-  assert.equal(f.node('alipay-roles-retry').hidden, false);
-  assert.equal(f.node('alipay-save').disabled, true);
-  Object.assign(f.state, { choices: f.choices, roleError: '角色查询失败' });
-  await f.click('alipay-roles-retry');
-  assert.deepEqual(f.calls('/roles')[0].payload, { confirm: true, id: 'scan-1' });
-  assert.match(f.node('alipay-hint').textContent, /角色查询失败/);
-  assert.equal(f.node('alipay-save').disabled, true);
-  assert.ok(f.roles().every(role => role.disabled));
-  await f.click('alipay-save');
-  assert.equal(f.calls('/save').length, 0);
-  f.state.roleError = null;
-  await f.click('alipay-roles-retry');
-  assert.equal(f.node('alipay-save').disabled, false);
-  assert.equal(f.node('alipay-roles-retry').hidden, true);
-});
-
-await test('角色重读失败后可重试并按原区服保留选择', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  const choices = [f.choices[0], { ...f.choices[0], id: 'role-2', worldId: 3000000124, nickname: '第二角色' }];
-  await f.captured(choices);
-  f.chooseRole(1);
-  const respond = f.env.respond;
-  f.env.respond = route => {
-    if (route.endsWith('/roles')) throw new Error('查询暂时失败');
-    return respond(route);
-  };
-  await f.click('alipay-roles-retry');
-  assert.match(f.node('alipay-hint').textContent, /查询暂时失败/);
-  assert.equal(f.node('alipay-save').disabled, true);
-  assert.equal(f.node('alipay-roles-retry').hidden, false);
-  f.env.respond = respond;
-  f.state.choices = choices.map(choice => ({ ...choice, id: choice.id + '-new' }));
-  await f.click('alipay-roles-retry');
-  assert.equal(f.roles()[1].checked, true);
-  assert.equal(f.roles()[1].value, 'role-2-new');
-  await f.click('alipay-save');
-  assert.equal(f.calls('/save')[0].payload.choiceId, 'role-2-new');
-});
-
-await test('合服角色展示原区服和现区服，保存结果使用实际角色信息', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  const role = { ...f.choices[0], roleWorldId: 3000000200, roleWorldName: '海港200服', matched: true, existingTitle: '账号 abcdef0123' };
-  await f.captured([role]);
-  assert.match(f.node('alipay-roles').textContent, /原区服 海港123服，合服后位于 海港200服/);
-  assert.doesNotMatch(f.node('alipay-roles').textContent, /abcdef/);
-  await f.click('alipay-save');
-  assert.equal(f.node('alipay-result').textContent, '支付宝角色 · 海港200服');
-});
-
-await test('角色重读立即返回进度时持续轮询，失败后再次重读保留原选择', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  const choices = [f.choices[0], { ...f.choices[0], id: 'role-2', worldId: 3000000124, nickname: '第二角色' }];
-  await f.captured(choices);
-  f.chooseRole(1);
-  Object.assign(f.state, { phase: 'reading-roles', choices: [], roleError: null });
-  await f.click('alipay-roles-retry');
-  assert.match(f.node('alipay-hint').textContent, /正在读取/);
-  assert.equal(f.node('alipay-save').disabled, true);
-  Object.assign(f.state, { phase: 'captured', roleError: '读取角色失败' });
-  await f.tick(1500);
-  assert.match(f.node('alipay-hint').textContent, /读取角色失败/);
-  assert.equal(f.node('alipay-roles-retry').hidden, false);
-  Object.assign(f.state, { phase: 'reading-roles', choices: [], roleError: null });
-  await f.click('alipay-roles-retry');
-  Object.assign(f.state, { phase: 'captured', choices });
-  await f.tick(1500);
-  assert.equal(f.roles()[1].checked, true);
-  assert.equal(f.node('alipay-save').disabled, false);
-  await f.click('alipay-save');
-  assert.equal(f.calls('/save')[0].payload.choiceId, 'role-2');
-});
-
-for (const action of ['alipay-cancel', 'alipay-start']) {
-  await test('重新读取角色时' + (action === 'alipay-cancel' ? '取消' : '刷新') + '使迟到结果失效', async () => {
-    const f = fixture();
-    await f.click('alipay-start');
-    await f.captured([]);
-    const roles = deferred();
-    const respond = f.env.respond;
-    f.env.respond = route => route.endsWith('/roles') ? roles.promise : respond(route);
-    const reading = f.click('alipay-roles-retry');
-    assert.match(f.node('alipay-hint').textContent, /正在读取/);
-    assert.equal(f.node('alipay-cancel').disabled, false);
-    assert.equal(f.node('alipay-start').disabled, false);
-    Object.assign(f.state, { id: 'scan-2', phase: 'waiting', choices: [] });
-    await f.click(action);
-    roles.resolve({ ...f.state, id: 'scan-1', phase: 'captured', choices: f.choices });
-    await reading;
-    assert.equal(f.node('alipay-save').hidden, true);
-    assert.equal(f.roles().length, 0);
-    assert.match(f.node('alipay-hint').textContent, action === 'alipay-cancel' ? /已取消/ : /支付宝扫码/);
-  });
-}
-
-await test('保存期间修改单选不能替换正在保存的角色', async () => {
-  const f = fixture();
-  await f.click('alipay-start');
-  await f.captured([f.choices[0], { ...f.choices[0], id: 'role-2', worldId: 3000000124 }]);
-  f.chooseRole(1);
-  const save = deferred();
-  const respond = f.env.respond;
-  f.env.respond = (route, payload) => route.endsWith('/save') ? save.promise : respond(route, payload);
-  const saving = f.click('alipay-save');
-  await settle();
-  f.chooseRole(0);
-  assert.ok(f.roles().every(role => role.disabled));
-  assert.equal(f.calls('/save')[0].payload.choiceId, 'role-2');
-  save.resolve(await respond(prefix + '/save', { choiceId: 'role-2' }));
-  await saving;
-});
-
 await test('页面模板与独立脚本接线完整', async () => {
   const page = fs.readFileSync(new URL('../src/page.mjs', import.meta.url), 'utf8');
   const template = fs.readFileSync(new URL('../src/ui/pages.tsx', import.meta.url), 'utf8');
   assert.ok(page.includes('${alipayLoginScript}'));
   assert.ok(page.includes("new URL('./alipay-login-ui.js', import.meta.url)"));
-  for (const id of ['flow', 'start', 'cancel', 'save', 'hint', 'qr', 'result', 'expiry', 'roles', 'roles-retry']) {
+  for (const id of ['flow', 'start', 'cancel', 'save', 'hint', 'qr', 'result', 'expiry']) {
     assert.ok(template.includes('id="alipay-' + id + '"'), id);
   }
 });

@@ -9,6 +9,7 @@ const MEMBER_REQUESTS = new Set([
   'GuildInfoRequest', 'GotGuildWelfarePackRequest', 'GuildAidListRequest', 'GuildCityInfoRequest',
   'GuildTechInfoRequest', 'UpgradeGuildTechRequest', 'GuildOrderRequest', 'TradeGuildRadarRequest', 'TradeCityReportRequest',
   'GuildAidHelpRequest', 'GuildAidAskRequest', 'MyGuildAidRequest', 'GotMyGuildAidRequest', 'GotGuildTitleRewardRequest',
+  'GuildMemberRequest', 'ChangeGuildMemberTitleRequest',
 ]);
 
 export const TICK_INTERVAL_MS = 1000;

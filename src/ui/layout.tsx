@@ -1,6 +1,6 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, CircleUserRound, LayoutDashboard, LogIn, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
+import { Boxes, Building2, CircleUserRound, LayoutDashboard, LogIn, ScrollText, Settings2, ShieldCheck, Ship, Swords, Timer, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
@@ -15,6 +15,7 @@ const tabs = [
   ["settings", "游戏配置", "配置", Settings2], ["manual", "建筑一览", "建筑", Building2],
   ["stages", "挑战", "挑战", Swords], ["resources", "资源与玩法", "资源", Boxes],
   ["account", "账号", "账号", CircleUserRound], ["login-settings", "登录设置", "登录", LogIn],
+  ["guild-role", "联盟职位", "职位", ShieldCheck],
 ] as const
 
 export function chrome() {
@@ -22,9 +23,9 @@ export function chrome() {
     <div className="headline">
       <div className="mast"><span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span></div>
       <div className="connection">
-        <span id="busy" className="sr-only" role="status" aria-live="polite" aria-atomic="true">未连接</span>
+        <Badge id="busy" variant="outline" className="status-pill" data-state="off" role="status">未连接</Badge>
         <label className="account-label" htmlFor="account">当前账号</label>
-        <NativeSelect id="account" title="选择账号并查看状态" />
+        <NativeSelect id="account" title="选择账号" />
         <Button id="connect" size="sm">连接</Button><Button id="disconnect" size="sm" variant="outline">断开</Button>
         <Button id="account-pause" size="sm" variant="outline" title="暂停后断开游戏连接，方便自行上号">暂停托管</Button>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>

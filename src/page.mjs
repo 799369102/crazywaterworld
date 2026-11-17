@@ -84,6 +84,9 @@ ${chrome()}
   <section id="tab-login-settings" class="hidden">
     ${loginSettingsPage()}
   </section>
+  <section id="tab-guild-role" class="hidden">
+    <iframe id="guild-role-frame" class="guild-role-frame" title="联盟职位管理" loading="lazy"></iframe>
+  </section>
 </main></div>
 ${journal()}
 ${dialogs()}
@@ -100,6 +103,15 @@ let accounts = [];
 let stream = null;
 let dailyAccount = null, dailyVersion = 0;
 const pendingDailyAccounts = new Set();
+
+function loadGuildRoleFrame(force = false) {
+  const frame = $('guild-role-frame');
+  const account = current || '';
+  if (!force && frame.dataset.account === account && frame.dataset.loaded === '1') return;
+  frame.dataset.account = account;
+  frame.dataset.loaded = '1';
+  frame.src = '/guild-role?embedded=1' + (account ? '&account=' + encodeURIComponent(account) : '');
+}
 
 function num(v) {
   if (v == null || typeof v !== 'object') return v;
@@ -437,97 +449,24 @@ function subscribe() {
 }
 
 // ---- 账号 ------------------------------------------------------------------
+function setBusy(text, state) {
+  const pill = $('busy');
+  pill.textContent = text;
+  pill.dataset.state = state;
+}
+function paintConnection() {
+  if (snapshot.syncingProduction) setBusy('正在同步生产状态', 'busy');
+  else if (snapshot.paused) setBusy('已暂停 · 可自行上号', 'paused');
+  else if (snapshot.reconnecting) {
+    const seconds = Math.max(0, Math.ceil((snapshot.loginRecovery?.nextAttemptAt - Date.now()) / 1000));
+    setBusy(snapshot.loginRecovery?.status === 'connecting' ? '异地登录 · 正在自动重连' : '异地登录 · ' + seconds + ' 秒后重试', 'busy');
+  }
+  else if (snapshot.loginBlocked) setBusy('异地登录 · 等待恢复托管', 'paused');
+  else if (snapshot.connected) setBusy('已连接', 'on');
+  else setBusy('未连接', 'off');
+}
 let snapshot = { connected: false, state: 'IDLE', busy: null, looping: false };
 const disconnected = new Set();
-const connectingAccounts = new Set();
-let accountStatusRevision = 0;
-let accountStatusPending = null;
-let accountsLoading = 0;
-let accountLoadVersion = 0;
-
-function connectionStatus(status = {}) {
-  status = status ?? {};
-  if (status.syncingProduction) return '正在同步生产状态';
-  if (status.paused) return '已暂停 · 可自行上号';
-  if (status.reconnecting) {
-    if (status.loginRecovery?.status === 'connecting') return '异地登录 · 正在自动重连';
-    const nextAttemptAt = status.loginRecovery?.nextAttemptAt;
-    if (!Number.isFinite(nextAttemptAt)) return '异地登录 · 等待重连';
-    const seconds = Math.max(0, Math.ceil((nextAttemptAt - Date.now()) / 1000));
-    return '异地登录 · ' + seconds + ' 秒后重试';
-  }
-  if (status.loginBlocked) return '异地登录 · 等待恢复托管';
-  if (status.connected) return '已连接';
-  return status.state === 'CONNECTING' ? '连接中…' : '未连接';
-}
-
-function renderAccountOptions() {
-  const box = $('account');
-  const choices = accounts.length ? accounts.map(account => {
-    const status = account.id === current ? snapshot : account.status;
-    const text = connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status);
-    return [account.id, '[' + text + '] ' + account.title];
-  }) : [['', '没有账号']];
-  if (box.options.length !== choices.length || choices.some(([id], index) => box.options[index]?.value !== id)) {
-    box.replaceChildren(...choices.map(([id, text]) => new Option(text, id)));
-  } else {
-    choices.forEach(([, text], index) => {
-      if (box.options[index].text !== text) box.options[index].text = text;
-    });
-  }
-  box.disabled = !accounts.length;
-  if (box.value !== (current || '')) box.value = current || '';
-}
-
-function setBusy(text) {
-  const announcement = current ? text : '没有账号';
-  if ($('busy').textContent !== announcement) $('busy').textContent = announcement;
-  const account = accounts.find(row => row.id === current);
-  const option = Array.from($('account').options).find(row => row.value === current);
-  if (account && option) {
-    const label = '[' + text + '] ' + account.title;
-    if (option.text !== label) option.text = label;
-  }
-  $('account').title = option?.text || '选择账号并查看状态';
-}
-
-function paintConnection() {
-  const account = accounts.find(row => row.id === current);
-  if (account) account.status = snapshot;
-  renderAccountOptions();
-  setBusy(connectingAccounts.has(current) ? '连接中…' : connectionStatus(snapshot));
-}
-
-function setAccountStatus(account, status) {
-  accountStatusRevision++;
-  const row = accounts.find(item => item.id === account);
-  if (row) row.status = status;
-  if (account === current) snapshot = status;
-  paintConnection();
-}
-
-function refreshAccountStatuses() {
-  if (document.hidden || !accounts.length || accountsLoading || accountStatusPending) return accountStatusPending;
-  const revision = accountStatusRevision;
-  accountStatusPending = (async () => {
-    try {
-      const data = await call('/api/accounts');
-      if (revision !== accountStatusRevision) return;
-      accountStatusRevision++;
-      for (const row of accounts) {
-        const updated = data.accounts.find(account => account.id === row.id);
-        if (updated) row.status = updated.status ?? {};
-      }
-      snapshot = accounts.find(account => account.id === current)?.status ?? {};
-      renderAccountSelect();
-    } catch {
-      /* call 已记录错误，下次刷新继续读取。 */
-    } finally {
-      accountStatusPending = null;
-    }
-  })();
-  return accountStatusPending;
-}
 
 let accountDetailsOwner=null,credentialVersion=0;
 function renderAccountSelect() {
@@ -537,6 +476,12 @@ function renderAccountSelect() {
     clear($('dailies-table'));
     $('dailies-hint').textContent = snapshot.paused ? '账号已暂停' : '点击探测查看当前日常';
   }
+  const box=$('account');
+  const choices=accounts.length?accounts.map(a=>[a.id,a.title]):[['','没有账号']];
+  if(box.options.length!==choices.length||choices.some(([id,label],i)=>box.options[i]?.value!==id||box.options[i]?.text!==label)){
+    box.replaceChildren(...choices.map(([id,label])=>new Option(label,id)));
+  }
+  box.disabled=!accounts.length;box.value=current||'';
   if(accountDetailsOwner!==current){
     accountDetailsOwner=current;credentialVersion++;
     clear($('cred'));clear($('worlds'));$('worlds-hint').textContent='';$('world-input').value='';
@@ -552,32 +497,17 @@ function renderAccountSelect() {
   $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
   $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
   paintConnection();
-  $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
+  $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || !accounts.length;
   $('disconnect').disabled = !snapshot.connected && !snapshot.reconnecting;
 }
 
 async function loadAccounts(reload) {
-  const version = ++accountLoadVersion;
-  const revision = ++accountStatusRevision;
-  accountsLoading++;
-  let data;
-  try {
-    data = await call('/api/accounts');
-  } finally {
-    accountsLoading--;
-  }
-  if (version !== accountLoadVersion) return;
-  if (revision !== accountStatusRevision) {
-    for (const row of data.accounts) {
-      const existing = accounts.find(account => account.id === row.id);
-      if (existing) row.status = existing.status;
-    }
-  }
-  accountStatusRevision++;
+  const data = await call('/api/accounts');
   const previous = current;
   accounts = data.accounts;
   if (!current && data.activeId) current = data.activeId;
   if (current && !accounts.some((a) => a.id === current)) current = data.activeId;
+  if ($('guild-role-frame').dataset.loaded === '1') loadGuildRoleFrame(true);
   snapshot = accounts.find(a => a.id === current)?.status ?? {};
   renderAccountSelect();
   if (previous !== current || reload) refreshProgression();
@@ -591,6 +521,7 @@ async function loadAccounts(reload) {
 
 function selectLoadedAccount(next) {
   current = next;
+  if ($('guild-role-frame').dataset.loaded === '1') loadGuildRoleFrame(true);
   giftAccountChanged();
   configAccountChanged();
   loginSettingsAccountChanged();
@@ -611,20 +542,16 @@ $('account').onchange = async () => {
   selectLoadedAccount(next);
   await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id: current }) });
 };
-$('account').addEventListener('focus', refreshAccountStatuses);
-$('account').addEventListener('pointerdown', refreshAccountStatuses);
-$('account').addEventListener('keydown', event => {
-  if (['ArrowDown', 'ArrowUp', 'Enter', ' ', 'F4'].includes(event.key)) void refreshAccountStatuses();
-});
 
 $('account-pause').onclick = async () => {
   const account = current;
-  accountStatusRevision++;
   $('account-pause').disabled = true;
   try {
     const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify({ paused: !(snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting)) }) });
-    setAccountStatus(account, status);
+    const row = accounts.find(a => a.id === account);
+    if (row) row.status = status;
     if (current !== account) return;
+    snapshot = status;
     if (!status.paused) disconnected.delete(account);
     renderAccountSelect();
     refreshProgression();
@@ -638,39 +565,33 @@ $('account-pause').onclick = async () => {
 };
 
 $('connect').onclick = async () => {
-  const account = current;
-  if (!account || connectingAccounts.has(account)) return;
-  accountStatusRevision++;
-  connectingAccounts.add(account);
-  renderAccountSelect();
+  setBusy('连接中…', 'busy');
   try {
     await call('/api/connect', { method: 'POST' });
-    disconnected.delete(account);
-    const status = accounts.find(row => row.id === account)?.status ?? {};
-    setAccountStatus(account, { ...status, connected: true, state: 'READY', loginBlocked: false, reconnecting: false });
-    if (account !== current) return;
+    disconnected.delete(current);
     refreshManualWorld();
+    snapshot.connected = true;
+    snapshot.loginBlocked = false;
+    snapshot.reconnecting = false;
+    renderAccountSelect();
     refreshProgression();
     refreshOverview();
   } catch (error) {
+    paintConnection();
     reportError(error);
-  } finally {
-    accountStatusRevision++;
-    connectingAccounts.delete(account);
-    renderAccountSelect();
-    void refreshAccountStatuses();
   }
 };
 $('disconnect').onclick = async () => {
   const account = current;
-  accountStatusRevision++;
   disconnected.add(account);
   refreshProgression();
   refreshManualWorld();
   await call('/api/disconnect', { method: 'POST' });
-  const status = accounts.find(row => row.id === account)?.status ?? {};
-  setAccountStatus(account, { ...status, connected: false, state: 'STOPPED', reconnecting: false, syncingProduction: false });
   if (account !== current) return;
+  snapshot.connected = false;
+  snapshot.reconnecting = false;
+  snapshot.syncingProduction = false;
+  paintConnection();
   renderAccountSelect();
 };
 
@@ -717,14 +638,12 @@ let overviewPending = false;
 async function refreshOverview() {
   if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&$('tab-account').classList.contains('hidden'))) return;
   const account = current;
-  const statusRevision = accountStatusRevision;
   overviewPending = account;
-  if (!snapshot.connected) setBusy('连接中…');
+  if (!snapshot.connected) setBusy('连接中…', 'busy');
   try {
     const data = await call('/api/overview');
     if (account !== current || snapshot.paused || disconnected.has(account)) return;
-    if (statusRevision === accountStatusRevision) setAccountStatus(account, data.status);
-    else data.status = snapshot;
+    snapshot = data.status;
     renderAccountSelect();
     renderOverview(data);
     if(!$('tab-overview').classList.contains('hidden'))void refreshActivityRanks();
@@ -2014,6 +1933,7 @@ function activateConsolePage(button, resource = selectedResource) {
     if (button.dataset.tab === 'idle') refreshLoop();
     if (button.dataset.tab === 'settings') { void configLoad(); void refreshLoop(); }
     if (button.dataset.tab === 'login-settings') void loginSettingsLoad();
+    if (button.dataset.tab === 'guild-role') loadGuildRoleFrame();
     if(target==='giftcodes')void refreshGiftCodes();
     if (target === 'activities') refreshActivities();
     if (button.dataset.tab === 'stages') refreshStages();
@@ -2045,9 +1965,9 @@ async function boot() {
 }
 boot();
 setInterval(refreshOverview, 20000);
-setInterval(() => { if (!document.hidden && accounts.some(account => account.status?.reconnecting)) paintConnection(); }, 1000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){void refreshAccountStatuses();refreshLoop();refreshStages();}});
-setInterval(() => { void refreshAccountStatuses(); if (!loopReads) refreshLoop(); }, 3000);
+setInterval(() => { if (!document.hidden && snapshot.reconnecting) paintConnection(); }, 1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshLoop();refreshStages();}});
+setInterval(() => { if (!loopReads) refreshLoop(); }, 3000);
 setInterval(refreshStages, 3000);
 </script>
 </body>

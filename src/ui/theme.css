@@ -289,6 +289,7 @@
 
 @keyframes dialog-in { from { opacity: 0; transform: scale(0.95); } }
 @keyframes backdrop-in { from { opacity: 0; } }
+@keyframes status-pulse { 50% { opacity: 0.25; } }
 @keyframes page-progress { from { left: -32%; } to { left: 100%; } }
 
 /* 组件变体：写在 utilities 层才能盖过模板克隆元素上的工具类。 */
@@ -303,6 +304,9 @@
   .activity-badge.permanent { @apply border-border bg-transparent text-foreground; }
   .activity-ready { @apply inline-flex w-fit shrink-0 items-center justify-center rounded-full bg-primary px-2 py-0.5 text-xs font-medium whitespace-nowrap text-primary-foreground; }
 
+  .status-pill[data-state=on] { @apply border-transparent bg-emerald-50 text-emerald-700; }
+  .status-pill[data-state=paused] { @apply border-transparent bg-amber-50 text-amber-700; }
+  .status-pill[data-state=busy] { @apply border-transparent bg-secondary text-secondary-foreground; }
 }
 
 /* 四列以上的表格在窄屏变成一行一张卡片，避免内容被挤成竖排。 */

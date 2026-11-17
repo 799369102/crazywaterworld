@@ -46,6 +46,11 @@ import { readEquipmentCrafting, startEquipmentCraft, collectEquipmentCraft } fro
 import { readLineups, applyLineup } from './lineups.mjs';
 import { pirateBoard } from './pirate-board.mjs';
 import { readGuild, readGuildMembers, claimGuildWelfare, claimMyGuildAid } from './guild.mjs';
+import { readGuildChat, watchGuildChat } from './guild-chat.mjs';
+import { createGuildRoleBot } from './guild-role-bot.mjs';
+import { loadGuildRoleSettings, normalizeGuildRoleSettings, saveGuildRoleSettings } from './guild-role-settings.mjs';
+import { readGuildRoleMembers, transferGuildPresident, validateGuildRolePreconfiguration } from './guild-role-admin.mjs';
+import { GUILD_ROLE_PAGE } from './guild-role-page.mjs';
 import { createGuildMutualTask, readMutualOptions, mutualOptions, loadMutualPreset, saveMutualPreset } from './guild-mutual.mjs';
 import { readFleetFormations, initializeFleetFormation } from './fleet-formation.mjs';
 import { loadProtocol } from './proto.mjs';
@@ -131,6 +136,12 @@ const pageAsset = {
   gzip: zlib.gzipSync(pageRaw, { level: 9 }),
   etag: '"' + createHash('sha1').update(pageRaw).digest('hex').slice(0, 16) + '"',
 };
+const guildRolePageRaw = Buffer.from(GUILD_ROLE_PAGE);
+const guildRolePageAsset = {
+  raw: guildRolePageRaw,
+  gzip: zlib.gzipSync(guildRolePageRaw, { level: 9 }),
+  etag: '"' + createHash('sha1').update(guildRolePageRaw).digest('hex').slice(0, 16) + '"',
+};
 
 export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recoveryDelayMs, resourceUpdates = false, resourceUpdater = null, protocol: protocolOverride,
   alipayLoginController = null,
@@ -140,8 +151,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   const protocol = protocolOverride ?? loadProtocol();
   const alipayLogin = alipayLoginController ?? createAlipayLogin({ protocol });
   let alipaySaving = false;
-  let pendingAlipayLogin = null;
-  let cancelledAlipayLoginId = null;
   const traceLog = createTraceLog(TRACE_PATH, { maxBytes: TRACE_MAX_BYTES });
   const globalLog = [];
   const streams = new Set();
@@ -176,97 +185,53 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     };
   }
 
-  function clearAlipayRoles() {
-    pendingAlipayLogin?.controller?.abort();
-    clearTimeout(pendingAlipayLogin?.expiryTimer);
-    pendingAlipayLogin = null;
-  }
-
-  function readAlipayRoles(pending) {
-    if (pending.reading) return pending.reading;
-    pending.entry.choices = [];
-    pending.entry.roleError = null;
-    pending.controller = new AbortController();
-    const reading = readPhoneRoles(pending.entry, { signal: pending.controller.signal }).finally(() => {
-      if (pending.reading === reading) pending.reading = null;
-    });
-    pending.reading = reading;
-    return reading;
-  }
-
   function alipayLoginStatus(id) {
     const state = alipayLogin.status(id);
-    if (cancelledAlipayLoginId !== state.id) cancelledAlipayLoginId = null;
-    if (state.id && state.id === cancelledAlipayLoginId) {
-      clearAlipayRoles();
-      return { ...state, phase: 'cancelled', qrImage: null };
+    if (state.phase !== 'captured') return state;
+    const credential = alipayLogin.takeCredential(state.id);
+    const idOfAccount = accountId(credential);
+    const existing = loadStore().accounts.find(account => account.id === idOfAccount);
+    return { ...state, account: {
+      id: idOfAccount,
+      title: existing ? describeAccount(existing).title : `支付宝账号 ${credential.login.eworldParams.openId.slice(-6)}`,
+    } };
+  }
+
+  function saveAlipayAccount(id) {
+    if (closing) throw new Error('控制台已关闭');
+    // 排队期间二维码可能被取消或过期，落盘前重新取出有效凭证。
+    const credential = alipayLogin.takeCredential(id);
+    const idOfAccount = accountId(credential);
+    if (!idOfAccount || credential.source !== 'alipay') throw new Error('支付宝游戏登录凭证无效，请重新扫码');
+    const session = sessions.get(idOfAccount);
+    if (session) {
+      requireProductionSync(session);
+      session.generation++;
+      stopLoop(session, '支付宝账号已重新扫码，请重新连接');
+      saveAutomation(session.id, { enabled: false });
+      session.stages.stop('支付宝账号已重新扫码');
+      session.mutualAid.stop('支付宝账号已重新扫码');
+      for (const task of session.trials.values()) task.stop('支付宝账号已重新扫码');
+      session.client?.stop();
+      session.worldClient?.stop();
+      session.connecting = session.client = session.player = null;
     }
-    if (state.phase !== 'captured') {
-      clearAlipayRoles();
-      return state;
-    }
-    if (pendingAlipayLogin?.id !== state.id) {
-      clearAlipayRoles();
-      const credential = alipayLogin.takeCredential(state.id);
-      if (!accountId(credential) || credential.source !== 'alipay') throw new Error('支付宝游戏登录凭证无效，请重新扫码');
-      pendingAlipayLogin = {
-        id: state.id, reading: null, controller: null,
-        entry: { credential, userName: '支付宝账号', choices: [], roleError: null },
-      };
-      const pending = pendingAlipayLogin;
-      pending.expiryTimer = setTimeout(() => {
-        if (pendingAlipayLogin === pending) clearAlipayRoles();
-      }, Math.max(0, state.expiresAt - Date.now()));
-      pending.expiryTimer.unref?.();
-      void readAlipayRoles(pendingAlipayLogin);
-    }
-    const pending = pendingAlipayLogin;
     const store = loadStore();
-    const idOfAccount = accountId(pending.entry.credential);
-    const existing = store.accounts.find(account => account.id === idOfAccount);
-    return {
-      ...state,
-      phase: pending.reading ? 'reading-roles' : 'captured',
-      choices: roleChoices(pending.entry, store),
-      roleError: pending.entry.roleError,
-      account: { id: idOfAccount, title: existing ? describeAccount(existing).title : '支付宝账号' },
-    };
+    const { account, created } = upsertAccount(store, credential);
+    setActive(store, account.id);
+    saveStore(store);
+    emit(null, 'info', `${created ? '支付宝扫码已新增' : '支付宝扫码已更新'}账号 ${describeAccount(account).title}，可连接游戏`);
+    return { ok: true, account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) } };
   }
 
-  function requireAlipayRoles(id) {
+  async function readPhoneWorlds(credential) {
     if (closing) throw new Error('控制台已关闭');
-    const state = alipayLoginStatus(id);
-    const pending = pendingAlipayLogin;
-    if (!pending || pending.id !== id || !['captured', 'reading-roles'].includes(state.phase)
-      || state.expiresAt <= Date.now()) throw new Error('扫码结果已过期或已保存，请重新扫码');
-    return pending;
-  }
-
-  function saveAlipayRole(pending, choice) {
-    // 排队期间扫码可能被取消、过期或刷新，落盘前重新检查本次选择。
-    if (requireAlipayRoles(pending.id) !== pending || pending.reading || !pending.entry.choices.includes(choice)) {
-      throw new Error('角色列表已变化，请重新选择角色');
-    }
-    pending.entry.credential = alipayLogin.takeCredential(pending.id);
-    const result = saveSelectedRole(pending.entry, choice, { sourceLabel: '支付宝扫码', stopExisting: true });
-    pending.entry.credential = null;
-    pending.entry.choices = [];
-    cancelledAlipayLoginId = pending.id;
-    clearAlipayRoles();
-    return result;
-  }
-
-  async function readPhoneWorlds(credential, { signal } = {}) {
-    if (closing) throw new Error('控制台已关闭');
-    signal?.throwIfAborted();
-    const session = sessions.get(accountId(credential));
+    const session = sessions.get(credential.login.eworldParams.openId);
     if (session?.connecting) await session.connecting.catch(() => {});
-    signal?.throwIfAborted();
     const activeClient = session?.client;
     if (activeClient?.connected && !session.paused) {
       const generation = session.generation;
       return readJob(session, () => {
-        signal?.throwIfAborted();
         if (closing || session.client !== activeClient || !activeClient.connected || session.generation !== generation || session.paused) {
           throw new Error('账号连接已变化，请重新读取角色列表');
         }
@@ -275,24 +240,20 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
     const client = new GameClient({ url: credential.url, protocol });
     phonePreviewClients.add(client);
-    const stop = () => client.stop();
-    signal?.addEventListener('abort', stop, { once: true });
     try {
       // 只登录最近区服并查询列表，选择阶段不逐个进入其他区服。
       await client.connect({ ...credential.login, worldId: 0 });
-      signal?.throwIfAborted();
       if (closing) throw new Error('控制台已关闭');
       return await listWorlds(client);
     } finally {
-      signal?.removeEventListener('abort', stop);
       client.stop();
       phonePreviewClients.delete(client);
     }
   }
 
-  async function readPhoneRoles(entry, options) {
+  async function readPhoneRoles(entry) {
     try {
-      const worlds = await readPhoneWorlds(entry.credential, options);
+      const worlds = await readPhoneWorlds(entry.credential);
       const previous = new Map(entry.choices.map(choice => [choice.worldId, choice.id]));
       const seen = new Set();
       entry.choices = worlds.recentWorlds.filter(world => {
@@ -306,77 +267,68 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
   }
 
-  function roleChoices(entry, store) {
-    const idOfAccount = accountId(entry.credential);
-    const existing = store.accounts.find(account => account.id === idOfAccount);
-    return entry.choices.map(choice => ({
-      id: choice.id, accountId: idOfAccount, userName: entry.userName,
-      nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
-      worldId: choice.worldId, worldName: choice.worldName,
-      roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
-      matched: Boolean(existing), existingTitle: existing ? describeAccount(existing).title : null,
-    }));
-  }
-
   function phonePreview(pending) {
     const store = loadStore();
     const choices = [];
     const failures = [...pending.authenticationFailures];
     const emptyAccounts = [];
     for (const entry of pending.entries) {
+      const accountId = entry.credential.login.eworldParams.openId;
+      const existing = store.accounts.find(account => account.id === accountId);
       if (entry.roleError) failures.push({ userName: entry.userName, error: entry.roleError, retryable: true });
       else if (!entry.choices.length) emptyAccounts.push({ userName: entry.userName });
-      choices.push(...roleChoices(entry, store));
+      for (const choice of entry.choices) {
+        choices.push({
+          id: choice.id, accountId, userName: entry.userName,
+          nickname: choice.role.nickname || '未命名角色', level: choice.role.level ?? null, power: choice.role.power ?? null,
+          worldId: choice.worldId, worldName: choice.worldName,
+          roleWorldId: choice.role.worldId || choice.worldId, roleWorldName: choice.role.worldName || choice.worldName,
+          matched: Boolean(existing), existingTitle: existing ? describeAccount(existing).title : null,
+        });
+      }
     }
     return { ok: true, id: pending.id, phone: maskPhone(pending.phone), choices, failures, emptyAccounts,
       linkedAccountCount: pending.linkedAccountCount, expiresAt: pending.createdAt + PHONE_PENDING_MS };
   }
 
-  function saveSelectedRole(entry, choice, { sourceLabel = 'APP 登录', stopExisting = false } = {}) {
-    const idOfAccount = accountId(entry.credential);
-    const session = sessions.get(idOfAccount);
+  function savePhoneRole(pending, entry, choice) {
+    const openId = entry.credential.login.eworldParams.openId;
+    const session = sessions.get(openId);
     const roleWorldId = choice.role.worldId || choice.worldId;
-    const previous = loadStore().accounts.find(account => account.id === idOfAccount);
+    const previous = loadStore().accounts.find(account => account.id === openId);
     const currentRoleId = uidText(session?.player?.playerId ?? session?.player?.id);
     const selectedRoleId = uidText(choice.role.id);
     const sameRole = currentRoleId && selectedRoleId ? currentRoleId === selectedRoleId
       : toNumber(session?.player?.worldId) === roleWorldId
         && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
-    if (session && (stopExisting || !sameRole)) {
-      const reason = stopExisting ? '支付宝账号已重新扫码，请重新连接' : '已选择其他角色，停止旧角色任务';
+    if (session && !sameRole) {
       requireProductionSync(session);
       session.generation++;
-      stopLoop(session, reason);
+      stopLoop(session, '已选择其他角色，停止旧角色任务');
       saveAutomation(session.id, { enabled: false });
-      session.stages.stop(reason);
-      session.mutualAid.stop(reason);
-      for (const task of session.trials.values()) task.stop(reason);
+      session.stages.stop('已切换角色');
+      session.mutualAid.stop('已切换角色');
+      for (const task of session.trials.values()) task.stop('已切换角色');
       session.client?.stop();
       session.worldClient?.stop();
       session.connecting = session.client = session.player = null;
     }
     const store = loadStore();
-    const existing = store.accounts.find(account => account.id === idOfAccount);
+    const existing = store.accounts.find(account => account.id === openId);
     const credential = { ...entry.credential, login: { ...entry.credential.login, worldId: choice.worldId } };
-    const fallbackLabel = entry.credential.source === 'alipay' ? '未命名角色' : entry.userName;
-    const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
+    const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || entry.userName;
     const { account, created } = upsertAccount(store, credential, { label });
-    rememberSeen(account, { ...choice.role, nickname: choice.role.nickname || '未命名角色', worldId: roleWorldId });
+    rememberSeen(account, { ...choice.role, worldId: roleWorldId });
     setActive(store, account.id);
     saveStore(store);
-    emit(null, 'info', `${sourceLabel}${created ? '已新增' : '已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
+    pendingPhoneLogins.delete(pending.id);
+    emit(null, 'info', `${created ? 'APP 登录已新增' : 'APP 登录已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
     return {
       ok: true,
       account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) },
       selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
         roleWorldId, roleWorldName: choice.role.worldName || choice.worldName },
     };
-  }
-
-  function savePhoneRole(pending, entry, choice) {
-    const result = saveSelectedRole(entry, choice);
-    pendingPhoneLogins.delete(pending.id);
-    return result;
   }
   let logId = 0;
   trace(null, 'runtime', { startedAt: RUN_VERSION, node: process.version });
@@ -456,7 +408,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const saved = loadStore().accounts.find(account => account.id === id)?.automation;
     const detailed = loadAutomationSettings(id);
     const preferences = detailed.revision ? detailed.settings : null;
-    return {
+    const guildRoleSettings = loadGuildRoleSettings(id, DATA_DIR);
+    const session = {
       id,
       preferences,
       preferencesRevision: detailed.revision,
@@ -491,6 +444,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       logClearBefore: 0,
       logClearAt: 0,
       dailySingle: dailySingleState(),
+      guildRoleSettings,
+      guildRoleCanManage: false,
+      guildRoleReady: false,
       loop: {
         running: false,
         rounds: preferences?.loop.rounds ?? saved?.rounds ?? 0,
@@ -505,6 +461,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         error: null,
       },
     };
+    session.guildRoleBot = createGuildRoleBot({
+      accountId: id,
+      dataDir: DATA_DIR,
+      settings: guildRoleSettings.settings,
+    });
+    return session;
   }
 
   // Share identical clicks until this account's queued operation has finished.
@@ -532,6 +494,37 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       session.progressionJobs.set(key, job);
     }
     return session.progressionJobs.get(key);
+  }
+
+  function armGuildRoleBot(session, account) {
+    if (!session.guildRoleCanManage || session.paused || session.guildRoleSettings.settings.enabled) return false;
+    const next = { ...session.guildRoleSettings.settings, enabled: true };
+    session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR, next, { revision: session.guildRoleSettings.revision });
+    session.guildRoleBot.configure(session.guildRoleSettings.settings);
+    emit(session, 'info', '检测到当前账号是盟主，联盟职位机器人已随托管自动启动');
+    return true;
+  }
+
+  async function transferGuildPresidentAfterRestore(session, account, client, enabled, pending) {
+    const settings = session.guildRoleSettings.settings;
+    if (!settings.transferAfterRestore || settings.transferTargetId !== pending.targetId) {
+      throw new Error('自动转让设置已变化，本次不再执行');
+    }
+    const roster = await readGuildRoleMembers(client, session.player);
+    session.guildRoleCanManage = roster.canManage;
+    if (!roster.canManage) throw new Error('当前托管账号尚未成为盟主，已保留转让预配置并等待下次重试');
+    const target = roster.members.find(member => member.id === pending.targetId);
+    if (!target) throw new Error('自动转让目标已经不在联盟');
+    const result = await transferGuildPresident(client, session.player, {
+      targetId: target.id,
+      expectedNickname: target.name,
+      enabled,
+    });
+    const next = { ...settings, enabled: false, transferAfterRestore: false };
+    session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR, next, { revision: session.guildRoleSettings.revision });
+    session.guildRoleBot.configure(session.guildRoleSettings.settings);
+    emit(session, 'warn', `联盟职位统一恢复完成，盟主已自动转让给 ${result.nickname}，机器人已关闭`);
+    return result;
   }
 
   function sessionFor(id) {
@@ -670,6 +663,23 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     watchGuildShipPushes(instance);
     watchHeroRaidPushes(instance);
     watchSiliconMining(instance);
+    const stopGuildChat = watchGuildChat(instance, {
+      onMessage: message => {
+        if (session.client !== instance) return;
+        const decision = session.guildRoleBot.receive(instance, message);
+        const reason = {
+          'disabled-or-detached': '机器人已暂停',
+          'sender-not-allowed': '发送者不在允许名单',
+          duplicate: '重复消息已忽略',
+          'not-live-or-outside-window': '不在配置时段或不是实时消息',
+        }[decision.reason] ?? '未进入队列';
+        const suffix = message.command
+          ? `（识别为${message.command === 'promote' ? '上副盟主' : '下副盟主'}指令，${decision.accepted ? '已排队' : reason}）`
+          : '';
+        emit(session, 'info', `联盟聊天 · ${message.nickname}：${message.text}${suffix}`, { guildChat: message });
+      },
+      onError: error => emit(session, 'warn', '联盟聊天解析失败：' + error.message),
+    });
     instance.on('message', ({name,body}) => {
       if(name==='RecruitInfoResponse')instance.freeRecruitTimes={hero:body.hero?.freeEndTimeSeconds,antique:body.antique?.freeEndTimeSeconds};
       if(name==='RecruitStartResponse'||name==='AntiqueRecruitResponse'){
@@ -781,6 +791,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
     });
     instance.on('state', (event) => {
+      if (event.state === 'STOPPED') session.guildRoleBot.detach(instance);
       trace(session, 'state', event);
       emit(session, 'state', STATE_TEXT[event.state] ?? event.state);
     });
@@ -1157,6 +1168,39 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         error.productionSyncGeneration = session.generation;
         emit(session, 'warn', '生产状态暂未同步，保留原记录并暂停本次操作，后续连接会自动重试：' + error.message);
         throw error;
+      }
+    }
+    let roleRoster = null;
+    try {
+      roleRoster = await readGuildRoleMembers(client, session.player);
+      session.guildRoleCanManage = roleRoster.canManage;
+    } catch {
+      session.guildRoleCanManage = false;
+    }
+    if (session.guildRoleCanManage) {
+      try { armGuildRoleBot(session, account); }
+      catch (error) { emit(session, 'warn', '联盟职位机器人自动启动失败：' + error.message); }
+    }
+    session.guildRoleReady = false;
+    const guildRoleAccepting = () => session.client === client && client.connected && !session.paused && session.guildRoleCanManage;
+    const guildRoleEnabled = () => guildRoleAccepting() && session.guildRoleReady;
+    session.guildRoleBot.attach(client, {
+      getPlayer: () => session.player,
+      enabled: guildRoleEnabled,
+      accepting: guildRoleAccepting,
+      schedule: work => enqueue(session, work, '联盟职位指令'),
+      afterRestore: pending => transferGuildPresidentAfterRestore(session, account, client, guildRoleEnabled, pending),
+      onEvent: entry => emit(session, entry.level, entry.message, entry.extra),
+    });
+    if (session.guildRoleCanManage) {
+      try {
+        await session.guildRoleBot.initializeLeadership(roleRoster?.members);
+        session.guildRoleReady = true;
+        await session.guildRoleBot.flush();
+        emit(session, 'info', '已保存盟主接管时的职位快照并完成永久副盟初始化');
+      } catch (error) {
+        session.guildRoleReady = false;
+        emit(session, 'warn', '联盟职位初始化失败，暂不执行指令；时段内实时消息仍会保留在队列：' + error.message);
       }
     }
     try {
@@ -1543,6 +1587,20 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         } else {
           res.writeHead(200, headers);
           res.end(pageAsset.raw);
+        }
+        return;
+      }
+      if (route === 'GET /guild-role') {
+        const headers = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', etag: guildRolePageAsset.etag, vary: 'Accept-Encoding' };
+        if (req.headers['if-none-match'] === guildRolePageAsset.etag) {
+          res.writeHead(304, headers);
+          res.end();
+        } else if (acceptsGzip) {
+          res.writeHead(200, { ...headers, 'content-encoding': 'gzip' });
+          res.end(guildRolePageAsset.gzip);
+        } else {
+          res.writeHead(200, headers);
+          res.end(guildRolePageAsset.raw);
         }
         return;
       }
@@ -2109,12 +2167,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(jsonBody());
         if (closing) throw new Error('控制台已关闭');
         if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
-        const previous = alipayLogin.status();
-        if (previous.id && previous.id === cancelledAlipayLoginId) await alipayLogin.cancel(previous.id);
-        const starting = alipayLogin.start();
-        const currentState = alipayLogin.status();
-        if (pendingAlipayLogin && (pendingAlipayLogin.id !== currentState.id || currentState.phase !== 'captured')) clearAlipayRoles();
-        const state = await starting;
+        const state = await alipayLogin.start();
         json(alipayLoginStatus(state.id));
         return;
       }
@@ -2125,21 +2178,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/accounts/alipay-login/cancel') {
         const { id } = jsonBody();
         if (typeof id !== 'string' || !id) throw new Error('请选择要取消的扫码会话');
-        alipayLogin.status(id);
-        cancelledAlipayLoginId = id;
-        clearAlipayRoles();
         await alipayLogin.cancel(id);
         json({ ok: true });
-        return;
-      }
-      if (route === 'POST /api/accounts/alipay-login/roles') {
-        const payload = jsonBody();
-        needConfirm(payload);
-        if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
-        if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
-        const pending = requireAlipayRoles(payload.id);
-        void readAlipayRoles(pending);
-        json(alipayLoginStatus(payload.id));
         return;
       }
       if (route === 'POST /api/accounts/alipay-login/save') {
@@ -2147,17 +2187,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(payload);
         if (typeof payload.id !== 'string' || !payload.id) throw new Error('扫码结果已过期，请重新扫码');
         if (alipaySaving) throw new Error('正在保存支付宝账号，请稍候');
-        const pending = requireAlipayRoles(payload.id);
-        if (pending.reading) throw new Error('正在读取区服和角色，请稍候');
-        if (pending.entry.roleError) throw new Error('角色列表读取失败，请重试后再保存');
-        const choices = pending.entry.choices;
-        const choice = payload.choiceId ? choices.find(item => item.id === String(payload.choiceId))
-          : choices.length === 1 ? choices[0] : null;
-        if (!choice || payload.worldId !== undefined) throw new Error('请选择列表中的区服和角色后再保存');
         alipaySaving = true;
         try {
-          const session = sessions.get(accountId(pending.entry.credential));
-          const save = () => saveAlipayRole(pending, choice);
+          const credential = alipayLogin.takeCredential(payload.id);
+          const session = sessions.get(accountId(credential));
+          const save = () => saveAlipayAccount(payload.id);
           const result = session && !session.paused ? await enqueue(session, save) : save();
           // 凭证已落盘，临时浏览器清理失败也应返回已保存的账号。
           try { await alipayLogin.cancel(payload.id); } catch {}
@@ -2283,7 +2317,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if (!selected) throw new Error('请选择列表中的区服和角色后再保存');
         pending.busy = true;
         try {
-          const session = sessions.get(accountId(selected.entry.credential));
+          const session = sessions.get(selected.entry.credential.login.eworldParams.openId);
           const save = () => {
             if (closing) throw new Error('控制台已关闭');
             if (pendingPhoneLogins.get(pending.id) !== pending || Date.now() - pending.createdAt >= PHONE_PENDING_MS) {
@@ -2541,6 +2575,97 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'GET /api/pirates/board') {
         const { account, session } = scoped_(parsed);
         json(await progressionJob(session, account, route, null, client => pirateBoard(client, loadConfigSafe(), session.player), { read: true }));
+        return;
+      }
+      if (route === 'GET /api/guild/chat') {
+        const { account, session } = scoped_(parsed);
+        const rawLimit = parsed.searchParams.get('limit');
+        const limit = rawLimit === null ? undefined : Number(rawLimit);
+        json(await progressionJob(session, account, `${route}:${limit ?? ''}`, null,
+          client => readGuildChat(client, { ...(limit === undefined ? {} : { limit }) }), { read: true }));
+        return;
+      }
+      if (route === 'GET /api/guild/role-bot') {
+        const { session } = scoped_(parsed);
+        json(session.guildRoleBot.snapshot());
+        return;
+      }
+      if (route === 'GET /api/guild-role/config') {
+        const { session } = scoped_(parsed);
+        json({ revision: session.guildRoleSettings.revision, savedAt: session.guildRoleSettings.savedAt,
+          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot() });
+        return;
+      }
+      if (route === 'GET /api/guild-role/status') {
+        const { session } = scoped_(parsed);
+        json(session.guildRoleBot.snapshot());
+        return;
+      }
+      if (route === 'GET /api/guild-role/members') {
+        const { account, session } = scoped_(parsed);
+        const roster = await progressionJob(session, account, route, null,
+          client => readGuildRoleMembers(client, session.player), { read: true });
+        session.guildRoleCanManage = roster.canManage;
+        if (!roster.canManage) session.guildRoleReady = false;
+        const autoStarted = armGuildRoleBot(session, account);
+        if (roster.canManage && !session.guildRoleReady) {
+          await enqueue(session, () => session.guildRoleBot.initializeLeadership(roster.members), '初始化联盟职位');
+          session.guildRoleReady = true;
+          await session.guildRoleBot.flush();
+        }
+        json({ ...roster, autoStarted, revision: session.guildRoleSettings.revision,
+          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot() });
+        return;
+      }
+      if (route === 'POST /api/guild-role/config') {
+        const { account, session } = scoped_(parsed);
+        const payload = jsonBody();
+        needConfirm(payload);
+        const settings = normalizeGuildRoleSettings(payload.settings, session.guildRoleSettings.settings);
+        const snapshot = session.guildRoleBot.snapshot();
+        const listsChanged = JSON.stringify(settings.allowedMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.allowedMemberIds)
+          || JSON.stringify(settings.protectedMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.protectedMemberIds)
+          || JSON.stringify(settings.permanentViceMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.permanentViceMemberIds);
+        const transferChanged = settings.transferTargetId !== session.guildRoleSettings.settings.transferTargetId
+          || settings.transferAfterRestore !== session.guildRoleSettings.settings.transferAfterRestore;
+        if (snapshot.baseline && !settings.enabled) throw new Error('还有临时职位或原始快照，请先立即恢复全部职位再关闭机器人');
+        if (snapshot.baseline && (JSON.stringify(settings.protectedMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.protectedMemberIds)
+          || JSON.stringify(settings.permanentViceMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.permanentViceMemberIds))) {
+          throw new Error('临时职位生效期间不能修改精英优先或永久副盟名单，请先恢复全部职位');
+        }
+        if (settings.enabled || listsChanged || transferChanged) {
+          const roster = await progressionJob(session, account, `${route}:validate`, null,
+            client => readGuildRoleMembers(client, session.player), { read: true });
+          session.guildRoleCanManage = roster.canManage;
+          validateGuildRolePreconfiguration(roster, settings);
+        }
+        session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR, settings, { revision: payload.revision });
+        session.guildRoleBot.configure(session.guildRoleSettings.settings);
+        emit(session, 'info', `联盟职位机器人配置已保存，当前${settings.enabled ? '启用' : '暂停'}`);
+        json({ revision: session.guildRoleSettings.revision, savedAt: session.guildRoleSettings.savedAt,
+          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot() });
+        return;
+      }
+      if (route === 'POST /api/guild-role/restore') {
+        const { account, session } = scoped_(parsed);
+        needConfirm(jsonBody());
+        await ensureConnected(session, account);
+        const result = await session.guildRoleBot.restoreNow();
+        json({ ...result, status: session.guildRoleBot.snapshot() });
+        return;
+      }
+      if (route === 'POST /api/guild-role/transfer-president') {
+        const { account, session } = scoped_(parsed);
+        const payload = jsonBody();
+        needConfirm(payload);
+        const snapshot = session.guildRoleBot.snapshot();
+        if (snapshot.baseline || snapshot.queue.length || snapshot.leases.length) throw new Error('请先恢复全部职位，确认队列和临时副盟主均为空');
+        if (session.guildRoleSettings.settings.enabled) throw new Error('请先关闭联盟职位机器人并保存配置，再转让盟主');
+        const key = JSON.stringify([route, payload.targetId, payload.expectedNickname]);
+        const result = await progressionJob(session, account, key, '转让联盟盟主', (client, enabled) =>
+          transferGuildPresident(client, session.player, { targetId: payload.targetId, expectedNickname: payload.expectedNickname, enabled }));
+        emit(session, 'warn', `联盟盟主已转让给 ${result.nickname}`);
+        json(result);
         return;
       }
       if (route === 'GET /api/guild/tech' || route === 'GET /api/trials' || route === 'GET /api/equipment' || route === 'GET /api/guild' || route === 'GET /api/pirates/hunt' || route === 'GET /api/fleets/formation') {
@@ -3541,8 +3666,6 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     },
     close: async () => {
       closing = true;
-      clearAlipayRoles();
-      await alipayLogin.close();
       for (const client of phonePreviewClients) client.stop();
       phonePreviewClients.clear();
       pendingPhoneLogins.clear();

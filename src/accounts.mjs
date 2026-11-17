@@ -164,15 +164,11 @@ function mask(value) {
 
 export function describeAccount(account, { active = false } = {}) {
   const params = account.login?.eworldParams ?? {};
+  const title = account.label || account.lastSeen?.nickname || (account.source === 'alipay'
+    ? `支付宝账号 ${String(params.openId ?? '').slice(-6)}` : `账号 ${account.id.slice(0, 6)}`);
   const lastSeen = account.lastSeen
     ? { ...account.lastSeen, worldName: worldName(account.lastSeen.worldId) }
     : null;
-  let title = account.label || lastSeen?.nickname || (account.source === 'alipay'
-    ? `支付宝账号 ${String(params.openId ?? '').slice(-6)}` : `账号 ${account.id.slice(0, 6)}`);
-  if (account.source === 'alipay' && lastSeen?.nickname) {
-    const remark = account.label && account.label !== lastSeen.nickname ? account.label : null;
-    title = [remark, lastSeen.nickname, lastSeen.worldName].filter(Boolean).join(' · ');
-  }
   return {
     id: account.id,
     title,
