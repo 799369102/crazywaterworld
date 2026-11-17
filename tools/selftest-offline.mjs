@@ -40,6 +40,7 @@ const cases = [
   ['selftest-resource-updater.mjs'],
   ['selftest-trace-log.mjs'],
   ['selftest-console-log.mjs'],
+  ['selftest-account-status-ui.mjs'],
   ['selftest-console-output.mjs'],
   ['selftest-platform-recovery.mjs'],
   ['selftest-capture-recovery-http.mjs'],

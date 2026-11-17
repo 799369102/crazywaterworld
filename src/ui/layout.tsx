@@ -22,9 +22,9 @@ export function chrome() {
     <div className="headline">
       <div className="mast"><span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span></div>
       <div className="connection">
-        <Badge id="busy" variant="outline" className="status-pill" data-state="off" role="status">未连接</Badge>
+        <span id="busy" className="sr-only" role="status" aria-live="polite" aria-atomic="true">未连接</span>
         <label className="account-label" htmlFor="account">当前账号</label>
-        <NativeSelect id="account" title="选择账号" />
+        <NativeSelect id="account" title="选择账号并查看状态" />
         <Button id="connect" size="sm">连接</Button><Button id="disconnect" size="sm" variant="outline">断开</Button>
         <Button id="account-pause" size="sm" variant="outline" title="暂停后断开游戏连接，方便自行上号">暂停托管</Button>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>
