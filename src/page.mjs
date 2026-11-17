@@ -8,15 +8,17 @@ const progressionScript = readFileSync(new URL('./ui/progression.js', import.met
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
-const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),'utf8');
-const rankingScript=readFileSync(new URL('./activity-rankings-ui.js',import.meta.url),'utf8');
-const activityStatisticsScript=readFileSync(new URL('./activity-statistics-ui.js',import.meta.url),'utf8');
-const inventoryScript=readFileSync(new URL('./inventory-ui.js',import.meta.url),'utf8');
+const giftCodeScript = readFileSync(new URL('./gift-codes-ui.js', import.meta.url), 'utf8');
+const rankingScript = readFileSync(new URL('./activity-rankings-ui.js', import.meta.url), 'utf8');
+const activityStatisticsScript = readFileSync(new URL('./activity-statistics-ui.js', import.meta.url), 'utf8');
+const inventoryScript = readFileSync(new URL('./inventory-ui.js', import.meta.url), 'utf8');
 const productionPlanningScript = readFileSync(new URL('./production-planning-ui.js', import.meta.url), 'utf8');
-const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
-import {mapMotionPosition} from './world-map-geometry.mjs';
+const worldMapScript = readFileSync(new URL('./world-map-ui.js', import.meta.url), 'utf8');
+import { mapMotionPosition } from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
 const alipayLoginScript = readFileSync(new URL('./alipay-login-ui.js', import.meta.url), 'utf8');
+const accountAddScript = readFileSync(new URL('./account-add-ui.js', import.meta.url), 'utf8');
+const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', import.meta.url), 'utf8');
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
 const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
 const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
@@ -467,8 +469,103 @@ function paintConnection() {
 }
 let snapshot = { connected: false, state: 'IDLE', busy: null, looping: false };
 const disconnected = new Set();
+const connectingAccounts = new Set();
+let accountStatusRevision = 0;
+let accountStatusPending = null;
+let accountsLoading = 0;
+let accountLoadVersion = 0;
+let accountSelectionVersion = 0;
 
-let accountDetailsOwner=null,credentialVersion=0;
+function connectionStatus(status = {}) {
+  status = status ?? {};
+  if (status.syncingProduction) return '正在同步生产状态';
+  if (status.paused) return '已暂停 · 可自行上号';
+  if (status.reconnecting) {
+    if (status.loginRecovery?.status === 'connecting') return '异地登录 · 正在自动重连';
+    const nextAttemptAt = status.loginRecovery?.nextAttemptAt;
+    if (!Number.isFinite(nextAttemptAt)) return '异地登录 · 等待重连';
+    const seconds = Math.max(0, Math.ceil((nextAttemptAt - Date.now()) / 1000));
+    return '异地登录 · ' + seconds + ' 秒后重试';
+  }
+  if (status.loginBlocked) return '异地登录 · 等待恢复托管';
+  if (status.connected) return '已连接';
+  return status.state === 'CONNECTING' ? '连接中…' : '未连接';
+}
+
+function renderAccountOptions() {
+  const box = $('account');
+  const choices = accounts.length ? accounts.map(account => {
+    const status = account.id === current ? snapshot : account.status;
+    const text = connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status);
+    return [account.id, '[' + text + '] ' + account.title];
+  }) : [['', '没有账号']];
+  if (box.options.length !== choices.length || choices.some(([id], index) => box.options[index]?.value !== id)) {
+    box.replaceChildren(...choices.map(([id, text]) => new Option(text, id)));
+  } else {
+    choices.forEach(([, text], index) => {
+      if (box.options[index].text !== text) box.options[index].text = text;
+    });
+  }
+  box.disabled = !accounts.length;
+  if (box.value !== (current || '')) box.value = current || '';
+}
+
+function setBusy(text) {
+  const announcement = current ? text : '没有账号';
+  if ($('busy').textContent !== announcement) $('busy').textContent = announcement;
+  const account = accounts.find(row => row.id === current);
+  const option = Array.from($('account').options).find(row => row.value === current);
+  if (account && option) {
+    const label = '[' + text + '] ' + account.title;
+    if (option.text !== label) option.text = label;
+  }
+  $('account').title = option?.text || '选择账号并查看状态';
+  if (typeof renderAccountPicker === 'function') renderAccountPicker(text);
+}
+
+function paintConnection() {
+  const account = accounts.find(row => row.id === current);
+  if (account) account.status = snapshot;
+  renderAccountOptions();
+  setBusy(connectingAccounts.has(current) ? '连接中…' : connectionStatus(snapshot));
+}
+
+function setAccountStatus(account, status) {
+  accountStatusRevision++;
+  const row = accounts.find(item => item.id === account);
+  if (row) row.status = status;
+  if (account === current) snapshot = status;
+  paintConnection();
+}
+
+function refreshAccountStatuses() {
+  if (document.hidden || !accounts.length || accountsLoading || accountStatusPending) return accountStatusPending;
+  const revision = accountStatusRevision;
+  accountStatusPending = (async () => {
+    try {
+      const data = await call('/api/accounts');
+      if (revision !== accountStatusRevision) return;
+      accountStatusRevision++;
+      for (const row of accounts) {
+        const updated = data.accounts.find(account => account.id === row.id);
+        if (updated) {
+          row.status = updated.status ?? {};
+          if (Object.hasOwn(updated, 'lastSeen')) row.lastSeen = updated.lastSeen;
+          if (Object.hasOwn(updated, 'label')) row.label = updated.label;
+        }
+      }
+      snapshot = accounts.find(account => account.id === current)?.status ?? {};
+      renderAccountSelect();
+    } catch {
+      /* call 已记录错误，下次刷新继续读取。 */
+    } finally {
+      accountStatusPending = null;
+    }
+  })();
+  return accountStatusPending;
+}
+
+let accountDetailsOwner=null;
 function renderAccountSelect() {
   appointmentsAccountChanged();
   if (dailyAccount !== current || snapshot.paused || disconnected.has(current)) {
@@ -483,11 +580,11 @@ function renderAccountSelect() {
   }
   box.disabled=!accounts.length;box.value=current||'';
   if(accountDetailsOwner!==current){
-    accountDetailsOwner=current;credentialVersion++;
-    clear($('cred'));clear($('worlds'));$('worlds-hint').textContent='';$('world-input').value='';
+    accountSelectionVersion++;
+    accountDetailsOwner=current;
+    clear($('worlds'));$('worlds-hint').textContent='';$('world-input').value='';
     $('who').textContent=current?'等待连接':'未选择账号';$('res').textContent='';
-    $('cred-show').disabled=!current;
-    renderAccounts();
+    if ($('account-info-dialog').open) $('account-info-dialog').close();
   }
   if(activityStatsOwner!==null&&activityStatsOwner!==current)resetActivityStatistics();
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
@@ -497,8 +594,11 @@ function renderAccountSelect() {
   $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
   $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
   paintConnection();
-  $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || !accounts.length;
-  $('disconnect').disabled = !snapshot.connected && !snapshot.reconnecting;
+  $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
+  $('connect').hidden = !current || snapshot.connected || snapshot.paused || snapshot.reconnecting || snapshot.loginBlocked;
+  $('account-info-refresh').disabled = !current || snapshot.paused || snapshot.reconnecting || connectingAccounts.has(current);
+  $('account-info-refresh').textContent = snapshot.connected ? '刷新资料' : '连接并读取';
+  if (!$('tab-account').classList.contains('hidden')) renderAccounts();
 }
 
 async function loadAccounts(reload) {
@@ -520,6 +620,7 @@ async function loadAccounts(reload) {
 }
 
 function selectLoadedAccount(next) {
+  accountSelectionVersion++;
   current = next;
   if ($('guild-role-frame').dataset.loaded === '1') loadGuildRoleFrame(true);
   giftAccountChanged();
@@ -537,12 +638,14 @@ function selectLoadedAccount(next) {
 }
 
 $('account').onchange = async () => {
+  const version = ++accountSelectionVersion;
   const next = $('account').value;
-  if (!await configMayChangeAccount(next)) { $('account').value = current || ''; return; }
+  const allowed = await configMayChangeAccount(next);
+  if (version !== accountSelectionVersion) return;
+  if (!allowed) { $('account').value = current || ''; return; }
   selectLoadedAccount(next);
-  await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id: current }) });
+  await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id: next }) });
 };
-
 $('account-pause').onclick = async () => {
   const account = current;
   $('account-pause').disabled = true;
@@ -581,20 +684,6 @@ $('connect').onclick = async () => {
     reportError(error);
   }
 };
-$('disconnect').onclick = async () => {
-  const account = current;
-  disconnected.add(account);
-  refreshProgression();
-  refreshManualWorld();
-  await call('/api/disconnect', { method: 'POST' });
-  if (account !== current) return;
-  snapshot.connected = false;
-  snapshot.reconnecting = false;
-  snapshot.syncingProduction = false;
-  paintConnection();
-  renderAccountSelect();
-};
-
 // ---- 总览 ------------------------------------------------------------------
 function renderWho(view) {
   const box = clear($('who'));
@@ -607,7 +696,7 @@ function renderWho(view) {
     ['等级', role.level == null ? '-' : String(role.level)],
     ['战力', fmt(role.power)],
     ['区服', role.worldId == null ? '-' : (role.worldName ? role.worldName + '（' + role.worldId + '）' : String(role.worldId))],
-    ['状态', status.connected ? '已连接' : '未连接'],
+    ['状态', connectionStatus(status)],
   ];
   for (const [k, v] of items) {
     const cellBox = el('div', 'item');
@@ -636,7 +725,7 @@ function renderOverview(data) {
 
 let overviewPending = false;
 async function refreshOverview() {
-  if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&$('tab-account').classList.contains('hidden'))) return;
+  if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&(!$('account-info-dialog').open||!snapshot.connected))) return;
   const account = current;
   overviewPending = account;
   if (!snapshot.connected) setBusy('连接中…', 'busy');
@@ -1510,96 +1599,123 @@ async function exportAccounts(id) {
   } catch (error) { reportError(error); }
 }
 $('export-accounts').onclick = () => exportAccounts();
-async function renderAccounts() {
-  $('export-accounts').disabled = !accounts.length;
-  const signature=JSON.stringify([current,accounts.map(a=>[a.id,a.title,a.lastSeen])]);
-  if($('accounts').cardSnapshot===signature)return;
-  $('accounts').cardSnapshot=signature;
-  const details=$('account-details');$('account-detail-home').append(details);
-  const box = clear($('accounts'));
-  if (!accounts.length) {
-    box.appendChild(el('div', 'dim', '还没有账号。请按角色所属渠道，使用下方的支付宝扫码、APP 登录、电脑微信或电脑抖音入口添加。'));
-    return;
-  }
-  for (const account of accounts) {
-    const card = el('div', 'acct' + (account.id === current ? ' on' : ''));
-    const top = el('div', 'top');
-    top.appendChild(el('span', 'title', account.title));
-    top.appendChild(el('span', 'id', account.id.slice(0, 10) + '…'));
-    if (account.id === current) top.appendChild(chip('done', '当前'));
-    const seen = account.lastSeen;
-    const seenWorld = seen && (seen.worldName || seen.worldId);
-    const seenInfo = seen
-      ? '上次 ' + (seen.nickname || '?') + ' lv' + (seen.level ?? '?') + ' 战力' + fmt(seen.power) + (seenWorld ? ' 区服' + seenWorld : '') + ' @' + when(seen.at)
-      : '还没连过';
-    top.appendChild(el('span', 'id', seenInfo));
-    const use = smallButton(account.id === current ? '已选中' : '切换到它');
-    use.disabled = account.id === current;
-    use.onclick = async () => {
-      if (!await configMayChangeAccount(account.id)) return;
-      current = account.id;
-      snapshot=account.status??{};renderAccountSelect();
-      giftAccountChanged();
-      configAccountChanged();
-      await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id: account.id }) });
-      await loadAccounts(true);
-      renderAccounts();
-    };
-    const rename = smallButton('改备注');
-    rename.onclick = async () => {
-      const label = await accountDialog('修改账号备注', account.title, account.title);
-      if (label == null) return;
-      await call('/api/accounts/label', { method: 'POST', body: JSON.stringify({ confirm: true, id: account.id, label }) });
-      await loadAccounts(false);
-      renderAccounts();
-    };
-    const drop = smallButton('删除', true);
-    drop.onclick = async () => {
-      if (await accountDialog('删除本机账号', '删除「' + account.title + '」保存在本机的凭证？') === null) return;
-      await call('/api/accounts/remove', { method: 'POST', body: JSON.stringify({ confirm: true, id: account.id }) });
-      await loadAccounts(true);
-      renderAccounts();
-    };
-    const download = smallButton('导出');
-    download.onclick = () => exportAccounts(account.id);
-    top.append(use, rename, download, drop);
-    card.appendChild(top);
-    if(account.id===current)card.append(details);
-    box.appendChild(card);
-  }
+function accountChannel(source) {
+  return { alipay: '支付宝', phone: '益世界 APP', 'douyin-mitm': '抖音小游戏', mitm: '微信小游戏', wechat: '微信小游戏' }[source] || '已导入账号';
 }
 
-$('cred-show').onclick = async () => {
-  const owner=current,version=++credentialVersion;
-  $('cred-show').disabled = true;
-  try {
-    const data = await call('/api/accounts/credential?reveal=1');
-    if(owner!==current||version!==credentialVersion)return;
-    const box = clear($('cred'));
-    const rows = [
-      ['账号', data.title + '（' + data.id + '）'],
-      ['openId', data.raw.openId || '-'],
-      ['token', data.raw.token || '-'],
-      ['sign', data.raw.sign || '-'],
-      ['timestamp', data.raw.timestamp == null ? '-' : String(num(data.raw.timestamp))],
-      ['网关', data.url],
-      ['抓于', when(data.capturedAt)],
-    ];
-    const kv = el('div', 'kv');
-    for (const [k, v] of rows) {
-      kv.appendChild(el('div', 'k', k));
-      kv.appendChild(el('div', 'v', v));
+async function useAccountCard(id) {
+  const version = ++accountSelectionVersion;
+  if (id === current) return true;
+  if (!await configMayChangeAccount(id) || version !== accountSelectionVersion) return false;
+  await call('/api/accounts/active', { method: 'POST', body: JSON.stringify({ confirm: true, id }) });
+  if (version !== accountSelectionVersion) return false;
+  selectLoadedAccount(id);
+  renderAccounts();
+  return true;
+}
+
+function createAccountCard(id) {
+  const card = component('ui-account-card');
+  card.accountId = id;
+  const action = name => card.querySelector('[data-account-action="' + name + '"]');
+  action('select').onclick = () => useAccountCard(id);
+  action('details').onclick = async () => {
+    if (!await useAccountCard(id)) return;
+    const account = accounts.find(row => row.id === id);
+    if (!account || current !== id) return;
+    $('account-info-title').textContent = (account.label || account.lastSeen?.nickname || account.title) + ' · 账号详情';
+    renderWho({ account, player: account.lastSeen, status: snapshot });
+    if (!snapshot.connected) $('res').textContent = '连接后读取资源';
+    $('account-info-dialog').showModal();
+    $('account-info-close').focus();
+    if (snapshot.connected) void refreshOverview();
+  };
+  action('rename').onclick = async () => {
+    card.querySelector('details').open = false;
+    const account = accounts.find(row => row.id === id);
+    if (!account) return;
+    const label = await accountDialog('修改账号备注', account.lastSeen?.nickname || account.title, account.label ?? '');
+    if (label == null) return;
+    await call('/api/accounts/label', { method: 'POST', body: JSON.stringify({ confirm: true, id, label }) });
+    await loadAccounts(false);
+    renderAccounts();
+  };
+  action('export').onclick = () => {
+    card.querySelector('details').open = false;
+    return exportAccounts(id);
+  };
+  action('remove').onclick = async () => {
+    card.querySelector('details').open = false;
+    const account = accounts.find(row => row.id === id);
+    if (!account || await accountDialog('删除本机账号', '删除「' + account.title + '」保存在本机的账号？') === null) return;
+    await call('/api/accounts/remove', { method: 'POST', body: JSON.stringify({ confirm: true, id }) });
+    await loadAccounts(true);
+    renderAccounts();
+  };
+  return card;
+}
+
+function renderAccounts() {
+  $('export-accounts').disabled = !accounts.length;
+  $('account-count').textContent = accounts.length + ' 个账号';
+  const box = $('accounts');
+  if (!accounts.length) {
+    if (!box.querySelector('.account-empty')) {
+      clear(box);
+      const empty = el('div', 'account-empty');
+      empty.append(el('h3', null, '添加第一个游戏账号'), el('p', 'dim', '点击「添加账号」，选择游戏渠道后按步骤登录。'));
+      box.appendChild(empty);
     }
-    box.appendChild(kv);
-    box.appendChild(el('div', 'dim', '登录帧原始数据（' + (data.loginFrameHex || '').length + ' 个十六进制字符）'));
-    box.appendChild(el('pre', null, data.loginFrameHex || '（没有保存）'));
-  } catch (error) {
-    $('hint').textContent = '';
-    reportError(error);
+    return;
   }
-  if(owner===current&&version===credentialVersion)$('cred-show').disabled = false;
+  const cards = new Map(Array.from(box.children).map(card => [card.accountId, card]));
+  for (const card of Array.from(box.children)) {
+    if (!accounts.some(account => account.id === card.accountId)) card.remove();
+  }
+  accounts.forEach((account, index) => {
+    const card = cards.get(account.id) || createAccountCard(account.id);
+    const status = account.id === current ? snapshot : account.status ?? {};
+    const seen = account.lastSeen;
+    const fields = {
+      title: account.label || seen?.nickname || account.title,
+      channel: accountChannel(account.source),
+      status: connectingAccounts.has(account.id) ? '连接中…' : connectionStatus(status),
+      role: seen?.nickname || '待连接读取',
+      world: seen?.worldName || '待连接读取',
+      level: seen?.level == null ? '—' : String(seen.level),
+      power: seen?.power == null ? '—' : fmt(seen.power),
+      seen: seen?.at ? '更新于 ' + when(seen.at) : '连接后更新角色资料',
+    };
+    for (const [name, value] of Object.entries(fields)) {
+      const field = card.querySelector('[data-account-field="' + name + '"]');
+      if (field.textContent !== value) field.textContent = value;
+    }
+    card.querySelector('[data-account-field="role"]').parentNode.hidden = fields.title === fields.role;
+    card.classList.toggle('on', account.id === current);
+    card.querySelector('[data-account-field="current"]').hidden = account.id !== current;
+    const badge = card.querySelector('[data-account-field="status"]');
+    badge.classList.remove('done', 'waiting', 'blocked');
+    badge.classList.add(status.paused || status.loginBlocked || status.syncingProduction || connectingAccounts.has(account.id)
+      ? 'waiting' : status.connected ? 'done' : 'blocked');
+    const select = card.querySelector('[data-account-action="select"]');
+    select.disabled = account.id === current;
+    select.textContent = account.id === current ? '当前账号' : '切换账号';
+    if (box.children[index] !== card) box.insertBefore(card, box.children[index] || null);
+  });
+}
+
+$('account-info-close').onclick = () => $('account-info-dialog').close();
+$('account-info-refresh').onclick = async () => {
+  if ($('account-info-refresh').disabled) return;
+  const owner = current;
+  $('account-info-refresh').disabled = true;
+  try {
+    if (!snapshot.connected) await $('connect').onclick();
+    if (owner === current && snapshot.connected) await refreshOverview();
+  } finally {
+    renderAccountSelect();
+  }
 };
-$('cred-hide').onclick=()=>{credentialVersion++;clear($('cred'));$('cred-show').disabled=!current;};
 
 async function renderWorlds() {
   const owner=current;
@@ -1661,24 +1777,45 @@ $('enter-world').onclick = () => {
 
 // ---- 添加账号：从电脑微信采集登录 -----------------------------------------
 let capturePoll = null;
+let captureView = null;
+let captureOwner = null;
+let captureFlowVersion = 0;
+let captureActionBusy = false;
+let captureConfirmation = false;
 
 function renderCapture(state) {
+  captureView = state;
   const hint = $('cap-hint');
-  const previousQr=$('cap-box').querySelector('img'),previousLog=$('cap-box').querySelector('pre');
-  const logY=previousLog?.scrollTop??0,logX=previousLog?.scrollLeft??0;
+  const previousQr = $('cap-box').querySelector('img');
   const box = clear($('cap-box'));
   const recovery = state.recovery;
   const cleanupPending = state.phase === 'error' || recovery?.pending;
-  $('cap-start').disabled = state.running || cleanupPending;
-  $('cap-douyin').disabled = state.running || cleanupPending;
-  $('cap-stop').disabled = !state.running && state.phase !== 'error';
+  $('cap-start').disabled = captureActionBusy || state.running || cleanupPending;
+  $('cap-douyin').disabled = captureActionBusy || state.running || cleanupPending;
+  $('cap-stop').disabled = captureActionBusy || (!state.running && state.phase !== 'error');
+  $('cap-stop').hidden = !state.running && state.phase !== 'error';
   $('cap-recover').hidden = !recovery?.pending;
-  $('cap-recover').disabled = state.running || !recovery?.recoverable;
-  hint.textContent = state.error ? '采集已停止，请查看运行日志' : (state.running ? '抓包中：' + (state.phase === 'waiting' ? '等待电脑游戏登录' : state.phase) : (state.accountId ? '凭证已保存，登录验证结果请查看日志' : ''));
+  $('cap-recover').disabled = captureActionBusy || state.running || !recovery?.recoverable;
+  const ownResult = captureOwner?.startedAt && captureOwner.startedAt === state.startedAt;
+  const phase = cleanupPending || state.error ? 'error' : state.running ? state.phase : ownResult && state.accountId ? 'saved' : 'entry';
+  const messages = { starting: '正在准备登录采集…', ca: '请完成 Windows 证书安装提示。', listening: '正在准备本机登录通道…', proxy: '正在准备本机登录通道…', waiting: '请在电脑客户端中重新打开游戏。', captured: '已读取账号，正在完成验证和清理…', stopping: '正在恢复本机代理和证书设置…', saved: '账号已添加。可关闭此窗口，在账号卡片中查看角色和运行状态。', entry: '' };
+  hint.textContent = state.error ? cleanupPending ? '采集清理未完成，请点击「停止读取」重试。' : '本次读取失败，请重新开始或查看运行日志。' : messages[phase] || '';
   hint.className = state.error ? 'bad' : 'warn';
   if (recovery?.pending) {
-    hint.textContent = recovery.error || recovery.message || '检测到上次采集残留，可恢复原代理和本次安装的证书';
+    hint.textContent = recovery.error ? '本机设置尚未恢复，请重试恢复上次采集残留。' : '检测到上次采集残留，请先恢复原代理和本次安装的证书。';
     hint.className = recovery.error ? 'bad' : 'warn';
+  }
+  const notice = $('account-add-notice');
+  notice.hidden = !state.running && !cleanupPending;
+  notice.textContent = notice.hidden ? '' : (state.platform === 'douyin' ? '抖音' : '微信') + '账号添加尚未完成，请点击「添加账号」并选择对应渠道继续处理。';
+
+  if (!state.running && !cleanupPending && phase !== 'saved') {
+    const clientName = accountAddChannel() === 'douyin' ? '抖音' : '微信';
+    const steps = el('ol', 'steps');
+    for (const text of ['先登录电脑版' + clientName + '。', '点击「开始读取」，按提示完成本机登录通道的准备。', '从电脑' + clientName + '重新打开《疯狂水世界》，等待读取角色并自动保存。']) {
+      steps.appendChild(el('li', null, text));
+    }
+    box.appendChild(steps);
   }
 
   if (state.running) {
@@ -1703,37 +1840,31 @@ function renderCapture(state) {
     qr.appendChild(side);
     box.appendChild(qr);
 
-    const status = el('div', 'kv');
-    const rows = [
-      ['系统代理', (state.proxyOn ? '已打开 -> ' + (state.proxy?.ProxyServer ?? '') : '未打开') + '　原值 ' + (state.originalProxy?.ProxyEnable ?? '无') + ' / ' + (state.originalProxy?.ProxyServer ?? '无')],
-      ['本地证书', state.caInstalled ? (state.caAddedByCapture ? '本次安装，结束后移除' : '原有证书，结束后保留') : '未安装'],
-      ['抓包代理', state.port ? '127.0.0.1:' + state.port : '-'],
-    ];
-    for (const [k, v] of rows) {
-      status.appendChild(el('div', 'k', k));
-      status.appendChild(el('div', 'v', v));
-    }
-    box.appendChild(status);
   }
-
-  if (state.log && state.log.length) {
-    box.appendChild(el('h2', null, '抓包记录'));
-    const pre=previousLog||el('pre');const lines=state.log.join(String.fromCharCode(10));
-    if(pre.textContent!==lines)pre.textContent=lines;box.appendChild(pre);pre.scrollTop=logY;pre.scrollLeft=logX;
+  if (typeof accountAddChanged === 'function') {
+    const selectedChannel = accountAddChannel();
+    const channel = ['wechat', 'douyin'].includes(selectedChannel) ? selectedChannel : state.platform === 'douyin' ? 'douyin' : 'wechat';
+    accountAddChanged(channel, phase, { busy: captureActionBusy });
   }
 }
 
 async function pollCapture() {
+  const version = captureFlowVersion;
   try {
     const state = await call('/api/capture');
+    if (version !== captureFlowVersion) return;
     renderCapture(state);
+    if (state.running && !capturePoll && accountAddChannel() === state.platform) {
+      capturePoll = setInterval(pollCapture, 1500);
+    }
     if (!state.running && capturePoll) {
       clearInterval(capturePoll);
       capturePoll = null;
-      await loadAccounts(true);
+      await loadAccounts(false);
       renderAccounts();
     }
   } catch (error) {
+    if (version !== captureFlowVersion) return;
     $('cap-hint').textContent = '';
     reportError(error);
   }
@@ -1743,56 +1874,131 @@ async function pollCapture() {
 $('cap-start').onclick = () => beginCapture('wechat');
 $('cap-douyin').onclick = () => beginCapture('douyin');
 $('cap-recover').onclick = async () => {
-  $('cap-recover').disabled = true;
+  if (captureActionBusy) return;
+  captureActionBusy = true;
+  if (captureView) renderCapture(captureView);
   try {
     renderCapture(await call('/api/capture/recover', { method: 'POST', body: JSON.stringify({ confirm: true }) }));
   } catch (error) {
     reportError(error);
     await pollCapture();
+  } finally {
+    captureActionBusy = false;
+    if (captureView) renderCapture(captureView);
   }
 };
 async function beginCapture(platform) {
+  if (captureActionBusy || accountAddChannel() !== platform) return;
+  const version = captureFlowVersion;
+  captureActionBusy = true;
+  accountAddChanged(platform, 'starting', { busy: true });
   let state;
   try {
     state = await call('/api/capture');
+    if (version !== captureFlowVersion || accountAddChannel() !== platform) return;
+    renderCapture(state);
   } catch (error) {
     $('cap-hint').textContent = '';
     reportError(error);
     return;
+  } finally {
+    captureActionBusy = false;
+    if (captureView) renderCapture(captureView);
+    accountAddChanged(platform, 'entry', { busy: false });
   }
+  if (state.running || state.phase === 'error' || state.recovery?.pending) return;
   const body = [
     el('div', null, '抓包只做两处「仅当前用户」的改动，抓到账号后立刻自动还原：'),
     el('div', null, '1. 若缺少证书，Windows 会打开导入向导，目标已选定为当前用户的“受信任的根证书颁发机构”。点击“完成”；若出现安全警告，核对 CrazyWaterWorld Local Test CA 后选择“是”。'),
-    el('div', null, '2. 把当前用户的系统代理指向 127.0.0.1:' + state.port + '（原来指向 ' + (state.proxy?.ProxyServer ?? '无') + '，结束后写回）'),
-    el('div', null, '使用系统代理的其他程序也会临时经过本机代理；仅解密本游戏网关，结束后恢复原设置。随时可点「停止抓包」。'),
+    el('div', null, '2. 临时使用本机代理读取本游戏的登录信息，结束后恢复原代理设置。'),
+    el('div', null, '使用系统代理的其他程序也会临时经过本机代理，工具仅解密本游戏网关，结束后恢复原设置。随时可点「停止读取」。'),
     el('div', null, '采集就绪后，请只在电脑' + (platform === 'douyin' ? '抖音' : '微信') + '里重新打开《疯狂水世界》。'),
     el('div', null, '捕获后会尝试连接游戏验证角色，可能让正在运行的游戏掉线一次。'),
   ];
+  captureConfirmation = true;
   openConfirm('开始抓包（将修改当前用户的系统设置）', body, async () => {
-    $('cap-hint').textContent = '请在 Windows 证书导入向导中完成导入，返回后会自动检查根证书库…';
-    const next = await call('/api/capture/start', { method: 'POST', body: JSON.stringify({ confirm: true, platform }) });
-    renderCapture(next);
-    if (capturePoll) clearInterval(capturePoll);
-    capturePoll = setInterval(pollCapture, 1500);
+    captureConfirmation = false;
+    if (version !== captureFlowVersion || accountAddChannel() !== platform || captureActionBusy) return;
+    captureActionBusy = true;
+    captureOwner = { platform, startedAt: null, previousStartedAt: state.startedAt };
+    accountAddChanged(platform, 'starting', { busy: true });
+    try {
+      const next = await call('/api/capture/start', { method: 'POST', body: JSON.stringify({ confirm: true, platform }) });
+      captureOwner.startedAt = next.startedAt;
+      renderCapture(next);
+      if (capturePoll) clearInterval(capturePoll);
+      if (next.running) capturePoll = setInterval(pollCapture, 1500);
+      else { await loadAccounts(false); renderAccounts(); }
+    } catch (error) {
+      if (/已经在抓包/.test(error.message)) captureOwner = null;
+      await pollCapture();
+      throw error;
+    } finally {
+      captureActionBusy = false;
+      if (captureView) renderCapture(captureView);
+      else accountAddChanged(platform, 'error', { busy: false });
+    }
   });
 }
 
-$('cap-stop').onclick = async () => {
-  const state = await call('/api/capture/stop', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-  renderCapture(state);
-  if (capturePoll) {
+async function stopAccountCapture() {
+  if (captureActionBusy) return false;
+  captureActionBusy = true;
+  if (captureView) renderCapture(captureView);
+  try {
+    const state = await call('/api/capture/stop', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+    renderCapture(state);
+    if (state.running || state.phase === 'error' || state.recovery?.pending) throw new Error(state.error || '采集清理未完成，请重试停止。');
     clearInterval(capturePoll);
     capturePoll = null;
+    await loadAccounts(false);
+    renderAccounts();
+    return true;
+  } finally {
+    captureActionBusy = false;
+    if (captureView) renderCapture(captureView);
   }
-  await loadAccounts(true);
-  renderAccounts();
-};
+}
+$('cap-stop').onclick = stopAccountCapture;
+
+async function resetAccountAddCapture() {
+  if (captureActionBusy) return false;
+  captureActionBusy = true;
+  captureFlowVersion++;
+  clearInterval(capturePoll);
+  capturePoll = null;
+  if (captureConfirmation && $('modal').open) closeModal();
+  captureConfirmation = false;
+  try {
+    if (captureView) renderCapture(captureView);
+    if (captureOwner) {
+      const state = await call('/api/capture');
+      const ownRun = captureOwner.startedAt ? state.startedAt === captureOwner.startedAt
+        : state.platform === captureOwner.platform && state.startedAt !== captureOwner.previousStartedAt;
+      captureActionBusy = false;
+      if (ownRun && (state.running || state.phase === 'error')) await stopAccountCapture();
+    }
+    captureOwner = null;
+    clear($('cap-box'));
+    $('cap-hint').textContent = '';
+    return true;
+  } finally {
+    captureActionBusy = false;
+    if (captureView) renderCapture(captureView);
+  }
+}
 
 // ---- APP 账号登录 ---------------------------------------------------------
 ${phoneLoginScript}
 
 // ---- 支付宝扫码登录 --------------------------------------------------------
 ${alipayLoginScript}
+
+// ---- 添加账号引导 ----------------------------------------------------------
+${accountAddScript}
+
+// ---- 页头账号选择 ----------------------------------------------------------
+${accountPickerScript}
 
 // ---- 启动 ------------------------------------------------------------------
 ${progressionScript}
@@ -1924,9 +2130,7 @@ function activateConsolePage(button, resource = selectedResource) {
     if(isResource&&resource==='inventory')refreshManualWorld();
     if(isResource&&resource==='heroes')void appointmentsLoad(true);
     if (button.dataset.tab === 'account') {
-      refreshOverview();
       renderAccounts();
-      void refreshPhoneDevice();
       pollCapture();
     }
     if (button.dataset.tab === 'manual') refreshManualWorld();

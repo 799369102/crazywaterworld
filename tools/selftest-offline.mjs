@@ -40,6 +40,11 @@ const cases = [
   ['selftest-resource-updater.mjs'],
   ['selftest-trace-log.mjs'],
   ['selftest-console-log.mjs'],
+  ['selftest-account-status-ui.mjs'],
+  ['selftest-account-picker-ui.mjs'],
+  ['selftest-account-cards-ui.mjs'],
+  ['selftest-account-capture-ui.mjs'],
+  ['selftest-account-add-ui.mjs'],
   ['selftest-console-output.mjs'],
   ['selftest-platform-recovery.mjs'],
   ['selftest-capture-recovery-http.mjs'],
@@ -60,9 +65,11 @@ try {
     console.log(`离线测试 ${index + 1}/${cases.length} ${file}`);
     const result = spawnSync(process.execPath, [path.join(root, 'tools', file), ...args], {
       cwd: root, stdio: 'inherit', windowsHide: true, timeout: 120_000,
-      env: { ...process.env, CW_DATA_DIR: directory, CW_CONFIG_PACK: config,
+      env: {
+        ...process.env, CW_DATA_DIR: directory, CW_CONFIG_PACK: config,
         CW_RESOURCE_DIR: path.join(directory, 'resources'), CW_CA_DIR: path.join(directory, 'certificates'),
-        CW_PROTO_BUNDLE: path.join(directory, 'missing-game-protocol.js'), CW_RESOURCE_AUTO_UPDATE: '0' },
+        CW_PROTO_BUNDLE: path.join(directory, 'missing-game-protocol.js'), CW_RESOURCE_AUTO_UPDATE: '0'
+      },
     });
     if (result.error) throw result.error;
     assert.equal(result.status, 0, file + ' 离线验证失败');

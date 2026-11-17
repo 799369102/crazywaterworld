@@ -24,7 +24,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function fixture({ detailOwner = 'previous-account', savedChannel = null, storageBlocked = false } = {}) {
+function fixture({ detailOwner = 'previous-account', savedChannel = null, storageBlocked = false, wizard = false } = {}) {
   let now = fixedNow;
   let nextTimer = 0;
   const timers = new Map();
@@ -33,7 +33,7 @@ function fixture({ detailOwner = 'previous-account', savedChannel = null, storag
     calls: [], selections: [], loadCalls: [], renderCount: 0, allowed: true, focus: null,
     confirmation: null, mayChangeCalls: [], accounts: [{ id: 'previous-account', title: '当前账号' }],
     disconnected: new Set(), disconnectedAtSelection: [], detailOwner, detailsAtSelection: [],
-    preferences: new Map(), storageCalls: [],
+    preferences: new Map(), storageCalls: [], wizard, wizardEvents: [],
   };
   if (savedChannel !== null) env.preferences.set('phone-login-channel', savedChannel);
   env.storage = {
@@ -145,6 +145,7 @@ function fixture({ detailOwner = 'previous-account', savedChannel = null, storag
     const openConfirm = env.confirm, configMayChangeAccount = env.mayChange;
     const loadAccounts = env.loadAccounts, renderAccounts = env.render;
     const accounts = env.accounts, disconnected = env.disconnected;
+    const accountAddChanged = env.wizard ? (...args) => env.wizardEvents.push(args) : undefined;
     let snapshot = {};
     let accountDetailsOwner = env.detailOwner;
     function selectLoadedAccount(next) {
@@ -154,6 +155,7 @@ function fixture({ detailOwner = 'previous-account', savedChannel = null, storag
       snapshot = accounts.find(account => account.id === next)?.status ?? {};
     }
     ${script}
+    env.reset = resetPhoneLogin;
   `)(env);
 
   function descendants(element) {
@@ -788,6 +790,75 @@ await test('设备导入校验JSON并处理失败，成功后恢复登录操作'
   assert.match(f.node('phone-device-status').textContent, /Test Phone/);
   assert.equal(f.node('phone-device-details').open, false);
   assert.equal(f.node('phone-login').disabled, false);
+});
+
+await test('APP弹窗结束清理临时结果、敏感输入和密码可见状态', async () => {
+  const f = fixture({ wizard: true });
+  await f.login();
+  f.input('phone-number', '13800138000');
+  f.input('phone-password', 'leftover-password');
+  f.input('phone-code', '123456');
+  f.click('phone-password-toggle');
+  assert.equal(f.env.wizardEvents.at(-1)[1], 'selecting');
+  assert.equal(await f.env.reset(), true);
+  assert.deepEqual(f.calls('/cancel').at(-1).payload, { id: f.preview.id });
+  for (const id of ['phone-account', 'phone-password', 'phone-number', 'phone-code']) assert.equal(f.node(id).value, '');
+  assert.equal(f.node('phone-password').type, 'password');
+  assert.equal(f.node('phone-preview').hidden, true);
+  assert.equal(f.node('phone-result').textContent, '');
+  assert.equal(f.env.wizardEvents.at(-1)[1], 'entry');
+  assert.equal(f.env.wizardEvents.at(-1)[2].busy, false);
+});
+
+await test('APP清理失败保留待清理结果，返回修改失败也可重试', async () => {
+  for (const action of ['reset', 'back']) {
+    const f = fixture();
+    await f.login();
+    const respond = f.env.respond;
+    f.env.respond = (route, payload) => {
+      if (route.endsWith('/cancel')) throw new Error('模拟清理失败');
+      return respond(route, payload);
+    };
+    if (action === 'reset') await assert.rejects(f.env.reset(), /临时登录结果尚未清理/);
+    else assert.equal(await f.click('phone-back'), false);
+    assert.equal(f.node('phone-preview').hidden, false);
+    f.env.respond = respond;
+    assert.equal(await f.env.reset(), true);
+    assert.equal(f.calls('/cancel').length, 2);
+  }
+});
+
+await test('APP验证在途锁定结束操作，保存完成后发布完成步骤', async () => {
+  const f = fixture({ wizard: true });
+  const respond = f.env.respond;
+  const login = deferred();
+  f.env.respond = (route, payload) => route === prefix ? login.promise : respond(route, payload);
+  const pending = f.login();
+  assert.equal(await f.env.reset(), false);
+  assert.equal(f.env.wizardEvents.at(-1)[2].busy, true);
+  login.resolve(f.preview);
+  await pending;
+  f.chooseRole();
+  await f.click('phone-save');
+  const state = f.env.wizardEvents.at(-1);
+  assert.equal(state[1], 'saved');
+  assert.equal(state[2].busy, false);
+  assert.equal(state[2].account.id, 'saved-account');
+});
+
+await test('关闭后的短信确认回调失效，角色账号中的手机号被打码', async () => {
+  const f = fixture();
+  f.click('phone-sms-tab');
+  f.input('phone-number', '13800138000');
+  f.click('phone-send-code');
+  const confirm = f.env.confirmation.callback;
+  await f.env.reset();
+  await confirm();
+  assert.equal(f.calls('/send-code').length, 0);
+  f.preview.choices[0].userName = '13800138000';
+  await f.login();
+  assert.match(f.node('phone-result').textContent, /138\*\*\*\*8000/);
+  assert.doesNotMatch(f.node('phone-result').textContent, /13800138000/);
 });
 
 console.log(`selftest-phone-login-ui: ${passed} cases ok`);

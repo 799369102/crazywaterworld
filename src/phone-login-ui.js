@@ -2,6 +2,8 @@
 let phoneMode = 'password';
 let phoneBusy = false;
 let phonePending = null;
+let phoneSavedAccount = null;
+let phoneGeneration = 0;
 let phoneChoiceId = '';
 let phoneRoleInputs = [];
 let phoneExpiryTimer = null;
@@ -34,6 +36,13 @@ function setPhoneBusy(busy) {
   $('phone-roles-retry').disabled = busy || expired;
   $('phone-save').disabled = busy || expired || !selectedPhoneRole();
   updateSmsButton();
+  if (typeof accountAddChanged === 'function') {
+    accountAddChanged('phone', phoneSavedAccount ? 'saved' : phonePending ? 'selecting' : 'entry', { busy, account: phoneSavedAccount });
+  }
+}
+
+function phoneAccountName(value) {
+  return String(value || '').replace(/\b(1[3-9][0-9])[0-9]{4}([0-9]{4})\b/g, '$1****$2');
 }
 
 function selectedPhoneRole() {
@@ -207,7 +216,7 @@ function renderPhonePending(data) {
       if (choice.level != null) stats.push('等级 ' + choice.level);
       if (choice.power != null) stats.push('战力 ' + Number(choice.power).toLocaleString('zh-CN'));
       if (stats.length) info.appendChild(el('p', 'dim', stats.join(' · ')));
-      info.appendChild(el('p', 'dim', 'APP 账号 ' + (choice.userName || data.phone || '益世界账号')));
+      info.appendChild(el('p', 'dim', 'APP 账号 ' + phoneAccountName(choice.userName || data.phone || '益世界账号')));
       if (choice.roleWorldId && String(choice.roleWorldId) !== String(choice.worldId)) {
         info.appendChild(el('p', 'dim', '原区服 ' + (choice.worldName || choice.worldId) + '，合服后位于 ' + phoneRoleWorld(choice)));
       }
@@ -218,13 +227,13 @@ function renderPhonePending(data) {
     box.appendChild(list);
   }
   for (const account of data.emptyAccounts || []) {
-    box.appendChild(el('p', 'dim', (account.userName || '此 APP 账号') + ' 暂无已有角色，请核对游戏渠道或先在 APP 中确认角色。'));
+    box.appendChild(el('p', 'dim', phoneAccountName(account.userName || '此 APP 账号') + ' 暂无已有角色，请核对游戏渠道或先在 APP 中确认角色。'));
   }
   const failures = data.failures || [];
   if (failures.length) {
     const errors = el('div', 'phone-role-failures');
     for (const failure of failures) {
-      errors.appendChild(el('p', 'bad', (failure.userName || 'APP 账号') + ' 读取失败。' + failure.error));
+      errors.appendChild(el('p', 'bad', phoneAccountName(failure.userName || 'APP 账号') + ' 读取失败。' + failure.error));
     }
     if (failures.some(failure => !failure.retryable)) errors.appendChild(el('p', 'dim', '认证失败的账号需要返回重新登录。'));
     box.appendChild(errors);
@@ -308,8 +317,9 @@ $('phone-send-code').onclick = () => {
   if (phoneBusy || $('phone-send-code').disabled) return;
   const phone = $('phone-number').value.trim();
   if (!/^1[3-9][0-9]{9}$/.test(phone)) return phoneInvalid('phone-number', '请输入 APP 绑定的 11 位大陆手机号。');
+  const generation = phoneGeneration;
   openConfirm('发送短信验证码', [el('p', null, '将向 ' + phone + ' 发送 APP 登录验证码。')], async () => {
-    if (phoneBusy) return;
+    if (phoneBusy || generation !== phoneGeneration) return;
     setPhoneBusy(true);
     $('phone-send-code').textContent = '正在发送…';
     phoneHint('正在发送验证码…');
@@ -333,9 +343,22 @@ $('phone-send-code').onclick = () => {
 };
 
 async function resetPhoneEntry() {
-  if (phoneBusy) return;
+  if (phoneBusy) return false;
+  phoneGeneration++;
   const pending = phonePending;
+  if (pending) {
+    setPhoneBusy(true);
+    try {
+      await call('/api/accounts/phone-login/cancel', { method: 'POST', body: JSON.stringify({ id: pending.id }) });
+    } catch {
+      phoneHint('临时登录结果尚未清理，请重试返回。', true);
+      return false;
+    } finally {
+      setPhoneBusy(false);
+    }
+  }
   phonePending = null;
+  phoneSavedAccount = null;
   phoneChoiceId = '';
   phoneRoleInputs = [];
   clearTimeout(phoneExpiryTimer);
@@ -347,11 +370,33 @@ async function resetPhoneEntry() {
   phoneHint('');
   setPhoneBusy(false);
   $(phoneMode === 'password' ? 'phone-account' : 'phone-number').focus();
-  if (pending) {
-    try {
-      await call('/api/accounts/phone-login/cancel', { method: 'POST', body: JSON.stringify({ id: pending.id }) });
-    } catch { /* 未清理的预览由服务端到期回收。 */ }
+  return true;
+}
+
+async function resetPhoneLogin() {
+  if (phoneBusy) return false;
+  phoneGeneration++;
+  for (const id of ['phone-account', 'phone-password', 'phone-number', 'phone-code']) {
+    $(id).value = '';
+    $(id).removeAttribute('aria-invalid');
   }
+  concealPhonePassword();
+  clearInterval(smsTimer);
+  const pending = phonePending;
+  setPhoneBusy(true);
+  try {
+    if (pending) await call('/api/accounts/phone-login/cancel', { method: 'POST', body: JSON.stringify({ id: pending.id }) });
+    phonePending = null;
+  } catch {
+    throw new Error('APP 临时登录结果尚未清理，请重试关闭或返回。');
+  } finally {
+    setPhoneBusy(false);
+  }
+  await resetPhoneEntry();
+  $('phone-device-file').value = '';
+  $('phone-device-details').open = false;
+  $('phone-device-hint').textContent = '';
+  return true;
 }
 $('phone-back').onclick = resetPhoneEntry;
 $('phone-add-another').onclick = resetPhoneEntry;
@@ -375,6 +420,7 @@ $('phone-save').onclick = async () => {
     }
     const data = await call('/api/accounts/phone-login/save', { method: 'POST', body: JSON.stringify({ confirm: true, id: pending.id, choiceId: role.id }) });
     phonePending = null;
+    phoneSavedAccount = data.account;
     clearTimeout(phoneExpiryTimer);
     // 保存接口已切换服务端账号，客户端同步使用同一账号。
     const index = accounts.findIndex(account => account.id === data.account.id);
