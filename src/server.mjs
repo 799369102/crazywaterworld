@@ -1241,12 +1241,40 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     return {
       serverNow:survey.serverNow,
       population: `${survey.population}/${survey.maxPopulation}`,
-      farms: survey.buildings.filter(b => b.type === '农田').map(b => ({
-        plot: b.buildingId,
-        status: !b.level ? (b.buildFinishTime ? '建造中' : '未建成') : !b.farm?.productId ? '空闲'
-          : displayMaterial(config, b.farm.productId) + (b.farm.ripeTime < survey.serverNow ? ' · 已成熟' : ' · 生长中'),
-      })),
-      factories: survey.factories.map((b) => ({ buildingId: b.buildingId, type: b.type, typeName: typeNames.get(b.type), level: b.level, queue: (b.factory.factoryQ ?? []).length, auto: b.factory.autoProductId ? displayMaterial(config, b.factory.autoProductId) : null, icon: buildingIcon(b.type) })),
+      farms: survey.buildings.filter(b => b.type === '农田').map(b => {
+        const productId = b.farm?.productId || null;
+        const productName = productId ? displayMaterial(config, productId) : null;
+        const ripeTime = Number.isFinite(b.farm?.ripeTime) && b.farm.ripeTime > 0 ? b.farm.ripeTime : null;
+        const finishTime = !b.level && Number.isFinite(b.buildFinishTime) && b.buildFinishTime > 0 ? b.buildFinishTime : null;
+        let state = 'unknown', status = '未同步';
+        if (!b.level) {
+          state = finishTime ? 'building' : 'unbuilt';
+          status = finishTime ? (finishTime > survey.serverNow ? '建造中' : '待竣工') : '未建成';
+        } else if (b.farm && !productId) {
+          state = 'idle'; status = '空闲';
+        } else if (productId) {
+          if (ripeTime) state = ripeTime <= survey.serverNow ? 'ready' : 'growing';
+          status = productName + ' · ' + ({ ready: '已成熟', growing: '生长中', unknown: '成熟时间未同步' })[state];
+        }
+        return { plot: b.buildingId, level: b.level, productId, productName, ripeTime, finishTime, state, status };
+      }),
+      factories: survey.factories.map(b => {
+        const queueKnown = Array.isArray(b.factory.factoryQ);
+        const jobs = queueKnown ? b.factory.factoryQ.map((job, index) => ({
+          index: Number.isSafeInteger(job?.idx) && job.idx >= 0 ? job.idx : index,
+          productId: job?.productId || null,
+          name: job?.productId ? displayMaterial(config, job.productId) : '产物未同步',
+          finishTime: Number.isFinite(job?.finishTime) && job.finishTime > 0 ? job.finishTime : null,
+        })) : [];
+        return {
+          buildingId: b.buildingId, type: b.type, typeName: typeNames.get(b.type), level: b.level,
+          queue: jobs.length, queueKnown, jobs,
+          capacity: Number.isSafeInteger(survey.factorySlots) && survey.factorySlots > 0 ? survey.factorySlots : null,
+          auto: b.factory.autoProductId ? displayMaterial(config, b.factory.autoProductId) : null,
+          autoEnabled: !!b.factory.autoProductId && (survey.autoProduceForever || survey.autoProduceEndTime > survey.serverNow),
+          icon: buildingIcon(b.type),
+        };
+      }),
       orders: survey.orders.map((order) => ({
         ...order,
         workerIcon: workerIcon(order.workerId),

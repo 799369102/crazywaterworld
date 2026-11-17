@@ -31,6 +31,7 @@ const cases = [
   ['selftest-production-planning.mjs'],
   ['selftest-production-plan-http.mjs'],
   ['selftest-production-planning-ui.mjs'],
+  ['selftest-world-production-ui.mjs'],
   ['selftest-resource-updater.mjs'],
   ['selftest-trace-log.mjs'],
   ['selftest-console-log.mjs'],

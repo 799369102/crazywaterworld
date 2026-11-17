@@ -952,53 +952,18 @@ $('loop-stop').onclick = async () => {
 };
 
 let orderClockOffset=0;
-bindGameAction('loot-run', async () => {
-  const account = current;
-  if (snapshot.paused || disconnected.has(account)) return;
-  $('loot-hint').textContent = '领取中…';
-  try {
-    const data = await call('/api/loot/run', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-    if (current === account) $('loot-hint').textContent = data.summary || '本轮领取结束，结果见运行日志';
-  } catch (error) {
-    if (current === account) $('loot-hint').textContent = '';
-    throw error;
-  }
-});
-bindGameAction('tasks-plan', async () => {
-  const account = current;
-  if (snapshot.paused || disconnected.has(account)) return;
-  $('tasks-hint').textContent = '检查中…';
-  try {
-    const data = await call('/api/tasks');
-    if (current !== account) return;
-    $('tasks-hint').textContent = '可领 ' + data.plan.length + ' 项';
-    logReport('任务奖励：可领 ' + data.plan.length + ' 条', data.text);
-  } catch (error) {
-    if (current === account) $('tasks-hint').textContent = '';
-    throw error;
-  }
-});
-bindGameAction('tasks-run', async () => {
-  const account = current;
-  if (snapshot.paused || disconnected.has(account)) return;
-  $('tasks-hint').textContent = '领取中…';
-  try {
-    const data = await call('/api/tasks/run', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-    if (current !== account) return;
-    const summary = '本轮成功领取 ' + data.results.filter(entry => entry.ok).length + ' 项';
-    $('tasks-hint').textContent = summary;
-    logReport('任务奖励：' + summary, data.text);
-  } catch (error) {
-    if (current === account) $('tasks-hint').textContent = '';
-    throw error;
-  }
-});
 function orderRefreshLabel(at){
  const left=Math.max(0,Math.ceil(at-(Date.now()+orderClockOffset)/1000));
  const time=new Date(at*1000).toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
  return time+' 刷新 · '+(left?('剩余 '+Math.floor(left/60)+'分'+left%60+'秒'):'已到时，等待同步');
 }
-setInterval(()=>{if(document.hidden||$('tab-manual').classList.contains('hidden'))return;for(const node of document.querySelectorAll('[data-order-refresh-at]'))node.textContent=orderRefreshLabel(Number(node.dataset.orderRefreshAt));},1000);
+setInterval(() => {
+  if (document.hidden || $('tab-manual').classList.contains('hidden')) return;
+  for (const node of document.querySelectorAll('[data-order-refresh-at]')) {
+    node.textContent = orderRefreshLabel(Number(node.dataset.orderRefreshAt));
+  }
+  updateWorldProductionTimers();
+}, 1000);
 function orderState(order, data) {
   const box = el('div', 'order-state');
   const decision = order.decision;
@@ -1061,26 +1026,159 @@ function residentOrderActions(order){
  };root.append(button);return root;
 }
 
+function worldProductionTime(finishTime, readyText, activeText = '剩余 ') {
+  if (!Number.isFinite(finishTime) || finishTime <= 0) return '时间未同步';
+  const remaining = Math.ceil(finishTime - (Date.now() + orderClockOffset) / 1000);
+  return remaining > 0 ? '（' + activeText + productionPlanDuration(remaining) + '）' : readyText;
+}
+
+function worldProductionTimer(finishTime, readyText, activeText = '剩余 ') {
+  const timer = el('span', 'production-time', worldProductionTime(finishTime, readyText, activeText));
+  if (Number.isFinite(finishTime) && finishTime > 0) {
+    timer.dataset.productionFinishAt = String(finishTime);
+    timer.dataset.productionReadyText = readyText;
+    timer.dataset.productionActiveText = activeText;
+  }
+  return timer;
+}
+
+function updateWorldProductionTimers() {
+  for (const node of document.querySelectorAll('[data-production-finish-at]')) {
+    node.textContent = worldProductionTime(Number(node.dataset.productionFinishAt),
+      node.dataset.productionReadyText, node.dataset.productionActiveText);
+  }
+}
+
+function factoryProductionQueue(factory) {
+  if (!Array.isArray(factory.jobs) || factory.queueKnown === false) {
+    return el('span', 'dim', '生产队列未同步');
+  }
+  const queue = el('div', 'factory-queue');
+  queue.setAttribute('aria-label', factory.buildingId + '生产格');
+  const capacity = Number.isInteger(factory.capacity) && factory.capacity > 0 ? factory.capacity : 0;
+  const count = Math.max(factory.jobs.length, capacity);
+  for (let index = 0; index < count; index++) {
+    const job = factory.jobs[index];
+    const slot = el('div', 'factory-slot');
+    slot.appendChild(el('span', 'dim', '格子 ' + (index + 1)));
+    if (job) {
+      slot.appendChild(el('span', 'factory-product', job.name || job.productId || '产物未同步'));
+      slot.appendChild(job.finishTime > 0
+        ? worldProductionTimer(job.finishTime, '已完成 · 待收取')
+        : el('span', 'dim', '等待生产'));
+    } else {
+      slot.appendChild(el('span', 'dim', '空闲'));
+    }
+    queue.appendChild(slot);
+  }
+  if (!capacity) queue.appendChild(el('span', 'dim', '生产格数量未同步'));
+  return queue;
+}
+
+function updateFactoryProductionDialog(factory) {
+  $('factory-production-dialog').dataset.factoryId = factory.buildingId;
+  $('factory-production-title').textContent = factory.buildingId + ' · 排产详情';
+  clear($('factory-production-body')).appendChild(factoryProductionQueue(factory));
+}
+
+function showFactoryProduction(factory) {
+  updateFactoryProductionDialog(factory);
+  const dialog = $('factory-production-dialog');
+  if (!dialog.open) dialog.showModal();
+  $('factory-production-close').focus();
+}
+
+function closeFactoryProduction() {
+  const dialog = $('factory-production-dialog');
+  if (dialog.open) dialog.close();
+}
+
+$('factory-production-close').onclick = closeFactoryProduction;
+$('factory-production-dialog').onclose = () => {
+  const dialog = $('factory-production-dialog');
+  if (dialog.open) return;
+  const factoryId = dialog.dataset.factoryId;
+  delete dialog.dataset.factoryId;
+  clear($('factory-production-body'));
+  const trigger = [...document.querySelectorAll('[data-factory-production]')]
+    .find(button => button.dataset.factoryProduction === factoryId);
+  (trigger || $('world-plan')).focus();
+};
+
+function factoryCurrentProduction(factory) {
+  if (!Array.isArray(factory.jobs) || factory.queueKnown === false) {
+    return el('span', 'dim', '生产队列未同步');
+  }
+  const current = el('div', 'factory-current');
+  const now = (Date.now() + orderClockOffset) / 1000;
+  const active = factory.jobs.filter(job => job.finishTime > now);
+  for (const job of active) {
+    const product = el('div', 'factory-current-product');
+    product.append(el('span', null, job.name || job.productId || '产物未同步'),
+      worldProductionTimer(job.finishTime, '已完成 · 待收取'));
+    current.appendChild(product);
+  }
+  if (!active.length) {
+    const completed = factory.jobs.find(job => job.finishTime > 0 && job.finishTime <= now);
+    const status = completed ? (completed.name || completed.productId || '产物未同步') + ' · 已完成 · 待收取'
+      : factory.jobs.length ? '等待开工' : '空闲';
+    current.appendChild(el('span', 'dim', status));
+  }
+  if (!factory.jobs.length) return current;
+  const button = smallButton('查看排产（' + factory.jobs.length + '）');
+  button.type = 'button';
+  button.dataset.factoryProduction = factory.buildingId;
+  button.setAttribute('aria-haspopup', 'dialog');
+  button.setAttribute('aria-controls', 'factory-production-dialog');
+  button.setAttribute('aria-label', factory.buildingId + '查看排产');
+  button.onclick = () => showFactoryProduction(factory);
+  current.appendChild(button);
+  return current;
+}
+
 function renderWorld(data) {
   orderClockOffset=Number.isFinite(data.serverNow)?data.serverNow*1000-Date.now():0;
   $('world-view').textContent = '';
   const fbox = clear($('world-factories'));
+  if (data.factories?.length) {
+    fbox.appendChild(el('h2', null, '工厂'));
+    const factories = [...data.factories].sort((a, b) => a.buildingId.localeCompare(b.buildingId, 'zh-CN', { numeric: true }));
+    const factoryTable = table(['建筑', '类型', '等级', '当前产物', '自动生产', '下一产物'], factories.map((b) => {
+      const queueKnown = b.queueKnown !== false && Array.isArray(b.jobs);
+      const next = queueKnown ? b.jobs.find(job => !(job.finishTime > 0)) : null;
+      return [
+        { cell: b.icon, text: b.buildingId },
+        b.typeName || b.type,
+        'lv' + b.level,
+        factoryCurrentProduction(b),
+        b.autoEnabled == null ? '未同步' : b.autoEnabled ? '已开启' : '未开启',
+        !queueKnown ? '未同步' : next ? next.name || next.productId || '产物未同步' : '—',
+      ];
+    }));
+    factoryTable.classList.add('factory-table');
+    fbox.appendChild(factoryTable);
+  }
+  const productionDialog = $('factory-production-dialog');
+  if (productionDialog.open) {
+    const factory = data.factories?.find(row => row.buildingId === productionDialog.dataset.factoryId);
+    if (factory) updateFactoryProductionDialog(factory);
+    else closeFactoryProduction();
+  }
   if (data.farms?.length) {
     fbox.appendChild(el('h2', null, '农田'));
     const plots = [...data.farms].sort((a, b) => a.plot.localeCompare(b.plot, 'zh-CN', { numeric: true }));
-    const grid = el('table', 'farm-grid'); grid.setAttribute('aria-label', '农田状态');
-    const body = el('tbody');
-    for (let i = 0; i < plots.length; i += 3) {
-      const row = el('tr');
-      for (let j = 0; j < 3; j++) {
-        const plot = plots[i + j], cell = el('td');
-        if (plot) cell.append(el('strong', 'farm-plot', plot.plot), el('span', 'farm-status', plot.status));
-        else cell.setAttribute('aria-hidden', 'true');
-        row.appendChild(cell);
+    fbox.appendChild(table(['农田', '等级', '当前作物', '状态与计时'], plots.map((plot) => {
+      let status = plot.status || '未同步';
+      if (plot.productId && plot.ripeTime > 0) {
+        status = worldProductionTimer(plot.ripeTime, '已成熟', '生长中 · 剩余 ');
+      } else if (plot.state === 'building' && plot.finishTime > 0) {
+        status = worldProductionTimer(plot.finishTime, '待竣工', '建造中 · 剩余 ');
+      } else if (plot.productId) {
+        status = '成熟时间未同步';
       }
-      body.appendChild(row);
-    }
-    grid.appendChild(body); fbox.appendChild(grid);
+      return [plot.plot, plot.level == null ? '未同步' : 'lv' + plot.level,
+        plot.productName || plot.productId || '—', status];
+    })));
   }
   // 空位：没盖的（待建）与正在盖的（施工中）。计划器只会建「待建」那些，
   // 施工中的只能等它盖完由竣工步骤收尾，所以两种状态要分开说，不然看不出差在哪。
@@ -1091,16 +1189,6 @@ function renderWorld(data) {
       { cell: b.icon, text: b.buildingId },
       b.typeName || b.type || '未知类型',
       b.building ? chip('waiting', '施工中') : b.awaitingFinish ? chip('ready', '待竣工') : chip('ready', '待建'),
-    ])));
-  }
-  if (data.factories.length) {
-    fbox.appendChild(el('h2', null, '工厂'));
-    fbox.appendChild(table(['建筑', '类型', '等级', '队列', '自动生产'], data.factories.map((b) => [
-      { cell: b.icon, text: b.buildingId },
-      b.typeName || b.type,
-      'lv' + b.level,
-      String(b.queue),
-      b.auto || '未设置',
     ])));
   }
   const obox = clear($('world-orders'));
@@ -1130,6 +1218,7 @@ function refreshManualWorld(force = false) {
   const account = current;
   const available = account && !snapshot.paused && !disconnected.has(account);
   if (displayedWorldAccount !== account || !available) {
+    closeFactoryProduction();
     $('inventory-status').textContent='正在读取库存';
     displayedWorldAccount = account;
     resetInventory();

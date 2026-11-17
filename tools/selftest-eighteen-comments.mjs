@@ -7,6 +7,7 @@ import {readWorldOverview} from '../src/world-overview.mjs';
 import {readWorldTarget} from '../src/world-target.mjs';
 import {runtimeProgress} from '../src/runtime-progress.mjs';
 import {PAGE} from '../src/page.mjs';
+import {manualPage} from '../src/ui/dist/console.mjs';
 let count=0;const test=async(name,fn)=>{await fn();count++;console.log('通过：'+name);};
 const ledger={keyRecords:()=>({}),snapshot:()=>({counters:{}}),pendingCounters:()=>({})};
 await test('实际协议活动统计使用当期游戏名称，周订单按真实档数和战令档位计算',async()=>{
@@ -67,37 +68,18 @@ await test('进度和条件分列，真实开关限制不被执行成功覆盖',
 await test('页面脚本可解析，废弃入口移除且主分支独有入口完整保留',()=>{
  for(const m of PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g))new vm.Script(m[1]);
  for(const id of ['hunt-view','pirate-tracker'])assert(!PAGE.includes('id="'+id+'"'),id);
- for(const id of ['loot-run','tasks-plan','tasks-run','activities-list','formation-view','activity-stats-table','inventory-query','world-map-fleets'])assert.equal((PAGE.match(new RegExp('id="'+id+'"','g'))??[]).length,1,id);
+ for(const id of ['activities-list','formation-view','activity-stats-table','inventory-query','world-map-fleets'])assert.equal((PAGE.match(new RegExp('id="'+id+'"','g'))??[]).length,1,id);
  assert(PAGE.includes('当前进度'));assert(PAGE.includes('当前条件'));assert(PAGE.includes('width:165px'));assert(PAGE.includes('width:100px'));
 });
-await test('恢复的领取按钮绑定实际接口，暂停或断开时不发送请求',async()=>{
- const source=[...PAGE.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m=>m[1]).find(text=>text.includes('function bindGameAction('));
- assert(source,'完整页面应包含实际按钮绑定脚本');
- const nodes=new Map(['loot-run','tasks-plan','tasks-run','loot-hint','tasks-hint'].map(id=>[id,{disabled:false,textContent:''}]));
- const requests=[],logs=[],errors=[];
- const context={current:'a',snapshot:{paused:false},disconnected:new Set(),
-  $:id=>{assert(nodes.has(id),id);return nodes.get(id);},
-  call:async(url,options)=>{requests.push({url,options});return{summary:'领取完成',plan:[{},{}],results:[{ok:true},{ok:false}],text:'逐项结果'};},
-  logReport:(...args)=>logs.push(args),reportError:error=>errors.push(error)};
- const bindStart=source.indexOf('function bindGameAction('),bindEnd=source.indexOf('// ---- 运行记录',bindStart);
- const actionStart=source.indexOf("bindGameAction('loot-run'"),actionEnd=source.indexOf('function orderRefreshLabel(',actionStart);
- assert(bindEnd>bindStart&&actionEnd>actionStart,'应提取页面中实际的绑定函数和恢复按钮处理代码');
- new vm.Script(source.slice(bindStart,bindEnd)+'\n'+source.slice(actionStart,actionEnd)).runInNewContext(context);
- for(const [id,url] of [['loot-run','/api/loot/run'],['tasks-plan','/api/tasks'],['tasks-run','/api/tasks/run']]){
-  assert.equal((source.match(new RegExp("bindGameAction\\('"+id+"'",'g'))??[]).length,1,id+' 只能绑定一次');
-  assert.equal(typeof nodes.get(id).onclick,'function',id+' 应可点击');
-  await nodes.get(id).onclick();assert.equal(requests.at(-1).url,url);
-  if(id!=='tasks-plan'){assert.equal(requests.at(-1).options.method,'POST');assert.equal(JSON.parse(requests.at(-1).options.body).confirm,true);}
-  else assert.equal(requests.at(-1).options,undefined,'检查任务只读取状态');
-  assert.equal(nodes.get(id).disabled,false,'请求结束后恢复按钮');
+await test('建筑一览移除一键领取和任务奖励面板及其按钮绑定', () => {
+ const manual = manualPage();
+ assert(!manual.includes('一键领取'));
+ assert(!manual.includes('任务奖励'));
+ for (const id of ['loot-run', 'tasks-plan', 'tasks-run', 'loot-hint', 'tasks-hint']) {
+  assert(!PAGE.includes(id), id + ' 的页面标记与脚本引用应全部移除');
  }
- assert.equal(requests.length,3);assert.equal(errors.length,0);assert.equal(logs.length,2);
- assert.equal(nodes.get('loot-hint').textContent,'领取完成');assert.equal(nodes.get('tasks-hint').textContent,'本轮成功领取 1 项');
- context.snapshot.paused=true;
- for(const id of ['loot-run','tasks-plan','tasks-run'])await nodes.get(id).onclick();
- assert.equal(requests.length,3,'暂停时三个入口均不得发送');
- context.snapshot.paused=false;context.disconnected.add('a');
- for(const id of ['loot-run','tasks-plan','tasks-run'])await nodes.get(id).onclick();
- assert.equal(requests.length,3,'断开时三个入口均不得发送');
+ for (const id of ['world-plan', 'world-run', 'world-view', 'world-factories', 'world-orders', 'production-plan-refresh', 'production-plan-result', 'world-fields']) {
+  assert.equal((manual.match(new RegExp('id="' + id + '"', 'g')) ?? []).length, 1, id);
+ }
 });
 console.log('十八项批注专项 '+count+'/'+count+' 通过');

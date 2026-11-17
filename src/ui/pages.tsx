@@ -81,8 +81,6 @@ export function activitiesPage() {
 
 export function manualPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="一键领取" help="领取主线、成就、邮件、挂机收益，以及已拥有英雄的技能展示首领奖励，不花钻石。逐项结果见运行日志。"><div className="bar"><Button id="loot-run">领取现在能领的</Button><span id="loot-hint" role="status" /></div></Panel>
-    <Panel title="任务奖励" help="检查或领取主线、支线、成就和每日订单档位奖励。无法确认目标值的任务会跳过，结果见运行日志。"><div className="bar"><Button id="tasks-plan" variant="outline">检查可领</Button><Button id="tasks-run">领取任务奖励</Button><span id="tasks-hint" role="status" /></div></Panel>
     <Panel title="海面" help="收成品 → 竣工 → 交单 → 按订单缺口排产 → 余料升级建筑。本轮是否允许使用加速器、拒单重刷，由下方本次开关决定。">
     <div className="bar">
       <Option id="world-speedup" label="本轮允许花加速器" />

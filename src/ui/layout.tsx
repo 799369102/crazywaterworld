@@ -68,6 +68,11 @@ export function dialogs() {
       <Input id="account-label-input" aria-label="账号备注" />
       <DialogFooter><Button value="ok">确认</Button><Button value="cancel" variant="outline">取消</Button></DialogFooter>
     </form></dialog>
+    <dialog id="factory-production-dialog" aria-labelledby="factory-production-title">
+      <DialogHeader><DialogTitle id="factory-production-title" /></DialogHeader>
+      <div id="factory-production-body" />
+      <DialogFooter><Button id="factory-production-close" type="button" variant="outline">关闭</Button></DialogFooter>
+    </dialog>
     <div id="ui-help-popover" className="help-popover" role="dialog" aria-modal="false" aria-labelledby="ui-help-title" tabIndex={-1} hidden>
       <div className="help-popover-head"><strong id="ui-help-title">说明</strong><Button id="ui-help-close" size="icon-xs" variant="ghost" aria-label="关闭说明"><X aria-hidden="true" /></Button></div>
       <div id="ui-help-body" />

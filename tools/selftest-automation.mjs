@@ -23,6 +23,12 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, JSON.stringify([
   [1, 'ItemCfg', { data: [{ id: '烤鱼', show_name: '烤鱼' }] }],
   [2, 'ResourceCfg', { data: [{ id: 'GOLD', show_name: '金币' }] }],
   [3, 'WorkerBaseCfg', { data: [{ id: 1, showName: '居民甲' }, { id: 2, showName: '居民乙' }] }],
+  [4, 'BuildingCfg', { data: [
+    { buildingType: '食品厂', name: '食品厂' },
+    { buildingType: '活动工厂', name: '活动工坊' },
+    { buildingType: '农田', name: '农田' },
+  ] }],
+  [5, 'BuildingProduceParamCfg', { data: [{ paramName: '制造位上限', paramValue: 6 }] }],
 ]));
 const { saveStore, DATA_DIR } = await import('../src/accounts.mjs');
 assert.equal(DATA_DIR, dir);

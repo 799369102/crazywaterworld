@@ -34,6 +34,25 @@ export async function testResidentHttp(app) {
   session.player = { playerId: '9101000000000001', worldId: 1001001, level: 1, scenarioId: 1.5 }; // no real map fetch for this fixture
   session.client = game;
   const orders = [1, 2].map(index => ({ index, workerId: index, textId: index, requirements: [{ id: '烤鱼', num: 3 }] }));
+  const now = Math.floor(Date.now() / 1000);
+  let autoProduceForever = false, autoProduceEndTime = now - 1;
+  let buildings = [
+    { buildingId: '1食品厂', level: 2, factory: { factoryQ: [
+      { idx: 5, productId: '烤鱼', finishTime: now + 120 },
+      { idx: 6, productId: '烤鱼' },
+      { idx: 7, productId: '烤鱼', finishTime: 0 },
+    ], finishedProducts: [], autoProductId: '烤鱼' } },
+    { buildingId: '1活动工厂', level: 1, factory: { factoryQ: [], finishedProducts: [] } },
+    { buildingId: '2食品厂', level: 1, factory: {} },
+    { buildingId: '1农田', level: 1, farm: { productId: '烤鱼', ripeTime: now + 150 } },
+    { buildingId: '2农田', level: 1, farm: { productId: '烤鱼', ripeTime: now - 1 } },
+    { buildingId: '3农田', level: 1, farm: {} },
+    { buildingId: '4农田', level: 1 },
+    { buildingId: '5农田', level: 1, farm: { productId: '烤鱼' } },
+    { buildingId: '6农田', level: 0, buildFinishTime: now + 60 },
+    { buildingId: '7农田', level: 0 },
+    { buildingId: '8农田', level: 0, buildFinishTime: now - 1 },
+  ];
   const writes = [];
   let onNextRead;
   game.request = async (name, body, responseType) => {
@@ -42,7 +61,7 @@ export async function testResidentHttp(app) {
         const block = onNextRead;
         onNextRead = null;
         if (block) { block.enter.resolve(); await bounded(block.release.promise, '测试中的阻塞读取未能解除'); }
-        return { workerOrder: orders, building: [] };
+        return { workerOrder: orders, building: buildings, autoProduceForever, autoProduceEndTime };
       }
       case 'AllItemRequest': return { items: [{ itemId: '烤鱼', num: 3 }] };
       case 'AllResourceRequest': return { list: [] };
@@ -61,6 +80,39 @@ export async function testResidentHttp(app) {
   const firstView = await request('world');
   assert.equal(firstView.status, 200);
   assert.equal(firstView.data.autoDeliverOrders, false);
+  const [factory, workshop, unknownFactory] = firstView.data.factories;
+  assert.equal(factory.capacity, 6);
+  assert.equal(factory.queue, 3);
+  assert.equal(factory.queueKnown, true);
+  assert.equal(factory.auto, '烤鱼');
+  assert.equal(factory.autoEnabled, false, '设置目标但自动生产权限过期时显示关闭');
+  assert.deepEqual(factory.jobs, [
+    { index: 5, productId: '烤鱼', name: '烤鱼', finishTime: now + 120 },
+    { index: 6, productId: '烤鱼', name: '烤鱼', finishTime: null },
+    { index: 7, productId: '烤鱼', name: '烤鱼', finishTime: null },
+  ], '服务端提供所有排队产物，缺少结束时间的排队项保留未知时间');
+  assert.equal(workshop.typeName, '活动工坊');
+  assert.equal(workshop.queueKnown, true);
+  assert.deepEqual(workshop.jobs, []);
+  assert.equal(unknownFactory.queueKnown, false, '队列未返回时不能当作已确认的空队列');
+  assert.deepEqual(firstView.data.farms.map(farm => farm.state), ['growing', 'ready', 'idle', 'unknown', 'unknown', 'building', 'unbuilt', 'building']);
+  assert.equal(firstView.data.farms[0].productName, '烤鱼');
+  assert.equal(firstView.data.farms[0].ripeTime, now + 150);
+  assert.equal(firstView.data.farms[4].ripeTime, null);
+  assert.equal(firstView.data.farms[5].finishTime, now + 60);
+  assert.equal(firstView.data.farms[7].status, '待竣工');
+  autoProduceForever = true;
+  const permanentView = await request('world');
+  assert.equal(permanentView.status, 200);
+  assert.equal(permanentView.data.factories[0].autoEnabled, true, '永久自动生产权限与已设置目标共同开启自动生产');
+  assert.equal(permanentView.data.factories[1].autoEnabled, false, '没有设置目标的工厂即使有永久权限也未开启');
+  autoProduceForever = false;
+  autoProduceEndTime = now + 300;
+  const timedView = await request('world');
+  assert.equal(timedView.status, 200);
+  assert.equal(timedView.data.factories[0].autoEnabled, true, '有效期内自动生产权限与已设置目标共同开启自动生产');
+  assert.equal(timedView.data.factories[1].autoEnabled, false);
+  buildings = [];
   const [first, second] = firstView.data.orders;
   assert(first.orderKey && second.orderKey && first.orderKey !== second.orderKey);
   assert.equal(second.manualDecision.status, 'ready', '只能交一单时第二个槽也可手动选择');
