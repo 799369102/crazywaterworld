@@ -111,7 +111,6 @@ export function inventoryPage() {
 
 export function heroesPage() {
   return renderToStaticMarkup(<div className="grid gap-3">
-    <Panel title="主力英雄"><div className="icons" id="hero-strip"><span className="dim">连接后显示</span></div></Panel>
     <Panel title="英雄养成" help="升级、升星、升技能的条件取自游戏客户端的红点逻辑；执行前会先算一遍计划。">
 <div className="bar">
       <Button id="hero-plan" variant="outline">计算计划</Button>
@@ -121,12 +120,12 @@ export function heroesPage() {
     <pre id="hero-view">尚未计算</pre>
     <div id="hero-table"></div>
     </Panel>
-    <Panel title="英雄任命" help="按游戏内的职位优先顺序自动分配英雄，已有任命可能调整。">
-    <div className="bar">
-      <Button id="appoint-view" variant="outline">查看职位</Button>
-      <Button id="appoint-run" variant="default">一键任命</Button>
-    </div>
-    <div id="appoint-table" className="dim">尚未查看职位</div></Panel>
+    <Panel title="英雄任命" help="开启后随自动挂机，使用游戏一键委任分配英雄，已有任命可能调整。" titleAfter={<div className="bar"><label htmlFor="appointments-enabled">自动委任</label><Switch id="appointments-enabled" className="p-0" disabled /></div>}>
+      <div className="appointments-heading"><h4 id="appointments-priority-title">委任优先级</h4><span id="appointments-state" className="dim" role="status">请选择账号</span></div>
+      <p id="appointments-help" className="dim">上方项目优先委任。拖动手柄或使用上移、下移调整，修改后自动保存。</p>
+      <ol id="appointments-priorities" className="appointments-priorities" aria-labelledby="appointments-priority-title" aria-describedby="appointments-help" />
+      <div className="bar"><Button id="appointments-retry" variant="outline" size="sm" hidden>重试保存</Button><Button id="appointments-reload" variant="outline" size="sm" hidden>重新载入</Button><span id="appointments-feedback" className="sr-only" aria-live="polite" /></div>
+    </Panel>
     <Panel title="英雄装备">
       <div className="bar"><Button id="equipment-refresh" variant="outline">刷新装备</Button></div>
       <div id="equipment-view" className="progression-view" aria-live="polite" />

@@ -7,6 +7,7 @@ import { taskSettings } from './automation.mjs';
 import { EXTENDED_DEFAULTS, EXTENDED_CONSTRAINTS, SILICON_FLEET_NUMBERS, validateSiliconFleets } from './extended-settings.mjs';
 import { treasureRewardOptions } from './treasure-reward-filter.mjs';
 import { activityAutomationDefaults } from './activity-automation.mjs';
+import { DEFAULT_APPOINTMENT_PRIORITIES, normalizeAppointmentPriorities } from './appointment-priorities.mjs';
 
 // 设置与登录凭据分开保存。导出只包含设置，不包含账号、凭据或用量账本。
 export const settingsFile = () => path.join(dataDirectory(), 'automation-settings.json');
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS = {
   ads: { noPrivilege: true, waitSeconds: 15 },
   gold: { enabled: false, times: 3 },
   heroes: { enabled: true, level: true, star: true, skill: true, heroIds: [], universal: true, keepExp: 0, targetLevel: 0, targetStar: 0 },
+  appointments: { enabled: false, priorities: [...DEFAULT_APPOINTMENT_PRIORITIES] },
   dailies: { enabled: true, claimTasks: true, claimDailyChest: true, claimWeeklyChest: true, claimGift: true },
   tasks: { main: true, branch: true, achievements: true },
   progression: { enabled: true, mainline: false, trials: false, raidIds: ['1','2','3'], maxFailures: 3 },
@@ -115,6 +117,7 @@ const constraints = {
   'museum.maps': strings(), 'museum.dailyGuideLimit': int(), 'resources.keepAccelerators': int(), 'resources.diamondThreshold': int(),
   'resources.diamondDailyLimit': int(), 'gold.times': int(1000), 'heroes.heroIds': strings(), 'heroes.keepExp': int(),
   'heroes.targetLevel': int(10000), 'heroes.targetStar': int(1000),
+  'appointments.priorities': { ...strings(7), values: DEFAULT_APPOINTMENT_PRIORITIES },
   'trials.raidIds': { ...strings(3), values: ['1','2','3'] }, 'trials.paidPerRaidLimit': int(100),
   'trials.dailyDiamondBudget': int(100000), 'trials.maxSingleCost': int(10000),
   'progression.raidIds': { ...strings(3), values: ['1','2','3'] }, 'progression.maxFailures': int(100, 1),
@@ -204,7 +207,7 @@ export function nativeTaskValues(settings, current) {
 }
 
 export function hasExtraWork(settings) {
-  if (settings?.alliance?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled) return true;
+  if (settings?.appointments?.enabled || settings?.alliance?.enabled || settings?.heroRaid?.enabled || settings?.silicon?.enabled) return true;
   return !!settings && ((settings.loop.world && (settings.museum.runEnabled !== false && (settings.museum.enabled || settings.museum.upgrade) || settings.events.enabled || settings.pet.enabled || (settings.gather.enabled !== false && settings.gather.diving && settings.gather.keyOpen))) || (settings.loop.heroes && settings.heroes.enabled)
     || (settings.progression?.enabled && (settings.progression.mainline || settings.progression.trials)) || settings.pirateHunt?.enabled);
 }
@@ -264,6 +267,7 @@ export function validateSettings(input, { partial = false, catalog = null } = {}
       }
     }
   }
+  output.appointments.priorities = normalizeAppointmentPriorities(output.appointments.priorities);
   if (output.progression.trials && !output.progression.raidIds.length) errors['progression.raidIds'] = '请选择自动推关的试炼副本';
   if (output.pirateHunt.enabled && !output.pirateHunt.fleetIds.length) errors['pirateHunt.fleetIds'] = '请选择自动讨伐海盗的舰队';
   if(output.forge.decompose && !output.forge.decomposeQualities.length)errors['forge.decomposeQualities']='请选择可自动分解的装备品质';
@@ -414,11 +418,11 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   if (source === 'stored') return input;
 
   const addedGroups = ['login', 'treasure', 'cityWar', 'forge', 'antique', 'trials', 'pirateHunt',
-    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'activityAutomation', 'merchant', 'weekOrder', 'ads', ...Object.keys(EXTENDED_DEFAULTS)];
+    'radar', 'worldBoss', 'pirateSweep', 'eventActions', 'activityAutomation', 'merchant', 'weekOrder', 'ads', 'appointments', ...Object.keys(EXTENDED_DEFAULTS)];
   for (const group of addedGroups) {
     if (!Object.hasOwn(input, group)) input[group] = copy(DEFAULT_SETTINGS[group]);
   }
-  for (const group of ['login', 'merchant', 'activityAutomation', 'antique', 'pirateHunt', ...Object.keys(EXTENDED_DEFAULTS)]) {
+  for (const group of ['login', 'merchant', 'activityAutomation', 'antique', 'pirateHunt', 'appointments', ...Object.keys(EXTENDED_DEFAULTS)]) {
     if (plain(input[group])) input[group] = { ...copy(DEFAULT_SETTINGS[group]), ...input[group] };
   }
   const addedFields = {

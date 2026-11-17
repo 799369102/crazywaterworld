@@ -62,6 +62,7 @@ import { activityCatalogPushNames, readActivityCatalog, rememberActivityCatalog,
 import { displayMaterial, getConfig } from './config.mjs';
 import { planHeroes, runHeroPlan, formatHeroPlan } from './heroes.mjs';
 import { appointments } from './appointments.mjs';
+import { APPOINTMENT_PRIORITIES } from './appointment-priorities.mjs';
 import { surveyDailies, runDailies, formatSurvey } from './dailies.mjs';
 import { dailySingleState, addDailyOptions, runDailySingle } from './daily-single.mjs';
 import { surveyTasks, runTasks, formatTaskPlan, selectTaskSettings } from './tasks.mjs';
@@ -490,6 +491,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   function heroRaidSettingsView(session) {
     const current = settingsView(session);
     return { settings: current.settings.heroRaid, revision: current.revision, baseRevision: current.baseRevision };
+  }
+
+  function appointmentSettingsView(session) {
+    const current = settingsView(session);
+    return {
+      settings: current.settings.appointments,
+      revision: current.revision,
+      baseRevision: current.baseRevision,
+      options: APPOINTMENT_PRIORITIES.map(({ id, label }) => ({ value: id, label })),
+    };
   }
 
   function merchantSettingsView(session) {
@@ -1405,7 +1416,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -1515,6 +1526,31 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         }
         emit(session, 'info', '不差钱商人设置已保存');
         json(weekOrderSettingsView(session));
+        return;
+      }
+      if (route === 'GET /api/appointments/settings') {
+        const { session } = scoped_(parsed);
+        json(appointmentSettingsView(session));
+        return;
+      }
+      if (route === 'POST /api/appointments/settings') {
+        const payload = jsonBody();
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || Object.keys(payload).some(key => !['settings', 'revision', 'baseRevision'].includes(key))
+          || !payload.settings || typeof payload.settings !== 'object' || Array.isArray(payload.settings)) {
+          throw new SettingsError({ settings: '请选择有效的英雄委任设置' });
+        }
+        const { session } = scoped_(parsed);
+        const current = settingsView(session);
+        if (!Number.isSafeInteger(payload.revision) || payload.revision !== current.revision
+          || !current.revision && payload.baseRevision !== current.baseRevision) {
+          throw new SettingsError({ revision: '英雄委任设置已变化，请重新读取后再保存' });
+        }
+        const next = structuredClone(current.settings);
+        next.appointments = payload.settings;
+        adoptPreferences(session, saveAutomationSettings(session.id, next, { revision: current.revision }));
+        emit(session, 'info', '英雄委任设置已保存');
+        json(appointmentSettingsView(session));
         return;
       }
       if (route === 'GET /api/hero-raid/settings') {
@@ -2710,7 +2746,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const job = { assign };
         job.promise = enqueue(session, async () => {
           const client = await ensureConnected(session, account);
-          const result = await appointments(client, loadConfigSafe(), session.player?.level, { assign });
+          const result = await appointments(client, loadConfigSafe(), session.player?.level, {
+            assign, priorities: session.preferences?.appointments?.priorities,
+          });
           if (assign) emit(session, 'info', `英雄任命 · ${result.occupied}/${result.slots.length} 个开放职位有人，${result.changed} 个职位有变化`);
           return result;
         }).finally(() => {

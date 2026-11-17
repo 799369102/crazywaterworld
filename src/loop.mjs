@@ -52,6 +52,7 @@ import { cityWarEnabled, cityWarReservedFleets, refreshCityWarReservations, runC
 import { forgeEnabled, runEquipmentForge } from './equipment-forge.mjs';
 import { antiqueEnabled, runAntiqueUpgrade } from './antique-upgrade.mjs';
 import { planHeroes, runHeroPlan } from './heroes.mjs';
+import { appointments } from './appointments.mjs';
 import { serviceGuildOrders } from './guild-orders.mjs';
 import { serviceRadar } from './radar.mjs';
 import { serviceEquipmentCrafting } from './equipment-automation.mjs';
@@ -126,6 +127,10 @@ export async function runLoop(client, protocol, {
     (siliconPreference === getSettings().silicon ? siliconAt : 0) : Infinity;
   const extendedEnabled = () => getSettings()?.alliance?.enabled || getSettings()?.heroRaid?.enabled;
   const extendedNext = () => extendedEnabled() ? (extendedPreference === getSettings() ? extendedAt : 0) : Infinity;
+  let appointmentAt = 0, appointmentPreference = null;
+  const appointmentSettings = () => JSON.stringify(getSettings()?.appointments);
+  const appointmentNext = () => getSettings()?.appointments?.enabled
+    ? (appointmentPreference === appointmentSettings() ? appointmentAt : 0) : Infinity;
   let cityWarAt = 0, forgeAt = 0, antiqueAt = 0, lastCityWarNotes = '', lastForgeNotes = '', lastAntiqueNotes = '';
   let cityWarState = null, cityWarPreference = null, forgePreference = null, antiquePreference = null, cityFuelCeiling = null;
   // rounds <= 0 表示一直跑，靠 stop.aborted（Ctrl-C 或网页停止按钮）退出。
@@ -411,6 +416,36 @@ export async function runLoop(client, protocol, {
       } catch (error) { phaseFailure('world', '联盟与活动自动化', error); }
       finally { extendedAt = Date.now() + 60000; }
     }
+    async function checkAppointments() {
+      if (!scheduler.active() || appointmentNext() > Date.now()) return;
+      appointmentPreference = appointmentSettings();
+      const preference = appointmentPreference;
+      try {
+        const result = await appointments(client, config, player?.level, {
+          assign: true, priorities: getSettings().appointments.priorities,
+          enabled: () => scheduler.active() && getSettings()?.appointments?.enabled
+            && preference === appointmentSettings(),
+        });
+        const skipped = result.skipped || !result.slots.length;
+        const entry = {
+          title: '自动英雄委任', category: '英雄', taskKey: 'appointments.enabled',
+          ok: !skipped, skipped,
+          ...(skipped ? { reason: result.reason || '当前等级尚未开放委任职位' }
+            : { note: `${result.occupied}/${result.slots.length} 个开放职位有人，${result.changed} 个职位有变化` }),
+        };
+        if (!skipped) summary.tasks.planned++;
+        summary.tasks.results.push(entry);
+        stepLog('tasks')(entry);
+      } catch (error) {
+        if (!client.connected) throw error;
+        const entry = { title: '自动英雄委任', category: '英雄', taskKey: 'appointments.enabled', ok: false, error: error.message };
+        summary.tasks.results.push(entry);
+        stepLog('tasks')(entry);
+      } finally {
+        appointmentAt = Date.now() + getEveryMs();
+        rewards?.expect('appointments.enabled', rewards.now() + Math.ceil(getEveryMs() / 1000));
+      }
+    }
     async function checkMaintenance(){
       if(stop.aborted||!fleetMaintenanceEnabled(getSettings())){watchFleetMaintenance(client).hold([]);onMaintenance?.({enabled:false,rows:[],reason:'现有自动维修未开启'});return;}
       if(Date.now()<maintenanceAt)return;
@@ -518,6 +553,7 @@ export async function runLoop(client, protocol, {
     await scheduler.run(async () => {
       if (stop.aborted) return;
       beginAdRound(client);
+      await checkAppointments();
       await checkFactoryDue({ checkpoint: true });
       if (!isEnabled && enabled('tasks')) {
         try {
@@ -1017,7 +1053,7 @@ export async function runLoop(client, protocol, {
           const activityAt = activityVersion !== roundActivityVersion ? 0
             : nextActivityBoundary(client, activityConfigured, roundStartedMs);
           const afkAt = isEnabled && enabled('afk') ? (afkDeadline ?? Date.now() + 60_000) : Infinity;
-          const wakeAt = Math.min(nextRound, activityAt, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(),
+          const wakeAt = Math.min(nextRound, activityAt, factorySchedule.nextAt(), siliconNext(), extendedNext(), merchantNext(), appointmentNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,
             isEnabled && enabled('upgrade') ? upgradeAt : Infinity,
@@ -1040,6 +1076,7 @@ export async function runLoop(client, protocol, {
           }
           await scheduler.runDue('merchant', merchantNext, checkMerchant);
           await scheduler.runDue('extended', extendedNext, checkExtended);
+          await scheduler.runDue('appointments', appointmentNext, checkAppointments);
           const dispatchNext = () => Math.min(siliconNext(),
             fleetMaintenanceEnabled(getSettings()) ? maintenanceAt : Infinity,
             getSettings()?.radar.runEnabled !== false && getSettings()?.radar.enabled ? radarAt : Infinity,

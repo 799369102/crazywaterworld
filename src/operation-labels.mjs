@@ -49,6 +49,7 @@ export const operationLabels = {
   '/api/world/order/submit': '手动提交居民订单',
   '/api/worlds/enter': '进入海域', '/api/trials/challenge': '挑战试炼副本',
   '/api/appointments': '查看英雄职位', '/api/appointments/run': '任命英雄',
+  '/api/appointments/settings': '英雄委任设置',
   '/api/loot/run': '一键领取奖励', '/api/dailies': '查看日常', '/api/dailies/run': '执行日常',
   '/api/tasks': '查看任务', '/api/tasks/run': '领取任务奖励',
   '/api/stages': '查看推关进度', '/api/stages/start': '开始推关', '/api/stages/stop': '停止推关',

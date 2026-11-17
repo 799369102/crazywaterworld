@@ -17,6 +17,8 @@ const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'
 import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
+const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
+const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
 
 export const PAGE = `<!doctype html>
 <html lang="zh-CN">
@@ -27,7 +29,7 @@ export const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
-<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} } ${componentCss}</style>
+<style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} } ${componentCss}</style>
 </head>
 <body>
 ${chrome()}
@@ -455,6 +457,7 @@ const disconnected = new Set();
 
 let accountDetailsOwner=null,credentialVersion=0;
 function renderAccountSelect() {
+  appointmentsAccountChanged();
   if (dailyAccount !== current || snapshot.paused || disconnected.has(current)) {
     dailyAccount = current; dailyVersion++;
     clear($('dailies-table'));
@@ -614,11 +617,6 @@ function renderOverview(data) {
   for (const entry of data.resources || []) res.appendChild(cell(entry.icon, 18, entry.name, entry.amount == null ? '未取得' : fmt(entry.amount), false));
   if (!res.childElementCount) res.appendChild(el('span', 'dim', '暂无数据'));
 
-  const heroes = clear($('hero-strip'));
-  for (const hero of (data.heroes && data.heroes.list) || []) {
-    heroes.appendChild(cell(hero.icon, 40, hero.heroId, 'lv' + hero.level + ' · ' + hero.star + '星'));
-  }
-  if (!heroes.childElementCount) heroes.appendChild(el('span', 'dim', '暂无数据'));
 }
 
 let overviewPending = false;
@@ -1264,21 +1262,6 @@ bindGameAction('world-run', async () => {
 });
 
 // ---- 英雄 ------------------------------------------------------------------
-function renderAppointments(data) {
-  const box = clear($('appoint-table'));
-  box.appendChild(el('div', 'dim', '已任命 ' + data.occupied + '/' + data.slots.length + ' 个开放职位'));
-  if (data.slots.length) box.appendChild(table(['职位', '效果', '英雄'], data.slots.map(slot => [String(slot.id), slot.effect, slot.hero || '空缺'])));
-}
-bindGameAction('appoint-view', async () => {
-  const account = current;
-  const result = await call('/api/appointments');
-  if (account === current) renderAppointments(result);
-});
-bindGameAction('appoint-run', async () => {
-  const account = current;
-  const result = await call('/api/appointments/run', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-  if (account === current) renderAppointments(result);
-});
 // 技能是一串等级，原始形状是 [1,0,0,0]，直接摆给用户看没意义，只说练了几项。
 function skillText(levels) {
   const list = levels || [];
@@ -1803,6 +1786,7 @@ ${activityStatisticsScript}
 ${inventoryScript}
 ${productionPlanningScript}
 ${settingsScript}
+${appointmentsScript}
 // ---- 登录设置 --------------------------------------------------------------
 let loginSettingsOwner = null;
 let loginSettingsData = null;
@@ -1920,7 +1904,7 @@ function activateConsolePage(button, resource = selectedResource) {
     refreshProgression();
     if (button.dataset.tab === 'overview') {refreshOverview();refreshLoop();}
     if(isResource&&resource==='inventory')refreshManualWorld();
-    if(isResource&&resource==='heroes')refreshOverview();
+    if(isResource&&resource==='heroes')void appointmentsLoad(true);
     if (button.dataset.tab === 'account') {
       refreshOverview();
       renderAccounts();

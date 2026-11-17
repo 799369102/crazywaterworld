@@ -33,6 +33,7 @@ add('progression.mainline','主线 / 闯关自动挑战','世界与挑战',{gate
 add('progression.trials','试炼自动推关','世界与挑战',{gates:['progression.enabled']});
 add('pirateHunt.enabled','海盗讨伐自动推进','世界与挑战',{help:'每轮核对本人首杀和舰队状态，自动挑战下一等级。消耗汽油，达到失败停止次数或本次预算后停止派遣；先在配置中选择舰队。'});
 add('antique.enabled','藏品自动养成','英雄',{help:'按游戏配置 → 英雄 → 藏品养成执行激活、升星、大师等级和套装升级；只使用现有资源，不购买或消耗钻石。'});
+add('appointments.enabled','自动英雄委任','英雄',{help:'在资源与玩法 → 英雄与装备中设置开关和委任优先级，挂机按保存顺序调用游戏一键委任。'});
 add('trials.paid','试炼钻石扫荡','世界与挑战');
 add('trials.ads','试炼免广告扫荡','世界与挑战');
 for (const [key,label,group,gates] of [
