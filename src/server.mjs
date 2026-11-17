@@ -80,6 +80,10 @@ import { reconcileManualForge } from './manual-forge-sync.mjs';
 import { readAntiqueUpgrade, planAntiqueUpgrade, antiqueEnabled } from './antique-upgrade.mjs';
 import { watchBasePushes, surveyBaseAutomation, planBaseAutomation, baseDemands, previewNativeAutomation } from './base-automation.mjs';
 import { reconcileManualProduction } from './manual-production-sync.mjs';
+import { readProductionSnapshot } from './production-snapshot.mjs';
+import { planProduction } from './production-planning.mjs';
+import { watchProductionTimings } from './production-timing.mjs';
+import { captureManualProductionMaterialState } from './order-reservations.mjs';
 import { createStageTask } from './stages.mjs';
 import { createChallengeRun } from './challenge-automation.mjs';
 import { runAction } from './actions.mjs';
@@ -483,6 +487,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
 
   function wire(session, instance) {
     watchBasePushes(instance);
+    watchProductionTimings(instance, loadConfigSafe);
     watchGuildShipPushes(instance);
     watchHeroRaidPushes(instance);
     watchSiliconMining(instance);
@@ -2253,6 +2258,35 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         if(!session.client?.connected||session.paused)throw new Error('请先连接当前账号，再读取世界概览');
         if(!session.mapRead) { const job=readJob(session,()=>readWorldOverview(session.client,loadConfigSafe(),session.player,settingsView(session).settings,usageFor(session),{pirateSpent:pirateRunState(session).spent??0})).finally(()=>{if(session.mapRead===job)session.mapRead=null;});session.mapRead=job; }
         json(await session.mapRead);return;
+      }
+      if (route === 'GET /api/world/production-plan') {
+        const { session } = scoped_(parsed);
+        if (!session.client?.connected || session.paused || session.productionSyncRequired) throw new Error('请先连接并同步当前账号，再计算联合排产');
+        if (!session.productionPlanRead) {
+          const client = session.client, generation = session.generation, player = session.player;
+          const view = settingsView(session), settingsKey = JSON.stringify(view.settings);
+          const enabled = () => session.client === client && client.connected && !session.paused
+            && session.player === player
+            && session.generation === generation && !session.productionSyncRequired
+            && JSON.stringify(settingsView(session).settings) === settingsKey;
+          const job = readJob(session, async () => {
+            if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
+            const config = loadConfigSafe();
+            const timing = watchProductionTimings(client, loadConfigSafe);
+            const snapshot = await readProductionSnapshot(client, protocol, config, player, view.settings,
+              { enabled, observedDurations: timing.snapshot() });
+            if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
+            if (loadConfigSafe() !== config) throw new Error('游戏配置已更新，请重新计算');
+            snapshot.timing.observedDurations = timing.snapshot();
+            const result = planProduction(snapshot, config, view.settings,
+              { pendingMaterials: captureManualProductionMaterialState(session.player).all });
+            if (!enabled()) throw new Error('账号或排产设置已变化，请重新计算');
+            return result;
+          }).finally(() => { if (session.productionPlanRead === job) session.productionPlanRead = null; });
+          session.productionPlanRead = job;
+        }
+        json(await session.productionPlanRead);
+        return;
       }
       if (route === 'GET /api/world') {
         const { account, session } = scoped_(parsed);

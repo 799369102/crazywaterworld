@@ -12,6 +12,7 @@ const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),
 const rankingScript=readFileSync(new URL('./activity-rankings-ui.js',import.meta.url),'utf8');
 const activityStatisticsScript=readFileSync(new URL('./activity-statistics-ui.js',import.meta.url),'utf8');
 const inventoryScript=readFileSync(new URL('./inventory-ui.js',import.meta.url),'utf8');
+const productionPlanningScript = readFileSync(new URL('./production-planning-ui.js', import.meta.url), 'utf8');
 const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
 import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
@@ -474,6 +475,8 @@ function renderAccountSelect() {
   }
   if(activityStatsOwner!==null&&activityStatsOwner!==current)resetActivityStatistics();
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
+  if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
+  $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
   $('account-pause').disabled = !current;
   $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
   $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
@@ -1709,6 +1712,7 @@ ${worldMapScript}
 ${rankingScript}
 ${activityStatisticsScript}
 ${inventoryScript}
+${productionPlanningScript}
 ${settingsScript}
 // ---- 登录设置 --------------------------------------------------------------
 let loginSettingsOwner = null;

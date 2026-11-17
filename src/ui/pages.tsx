@@ -95,6 +95,10 @@ export function manualPage() {
     <div id="world-factories"></div>
     <div id="world-orders"></div>
     </Panel>
+    <Panel title="需求联合排产" help="按用户配置的需求优先级逐级优化齐套时间，上游材料继承对应优先级。共享原料和生产位统一安排，独立设施并行生产。结果显示分层工期、投料顺序、时长依据和阻塞原因。">
+      <div className="bar"><Button id="production-plan-refresh" variant="outline">计算联合排产</Button><span id="production-plan-status" className="dim" role="status">连接后可计算</span></div>
+      <div id="production-plan-result" aria-live="polite" />
+    </Panel>
     <Panel title="资源田"><div id="world-fields" /></Panel>
   </div>)
 }
