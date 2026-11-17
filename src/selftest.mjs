@@ -978,13 +978,37 @@ roundTrip(Buffer.from('RequestResponse'.repeat(200)), 'text');
       buildingId, playerLevel: 1, consume: [['木材', 50]], condition: [],
     })) },
   } };
-  const planFactory = () => planWorld(factorySurvey, { config: factoryConfig, enabled: k => ['build', 'weekFactory'].includes(k) });
+  const planFactory = (settings = null) => planWorld(factorySurvey, { config: factoryConfig, settings,
+    enabled: k => ['build', 'upgrade'].includes(k) });
   factorySurvey.buildings.push({ buildingId: '1民居', type: '民居', level: 0, product: [] });
-  assert.deepEqual(planFactory().actions.map(a => a.kind), ['weekFactory'], '商人订单升级优先预留建材，即使余料升级关闭');
+  assert.deepEqual(planFactory().actions.map(a => a.kind), ['upgrade'], '商人配方所需工厂使用普通升级动作并优先预留建材');
+  const { defaultSettings } = await import('./automation-settings.mjs');
+  const factorySettings = defaultSettings();
+  assert.deepEqual(planFactory(factorySettings).actions.map(a => a.kind), ['upgrade']);
+  for (const change of [
+    s => { s.building.upgrade = false; },
+    s => { s.weekOrder.enabled = false; },
+    s => { s.factory.demandPriority = s.factory.demandPriority.filter(source => source !== 'merchant'); },
+    s => { s.factory.demandFirst = false; },
+    s => { s.factory.produce = false; },
+    s => { s.factory.enabled = false; },
+  ]) {
+    const settings = structuredClone(factorySettings);
+    change(settings);
+    assert.deepEqual(planFactory(settings).actions.map(a => a.kind), ['build'], '商人优先级遵守普通升级与需求生产配置');
+  }
+  const buildingOff = structuredClone(factorySettings); buildingOff.building.enabled = false;
+  assert.deepEqual(planFactory(buildingOff).actions, [], '建筑总开关关闭时商人需求不触发施工');
+  const limited = structuredClone(factorySettings); limited.building.maxUpgrades = 0;
+  assert(!planFactory(limited).actions.some(action => action.kind === 'upgrade'), '商人配方升级遵守每轮升级上限');
   factorySurvey.factories[0].level = 2;
-  assert.ok(!planFactory().actions.some(a => a.kind === 'weekFactory'), '达到配方等级后停止定向升级');
+  assert.ok(!planFactory().actions.some(a => a.label.includes('商人订单需要')), '达到配方等级后停止定向升级');
   factorySurvey.factories[0].level = 0;
   assert.deepEqual(planFactory().actions.map(a => a.body.buildingId), ['1材料厂'], '材料只够建一座时优先商人订单工厂');
+  const buildOnly = structuredClone(factorySettings); buildOnly.building.upgrade = false;
+  assert.deepEqual(planFactory(buildOnly).actions.map(a => [a.kind, a.body.buildingId]), [['build', '1材料厂']], '首建工厂由自动建造独立控制');
+  buildOnly.building.build = false;
+  assert.deepEqual(planFactory(buildOnly).actions, [], '关闭建造与升级后不会为商人施工');
   const tight = planWorld(surveyFor(52), { config });
   const produce = tight.actions.find((a) => a.kind === 'startProduce');
   assert.equal(produce.body.productId, '布匹', 'the order gap decides what gets produced');

@@ -273,6 +273,26 @@ await test('建筑等级、人口、禁用和进行中工程限制当前备料�
   assert(snapshot.missingReads.some(read => read.request === 'building'));
 });
 
+await test('联合排产建筑备料遵守人口上限并计入已有施工', () => {
+  const { raw, settings, buildingConfig, targets } = buildingFixture();
+  buildingConfig.tables.GameParamCfg = table(config.tables.GameParamCfg.data.map(row => ({ ...row })));
+  const populationLimit = buildingConfig.tables.GameParamCfg.data.find(row => row.paramName === '初始人口上限');
+  buildingConfig.tables.BuildingUpgradeCfg.data[1].effect = [['人口增加', 20]];
+  populationLimit.paramValue = 22;
+  assert.deepEqual(targets(), [], '当前人口13，加10后不能超过上限22');
+  populationLimit.paramValue = 23;
+  assert.equal(targets().length, 2, '刚好达到人口上限的首建和升级可备料');
+  raw.water.building.push({ buildingId: '3民居', level: 0, buildStartTime: 900, buildFinishTime: 1200 });
+  assert.deepEqual(targets(), [], '已有施工占用未来人口，停止其他增人口工程备料');
+  buildingConfig.tables.BuildingUpgradeCfg.data[1].effect = [['人口增加', 10]];
+  assert.deepEqual(targets().map(order => order.id), ['building:1民居:2']);
+  buildingConfig.tables.GameParamCfg.data = buildingConfig.tables.GameParamCfg.data.filter(row => row !== populationLimit);
+  const unknown = buildProductionSnapshot(raw, buildingConfig, settings);
+  assert.equal(unknown.complete, false);
+  assert(!unknown.orders.some(order => order.source === 'building'));
+  assert(unknown.missingReads.some(read => read.request === 'building' && read.reason.includes('人口上限')));
+});
+
 await test('已齐建筑材料仍作为完整独占目标，未齐且无生产路径的建材不造虚假任务', () => {
   const { raw, settings, buildingConfig, targets } = buildingFixture();
   raw.items.items.push({ itemId: '面包', num: 3 });

@@ -2,13 +2,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { defaultSettings, settingsUiRules } from '../src/automation-settings.mjs';
+import { automationTasks } from '../src/automation.mjs';
 
 const source = fs.readFileSync(new URL('../src/settings-ui.js', import.meta.url), 'utf8');
 const definitions = source.slice(0, source.indexOf("$('config-form').onsubmit"));
 assert(definitions.length > 0 && definitions.length < source.length);
 
-function fixture() {
-  const env = { nodes: new Map(), saves: 0, focused: null, category: null, group: null };
+function fixture({ navigation = false } = {}) {
+  const env = { nodes: new Map(), saves: 0, focused: null, category: null, group: null, navigation, hash: '' };
   class Element {
     constructor(tagName = 'div', className = '', text = '') {
       this.tagName = tagName.toUpperCase(); this.className = className; this.textContent = text;
@@ -26,6 +27,11 @@ function fixture() {
       };
     }
     get childNodes() { return this.children; }
+    set id(value) { this.elementId = value; env.nodes.set(value, this); }
+    get id() { return this.elementId; }
+    get options() { return this.children; }
+    add(node) { this.append(node); }
+    getBoundingClientRect() { return { width: 0 }; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
     removeAttribute(name) { this.attributes.delete(name); }
@@ -46,7 +52,8 @@ function fixture() {
     contains(node) { return node === this || this.children.some(child => child.contains(node)); }
     matches(selector) {
       if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
-      if (selector === '[data-state]') return this.dataset.state !== undefined;
+      const data = selector.match(/^\[data-([\w-]+)\]$/);
+      if (data) return this.dataset[data[1].replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] !== undefined;
       if (selector === 'input[type=number]') return this.tagName === 'INPUT' && this.type === 'number';
       if (selector === 'input[type=time]') return this.tagName === 'INPUT' && this.type === 'time';
       return this.tagName === selector.toUpperCase();
@@ -71,13 +78,24 @@ function fixture() {
   const api = new Function('env', definitions + `
     const $ = env.node, el = env.el;
     const current = 'hierarchy-fixture';
-    const document = { get activeElement() { return env.focused; } };
+    const document = {
+      get activeElement() { return env.focused; },
+      querySelectorAll(selector) {
+        return [...env.nodes.values()].filter(node => !node.parentElement).flatMap(node => node.querySelectorAll(selector));
+      },
+    };
+    const closeHelpTip = () => {};
+    const location = { get hash() { return env.hash; } };
+    const history = { replaceState(state, title, hash) { env.hash = hash; } };
+    const Option = function(text, value) { const option = el('option', '', text); option.value = value; return option; };
     const clear = node => { for (const child of [...node.children]) child.remove(); return node; };
     configRenderUsage = () => {};
     configUpdateState = () => {};
     configScheduleSave = () => { env.saves++; };
-    configActivate = category => { env.category = category; };
-    configActivateGroup = group => { env.group = group; };
+    if (!env.navigation) {
+      configActivate = category => { env.category = category; };
+      configActivateGroup = group => { env.group = group; };
+    }
     configRenderField = spec => {
       const row = el('div', 'config-row');
       const label = el('div', 'config-label-line');
@@ -95,10 +113,12 @@ function fixture() {
       editor: configEditor, groups: configGroups, merchantFields: merchantActivityFields, collapsed: configCollapsed,
       render: configRenderFields, update: configUpdateVisibility, set: configSet,
       errors: configErrors, check: configCheckForm,
+      renderPage: configRender, activate: configActivate, activateGroup: configActivateGroup, applyHash: configApplyHash,
     };
   `)(env);
   api.editor.draft = defaultSettings(); api.editor.baseline = structuredClone(api.editor.draft);
-  api.editor.owner = 'hierarchy-fixture'; api.editor.data = { rules: settingsUiRules() };
+  api.editor.owner = 'hierarchy-fixture'; api.editor.data = { rules: settingsUiRules(), tasks: automationTasks };
+  api.editor.playerData = {};
   return {
     ...api, env,
     widget: key => api.editor.widgets.get(key),
@@ -115,6 +135,48 @@ const visible = node => !node.hidden && (!node.parentElement || visible(node.par
 const keys = widgets => widgets.map(widget => widget.spec.key);
 let passed = 0;
 function test(name, run) { run(); passed++; console.log('通过：' + name); }
+
+test('建筑分类直接展示设置，移除单一子标签和重复标题', () => {
+  const f = fixture({ navigation: true }); f.renderPage();
+  const panel = f.env.node('config-panel-base'), building = f.env.node('config-group-building');
+  const family = f.env.node('config-family-construction');
+  assert.equal(family.textContent, '建筑');
+  assert.equal(family.getAttribute('aria-selected'), 'true');
+  assert.equal(panel.querySelector('.config-subtabs').hidden, true);
+  assert(!panel.querySelectorAll('[data-config-group]').some(tab => tab.dataset.configGroup === 'building'));
+  assert.equal(building.querySelector('h3'), null);
+  assert.equal(building.getAttribute('aria-labelledby'), family.id);
+  assert(visible(building));
+  for (const key of ['building.collect', 'building.build', 'building.upgrade', 'building.finish',
+    'building.supply', 'building.disabledTypes', 'building.speedUp', 'building.keepBlueprints']) {
+    assert(building.contains(f.widget(key).node), key);
+  }
+  assert(!f.editor.fields.has('schedule.weekFactory'));
+  assert.equal(f.env.saves, 0);
+});
+
+test('建筑与多分组分类切换、键盘导航和旧链接都能定位同一份配置', () => {
+  const f = fixture({ navigation: true }); f.renderPage();
+  const before = structuredClone(f.editor.draft), panel = f.env.node('config-panel-base');
+  f.env.node('config-family-production').onclick();
+  assert.equal(panel.querySelector('.config-subtabs').hidden, false);
+  assert(visible(f.env.node('config-group-factory')));
+  f.activateGroup('farm');
+  f.env.node('config-family-construction').onclick();
+  assert(visible(f.env.node('config-group-building')));
+  assert.equal(f.env.node('config-preview-scope').value, 'module:building');
+  assert.equal(f.env.hash, '#config-group-building');
+  f.env.node('config-family-construction').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+  assert(visible(f.env.node('config-group-farm')), '再次进入生产保留上次选择');
+  f.env.hash = '#config-group-building'; f.applyHash();
+  assert(visible(f.env.node('config-group-building')));
+  f.activateGroup('building', true);
+  assert.equal(f.env.focused, f.env.node('config-family-construction'));
+  f.activate('world'); assert(visible(f.env.node('config-panel-world')));
+  f.activate('base'); assert(visible(f.env.node('config-group-building')));
+  assert.deepEqual(f.editor.draft, before);
+  assert.equal(f.env.saves, 0);
+});
 
 test('所有显式父项位于同组，字段无重复且依赖无环', () => {
   const f = fixture();

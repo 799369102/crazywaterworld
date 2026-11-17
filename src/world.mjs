@@ -448,9 +448,15 @@ export function planWorld(survey, {
   const initialWeeklyGap = new Map(weeklyGap);
 
   const factoryTargets = new Map();
-  if (enabled('weekFactory')) {
-    for (const [id, gap] of weeklyGap) {
-      if (gap <= 0) continue;
+  const merchantProduction = !settings || settings.factory.enabled && settings.factory.demandFirst
+    && (settings.factory.produce || settings.factory.cooperateNative) && settings.factory.demandPriority.includes('merchant');
+  if (merchantProduction && (enabled('build') || enabled('upgrade'))) {
+    // Ordinary construction can unlock a selected merchant recipe for a later round.
+    for (const [id, required] of weeklyNeeds) {
+      const incoming = survey.factories.reduce((total, { factory }) => total
+        + (factory.finishedProducts ?? []).filter(item => item.id === id).reduce((sum, item) => sum + Number(item.num), 0)
+        + (factory.factoryQ ?? []).filter(job => job.productId === id).length, 0);
+      if (have(id) + incoming >= required) continue;
       const target = weekFactoryInfo(config, id, survey.buildings);
       if (!target || target.level >= target.required) continue;
       if (blockedBuilding({ type: target.type, buildingId: target.buildingId }) || blockedFactory({ type: target.type, buildingId: target.buildingId })) continue;
@@ -533,6 +539,12 @@ export function planWorld(survey, {
       notes.push(`${buildingName(b)} 建造要等级 ${row.playerLevel}，当前 ${survey.player?.level ?? 1}，先推主线`);
       continue;
     }
+    const effect = upgradeRow(config, b.type, 1)?.effect;
+    const gain = sumEffect(effect, '人口增加');
+    if (gain && plannedPopulation + gain > survey.maxPopulation) {
+      notes.push(`${buildingName(b)} 增加 ${gain} 人，需上限 ${plannedPopulation + gain}，当前上限 ${survey.maxPopulation}；先建指标建筑`);
+      continue;
+    }
     const consume = (row.consume ?? []).map(([id, n]) => ({ id, num: Number(n) }));
     if (!consume.every((c) => free(c.id) >= c.num)) {
       const missing = consume.filter(c => free(c.id) < c.num);
@@ -545,8 +557,7 @@ export function planWorld(survey, {
       notes.push(`${buildingName(b)} 建造材料不足（${short}），不买材料，等下一轮`);
       continue;
     }
-    const effect = upgradeRow(config, b.type, 1)?.effect;
-    builds.push({ building: b, row, consume, gain: sumEffect(effect, '人口增加'), capacity: sumEffect(effect, '人口上限') });
+    builds.push({ building: b, row, consume, gain, capacity: sumEffect(effect, '人口上限') });
   }
   const upgradeReasons = [];
   const typeLevels = new Map();
@@ -727,6 +738,9 @@ export function planWorld(survey, {
     const unmet = b.level === 0 ? (row.condition ?? []).some(([id, lv]) => (levels.get(id) ?? 0) < lv)
       : (row.condition ?? []).some(([type, lv]) => (typeLevels.get(type) ?? 0) < lv);
     if (unmet) continue;
+    const effect = b.level === 0 ? upgradeRow(config, b.type, 1)?.effect : row.effect;
+    const gain = Math.max(0, sumEffect(effect, '人口增加') - (b.population ?? 0));
+    if (gain && plannedPopulation + gain > survey.maxPopulation) continue;
     const costs = (row.consume ?? []).map(([id, num]) => ({ id, num: Number(num) }));
     const missing = costs.filter(item => free(item.id) < item.num);
     if (missing.length && missing.every(item => craftable.has(item.id))) buildingSupplies.push({ source: 'building', requirements: costs });
@@ -906,12 +920,13 @@ export function planWorld(survey, {
   planUpgrades(false);
 
   function planUpgrades(priority) {
+    if (!enabled('upgrade')) return;
     const upgrades = [];
     for (const b of survey.buildings) {
       if (blockedBuilding(b)) continue;
       const target = factoryTargets.get(b.type);
       const forOrder = target?.buildingId === b.buildingId && b.level < target.required;
-      if (forOrder !== priority || (!priority && !enabled('upgrade'))) continue;
+      if (forOrder !== priority) continue;
       if (b.level <= 0) continue;
       if (!b.type) { upgradeReasons.push(buildingName(b) + '未找到建筑类型'); continue; }
       if (b.buildStartTime > 0 || b.buildFinishTime > 0) {
@@ -955,7 +970,7 @@ export function planWorld(survey, {
       plannedPopulation += u.gain;
       for (const c of u.consume) reserve(c.id, c.num);
       actions.push({
-        kind: priority ? 'weekFactory' : 'upgrade',
+        kind: 'upgrade',
         request: 'UpgradeBuildingRequest',
         response: null,
         body: { buildingId: u.building.buildingId },

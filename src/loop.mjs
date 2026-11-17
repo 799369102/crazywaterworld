@@ -879,7 +879,7 @@ export async function runLoop(client, protocol, {
         const factoryReadVersion = factorySchedule.version();
         const survey = await surveyWorld(client, protocol, { config, player,
           includeCargo: needsCargoDemand(settings) || (!!isEnabled && enabled('cargo') && (allowWorld('startProduce') || usesOrders)),
-          includeWeekOrder: needsCargoDemand(settings) || usesOrders || allowWorld('startProduce') || allowWorld('weekFactory') || allowWorld('farm') || allowWorld('upgrade') });
+          includeWeekOrder: needsCargoDemand(settings) || usesOrders || allowWorld('startProduce') || allowWorld('farm') || allowWorld('upgrade') });
         if (settings && ((allowWorld('startProduce') && (settings.factory.demandFirst || settings.alliance?.enabled &&
           (settings.alliance.recruit && settings.alliance.recruitProduction || settings.guildShip?.enabled && settings.guildShip.produceMissing))) || settings.factory.speedUpSources.length > 0)) {
           const extra = await surveyBaseAutomation(client, protocol, config, player, settings, survey, { ledger: usageLedger, enabled: () => !stop.aborted && client.connected !== false });
@@ -893,7 +893,7 @@ export async function runLoop(client, protocol, {
           allowReroll: isEnabled ? enabled('denyOrder') : allowReroll,
           minOrderExp: settings ? settings.resident.minExp : isEnabled && enabled('denyOrder') ? null : 0,
         });
-        for(const key of ['collect','finishUpgrade','build','buildSupply','upgrade','finishOrder','startProduce','weekFactory','farm','speedUp','denyOrder'])if(enabled(key)){
+        for(const key of ['collect','finishUpgrade','build','buildSupply','upgrade','finishOrder','startProduce','farm','speedUp','denyOrder'])if(enabled(key)){
           const actions=plan.actions.filter(a=>worldTaskKey(a.kind)===key);
           rewards?.observe(key,actions.length?'本次计划 '+actions.length+' 项，执行结果见日志':'已读取基地状态，当前无符合设置的可执行动作');
           rewards?.expect(key,rewards.now()+Math.ceil(getEveryMs()/1000));
@@ -937,16 +937,16 @@ export async function runLoop(client, protocol, {
           summary.world.planned += result.followupCount;
           summary.world.results.push(...result.results);
         }
-        if (factorySchedule.active() || isEnabled && (enabled('upgrade') || enabled('weekFactory'))) {
+        if (factorySchedule.active() || isEnabled && enabled('upgrade')) {
           try {
             const factoryVersion = factorySchedule.version();
             const after = normalize(await client.request('OnWaterRequest', {}));
             if (factorySchedule.active()) factorySchedule.checked(after.building, { version: factoryVersion,
               slots: survey.factorySlots, progressed: factoryProgress(summary.world.results) });
-            if (enabled('upgrade') || enabled('weekFactory')) {
+            if (enabled('upgrade')) {
               summary.world.upgrades = [];
               for (const entry of summary.world.results) {
-                if (!['finishUpgrade', 'upgrade', 'weekFactory'].includes(entry.step?.kind)) continue;
+                if (!['finishUpgrade', 'upgrade'].includes(entry.step?.kind)) continue;
                 const id = entry.step.body.buildingId;
                 const before = survey.buildings.find(b => b.buildingId === id);
                 const current = after.building?.find(b => b.buildingId === id);

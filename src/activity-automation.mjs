@@ -1,7 +1,7 @@
 // Activity gates preserve the saved action switches across periods.
 export const activityAutomationFields = [
   { key: 'merchant.enabled', label: '海商王', taskKeys: ['merchantTrade', 'merchantRewards', 'tradeTasks'] },
-  { key: 'weekOrder.enabled', label: '不差钱商人', taskKeys: ['weekOrderSubmit', 'weekOrderFinal', 'weekFactory'] },
+  { key: 'weekOrder.enabled', label: '不差钱商人', taskKeys: ['weekOrderSubmit', 'weekOrderFinal'] },
   { key: 'heroRaid.enabled', label: '超凡英雄活动', taskKeys: ['heroRaid.enabled'] },
   { key: 'activityAutomation.weekPass', label: '勇士战令', taskKeys: ['weekPass'] },
   { key: 'activityAutomation.weekCharge', label: '累计充值', taskKeys: ['weekCharge'] },

@@ -94,4 +94,35 @@ test('原生自动生产保持原目标，仅明确开启协同才允许切换',
   f.settings.factory.produce = false;
   assert.deepEqual(f.plan().actions.map(step => step.request), ['SetFactoryAutoProduceRequest']);
 });
+test('建筑备料遵守新增人口上限，已有施工占用人口空间', () => {
+  for (const level of [0, 1]) {
+    const f = fixture();
+    f.settings.factory.keepStock = 0;
+    f.settings.factory.demandFirst = true;
+    f.settings.factory.demandPriority = ['building'];
+    f.settings.building.supply = true;
+    f.config.tables.BuildingUnlockCfg = table([{ buildingId: '1民居', buildingType: '民居',
+      playerLevel: 1, curPeople: 1, consume: [['长时品', 2]] }]);
+    f.config.tables.BuildingUpgradeCfg = table([
+      { buildingType: '民居', level: 1, effect: [['人口增加', 10]] },
+      { buildingType: '民居', level: 2, playerLevel: 1, curPeople: 1,
+        consume: [['长时品', 2]], effect: [['人口增加', 20]] },
+    ]);
+    f.survey.buildings.push({ buildingId: '1民居', type: '民居', level, population: level * 10, product: [] });
+    f.survey.maxPopulation = 19;
+    const plan = () => planWorld(f.survey, { config: f.config, settings: f.settings });
+    assert.deepEqual(products(plan()), [], '没有足够人口空间时不为首建或升级备料');
+    if (level === 0) {
+      const legacy = planWorld(f.survey, { config: f.config });
+      assert(legacy.notes.some(note => note.includes('先建指标建筑')));
+      assert(!legacy.actions.some(step => step.label?.includes('民居建造缺')));
+    }
+    f.survey.maxPopulation = 20;
+    assert.deepEqual(products(plan()), ['长时品', '长时品'], '刚好容纳新增人口时正常备料');
+    f.survey.futurePopulation = 20;
+    assert.deepEqual(products(plan()), [], '已施工民居的新增人口先占用上限');
+    f.config.tables.BuildingUpgradeCfg.data[level].effect = [['人口增加', level * 10]];
+    assert.deepEqual(products(plan()), ['长时品', '长时品'], '不增加人口的工程仍可备料');
+  }
+});
 console.log('工厂排产计划专项 ' + passed + '/' + passed + ' 通过');

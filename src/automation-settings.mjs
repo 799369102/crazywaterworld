@@ -200,6 +200,7 @@ export function settingsFromNative(tasks, { rounds = 0, everySeconds = 60, fishi
 }
 export function nativeTaskValues(settings, current) {
   const result = { ...current, ...settings.schedule };
+  delete result.weekFactory;
   for (const [key, fields] of Object.entries(nativeFields)) result[key] = fields.some(field => { const [group, name] = field.split('.'); return settings[group][name]; });
   result.startProduce = settings.factory.produce || settings.factory.cooperateNative;
   result.speedUp = settings.building.speedUp || settings.factory.speedUp || settings.farm.speedUp || settings.factory.speedUpSources.length > 0;
@@ -404,6 +405,12 @@ export function migrateSettingsVersion(settings, version, { source = 'import' } 
   if (!['import', 'stored'].includes(source)) throw new TypeError('未知设置迁移来源');
   if (!plain(settings)) return settings;
   const input = { ...settings };
+  if (plain(input.schedule) && Object.hasOwn(input.schedule, 'weekFactory')) {
+    // Factory construction now follows the existing building switches. Retiring
+    // the separate priority task must not enable or disable either action.
+    input.schedule = { ...input.schedule };
+    delete input.schedule.weekFactory;
+  }
   if (!Object.hasOwn(input, 'progression')) {
     input.progression = { ...DEFAULT_SETTINGS.progression, mainline: input.schedule?.stageAuto === true };
   }

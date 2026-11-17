@@ -208,8 +208,9 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
   }
   if (priority.has('building') && settings.loop && settings.building && settings.factory
     && worldPreferenceEnabled(settings, 'buildSupply')) {
-    const buildingStateKnown = amount(raw.player?.level) !== null && Number.isSafeInteger(population.current);
-    if (!buildingStateKnown) incomplete('building', '建筑备料所需角色等级或人口未完整确认');
+    const buildingStateKnown = amount(raw.player?.level) !== null
+      && [population.current, population.future, population.max].every(Number.isSafeInteger);
+    if (!buildingStateKnown) incomplete('building', '建筑备料所需角色等级、人口或人口上限未完整确认');
     const unlocks = new Map(rows(config, 'BuildingUnlockCfg').map(row => [row.buildingId, row]));
     const levels = new Map(buildings.map(building => [building.id, building.level]));
     const typeLevels = new Map();
@@ -226,6 +227,9 @@ export function buildProductionSnapshot(raw, config, settings = {}) {
       if (!next || next.playerLevel > raw.player?.level || next.curPeople > population.current) continue;
       const prerequisites = building.level === 0 ? levels : typeLevels;
       if ((next.condition ?? []).some(([id, level]) => (prerequisites.get(id) ?? 0) < level)) continue;
+      const gain = Math.max(0, sumEffect(building, building.level + 1, '人口增加')
+        - sumEffect(building, building.level, '人口增加'));
+      if (gain && population.future + gain > population.max) continue;
       const costs = requirements(next.consume);
       if (!costs) { incomplete('building', '建筑材料需求未完整确认'); continue; }
       const missing = costs.filter(item => free(item.id) < item.num);

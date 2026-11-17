@@ -4,7 +4,7 @@ const configCategories = { base: '基地', world: '世界', heroes: '英雄', da
 const activityOwnedSettings = new Set(['weekOrder.enabled', 'schedule.weekOrderSubmit', 'weekOrder.allowDiamonds', 'schedule.weekOrderFinal',
   'heroRaid.enabled', 'heroRaid.challenge', 'heroRaid.retryTimes', 'heroRaid.orders', 'heroRaid.lottery', 'heroRaid.rewards']);
 const baseFamilies = [
-  { id: 'construction', title: '建设', groups: ['building'] },
+  { id: 'construction', title: '建筑', groups: ['building'] },
   { id: 'production', title: '生产', groups: ['factory', 'farm', 'gather', 'forge'] },
   { id: 'events', title: '事件', groups: ['resident', 'cargo', 'events'] },
   { id: 'foundation', title: '基础', groups: ['pet', 'museum', 'resources', 'gold'] },
@@ -510,9 +510,11 @@ function configActivateGroup(id, focus = false, writeHash = true, forcePreview =
   if (family) {
     familyGroups.set(family.id, id);
     $('config-base-sections').setAttribute('aria-labelledby', 'config-family-' + family.id);
+    panel.querySelector('.config-subtabs').hidden = family.groups.length === 1;
     for (const tab of panel.querySelectorAll('[data-config-family]')) {
       const selected = tab.dataset.configFamily === family.id;
       tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1;
+      if (selected && focus && family.groups.length === 1) tab.focus({ preventScroll: true });
     }
   }
   for (const tab of panel.querySelectorAll('[data-config-group]')) {
@@ -685,6 +687,8 @@ function configRender() {
     }
     const tabs = el('div', 'config-subtabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', label + '分组');
     for (const group of selected) {
+      const family = baseFamilies.find(item => item.groups.includes(group.id));
+      if (family?.groups.length === 1) continue;
       const tab = el('button', '', group.title); tab.type = 'button'; tab.id = 'config-subtab-' + group.id; tab.dataset.configGroup = group.id;
       tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', 'config-group-' + group.id); tab.setAttribute('aria-selected', 'false'); tab.tabIndex = -1;
       tab.onclick = () => configActivateGroup(group.id);
@@ -700,10 +704,15 @@ function configRender() {
     }
     groupHost.append(tabs);
     for (const group of selected) {
-      const section = el('section', 'config-section'); section.id = 'config-group-' + group.id; section.setAttribute('role', 'tabpanel'); section.setAttribute('aria-labelledby', 'config-subtab-' + group.id);
-      const heading = el('div', 'config-group-heading title-with-help'); const title = el('h3', '', group.title); title.id = section.id + '-title'; heading.append(title);
-
-      section.append(heading);
+      const family = baseFamilies.find(item => item.groups.includes(group.id));
+      const direct = family?.groups.length === 1;
+      const section = el('section', 'config-section'); section.id = 'config-group-' + group.id;
+      section.setAttribute('role', direct ? 'group' : 'tabpanel');
+      section.setAttribute('aria-labelledby', direct ? 'config-family-' + family.id : 'config-subtab-' + group.id);
+      if (!direct) {
+        const heading = el('div', 'config-group-heading title-with-help'); const title = el('h3', '', group.title); title.id = section.id + '-title'; heading.append(title);
+        section.append(heading);
+      }
       if (group.movedCount || group.id === 'pirate-hunt') {
         const jump=el('button','config-small-button','前往挂机启停');jump.type='button';
         jump.onclick=()=>openIdleControls(group.controlKeys.find(key=>movedFields.has(key)));

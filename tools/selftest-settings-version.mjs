@@ -6,7 +6,10 @@ import path from 'node:path';
 import {
   SETTINGS_FORMAT, SETTINGS_SCHEMA_VERSION, defaultSettings, migrateSettingsVersion,
   importAutomationSettings, exportAutomationSettings, loadAutomationSettings, saveAutomationSettings,
+  nativeTaskValues,
 } from '../src/automation-settings.mjs';
+import { automationTasks, taskSettings } from '../src/automation.mjs';
+import { automationControls } from '../src/automation-controls.mjs';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cw-settings-version-'));
 const file = path.join(directory, 'settings.json');
@@ -43,6 +46,33 @@ function legacySettings() {
 }
 
 try {
+  test('旧商人工厂任务迁移为普通建筑配置，保留原建造升级授权', () => {
+    assert(!automationTasks.some(task => task.key === 'weekFactory'));
+    assert(!automationControls.some(control => control.key === 'schedule.weekFactory'));
+    assert(!Object.hasOwn(taskSettings({ weekFactory: true }), 'weekFactory'));
+    for (const oldValue of [true, false]) {
+      for (const upgrade of [true, false]) {
+        const settings = defaultSettings();
+        settings.schedule.weekFactory = oldValue;
+        settings.building.build = false;
+        settings.building.upgrade = upgrade;
+        const original = structuredClone(settings);
+        const imported = importAutomationSettings({ format: SETTINGS_FORMAT, version: 1, settings });
+        fs.writeFileSync(file, JSON.stringify({ version: 1, accounts: { factory: { settings, revision: 5 } } }));
+        const stored = loadAutomationSettings('factory', { file });
+        assert.deepEqual(settings, original);
+        assert.deepEqual(stored.settings, imported);
+        assert.equal(imported.building.build, false);
+        assert.equal(imported.building.upgrade, upgrade);
+        assert(!Object.hasOwn(imported.schedule, 'weekFactory'));
+        assert(!Object.hasOwn(nativeTaskValues(imported, { weekFactory: oldValue }), 'weekFactory'));
+        const saved = saveAutomationSettings('factory', imported, { file, revision: stored.revision });
+        assert.equal(saved.revision, 6);
+        assert.deepEqual(loadAutomationSettings('factory', { file }).settings, imported);
+        assert.deepEqual(importAutomationSettings(exportAutomationSettings(imported)), imported);
+      }
+    }
+  });
   test('版本1导入集中补全历史字段，显式选择和输入对象保持原值', () => {
     const settings = legacySettings();
     const before = structuredClone(settings);

@@ -118,7 +118,6 @@ export const automationTasks = [
   ['buildSupply', '为待建建筑补产材料', '海面', false],
   ['finishOrder', '交居民订单', '海面', true],
   ['startProduce', '工厂排产', '海面', true],
-  ['weekFactory', '不差钱商人备料工厂建设', '海面', true],
   ['upgrade', '余料升级建筑', '海面', false],
   ['speedUp', '使用加速器', '海面', false],
   ['adSpeedUpProduce', '工厂生产广告加速', '海面', false],
