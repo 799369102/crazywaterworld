@@ -1,6 +1,6 @@
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { Boxes, Building2, Check, ChevronDown, CircleUserRound, LayoutDashboard, LogIn, MoreHorizontal, ScrollText, Settings2, Ship, Swords, Timer, X } from "lucide-react"
+import { Boxes, Building2, Check, ChevronDown, CircleUserRound, LayoutDashboard, LogIn, Monitor, Moon, MoreHorizontal, ScrollText, Settings2, ShieldCheck, Ship, Sun, Swords, Timer, X } from "lucide-react"
 import { Button } from "./button"
 import { Badge } from "./badge"
 import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "./card"
@@ -19,10 +19,14 @@ const tabs = [
   ["guild-role", "联盟职位", "职位", ShieldCheck],
 ] as const
 
+const themes = [["system", "跟随系统", Monitor], ["light", "白天", Sun], ["dark", "黑夜", Moon]] as const
+
 export function chrome() {
   return renderToStaticMarkup(<header>
     <div className="headline">
-      <div className="mast"><span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span></div>
+      <div className="mast">
+        <span className="mast-icon"><Ship aria-hidden="true" /></span><h1>疯狂水世界</h1><span className="brand-label">航行控制台</span>
+      </div>
       <div className="connection">
         <span id="busy" className="sr-only" role="status" aria-live="polite" aria-atomic="true">未连接</span>
         <label className="account-label" htmlFor="account-picker-trigger">当前账号</label>
@@ -36,9 +40,24 @@ export function chrome() {
           <div id="account-picker-list" role="listbox" aria-label="选择账号" hidden />
         </div>
         <Button id="connect" size="sm">连接</Button>
-        <Button id="account-pause" size="sm" variant="outline" title="暂停后断开游戏连接，方便自行上号">暂停托管</Button>
+        <div className="hosting-controls">
+          <label className="hosting-interval" htmlFor="loop-every">间隔<Input id="loop-every" className="h-8 w-20 max-sm:w-16" type="number" min="1" max="86400" step="1" required defaultValue="60" disabled aria-label="托管间隔（秒）" aria-describedby="loop-interval-status" title="按账号自动保存，下一轮使用新间隔" /><span>秒</span></label>
+          <Button id="account-pause" size="sm" variant="outline" disabled title="按已保存的任务和轮数开始托管">开始托管</Button>
+          <span id="loop-interval-status" className="sr-only" role="status" />
+          <span id="loop-hint" className="sr-only" role="status" />
+        </div>
         <Button id="logs-open" size="sm" variant="outline" aria-haspopup="dialog" aria-controls="journal-dialog"><ScrollText aria-hidden="true" />日志 <span id="log-top-count">0</span></Button>
         <span id="hint" className="warn" />
+        <div id="theme-picker" className="theme-picker">
+          <Button id="theme-trigger" type="button" size="icon-sm" variant="outline" className="pointer-coarse:size-10" aria-label="切换主题，当前为跟随系统" title="切换主题，当前为跟随系统" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false">
+            {themes.map(([mode, , Icon]) => <span key={mode} data-theme-icon={mode} hidden={mode !== "system"}><Icon aria-hidden="true" /></span>)}
+          </Button>
+          <div id="theme-menu" role="menu" aria-label="主题模式" className="absolute right-0 top-full z-50 mt-1.5 w-36 rounded-md border bg-popover p-1 text-popover-foreground shadow-md" hidden>
+            {themes.map(([mode, label, Icon]) => <Button key={mode} type="button" variant="ghost" size="sm" role="menuitemradio" aria-checked={mode === "system"} data-theme-option={mode} tabIndex={-1} className="w-full justify-start aria-checked:bg-accent">
+              <Icon aria-hidden="true" /><span className="flex-1 text-left">{label}</span><span data-theme-check="" hidden={mode !== "system"}><Check aria-hidden="true" /></span>
+            </Button>)}
+          </div>
+        </div>
       </div>
     </div>
     <nav id="tabs" aria-label="功能导航">{tabs.map(([key, title, short, Icon]) =>

@@ -31,6 +31,7 @@ export const operationLabels = {
   '/api/accounts/phone-login/roles': '重新读取 APP 区服角色',
   '/api/accounts/alipay-login/start': '生成支付宝登录二维码',
   '/api/accounts/alipay-login/status': '读取支付宝扫码状态',
+  '/api/accounts/alipay-login/roles': '读取支付宝区服和角色',
   '/api/accounts/alipay-login/cancel': '取消支付宝扫码登录',
   '/api/accounts/alipay-login/save': '保存支付宝账号',
   '/api/accounts/pause': '切换账号托管状态',
@@ -61,6 +62,7 @@ export const operationLabels = {
   '/api/tasks': '查看任务', '/api/tasks/run': '领取任务奖励',
   '/api/stages': '查看推关进度', '/api/stages/start': '开始推关', '/api/stages/stop': '停止推关',
   '/api/loop': '查看挂机设置', '/api/loop/start': '开始挂机', '/api/loop/stop': '暂停挂机',
+  '/api/loop/auto-start': '设置自动开始挂机', '/api/loop/interval': '设置挂机间隔',
   '/api/login-settings': '保存登录设置',
   '/api/loop/task': '修改自动任务', '/api/loop/fishing-reserve': '设置钓具预留金币',
 };

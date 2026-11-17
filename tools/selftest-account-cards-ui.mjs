@@ -175,7 +175,7 @@ function fixture(initial = sampleAccounts()) {
     const refreshManualWorld = () => {};
     const refreshActivities = () => {};
     const refreshStages = () => {};
-    const refreshLoop = () => {};
+    const refreshLoop = () => {loopAccount=current;renderHostingControl();};
     const refreshOverview = () => env.effects.push(['overview',current]);
     const renderWho = data => {env.details.push(data);$('who').textContent=data.player?.nickname||'';};
     const subscribe = () => {};
@@ -183,11 +183,10 @@ function fixture(initial = sampleAccounts()) {
     const giftAccountChanged = () => {};
     const loginSettingsAccountChanged = () => {};
     const appointmentsAccountChanged = () => {};
-    const resetActivityStatistics = () => {};
     const resetWorldMap = () => {};
     const resetProductionPlan = () => {};
     let accounts=structuredClone(env.serverRows),current=env.selected,dailyAccount=current,dailyVersion=0;
-    let activityStatsOwner=null,worldMapOwner=null,productionPlanOwner=null,productionPlanBusy=false;
+    let worldMapOwner=null,productionPlanOwner=null,productionPlanBusy=false,loopAccount=current;
     ${accountScript}
     ${cardsScript}
     snapshot=accounts.find(row=>row.id===current)?.status??{};

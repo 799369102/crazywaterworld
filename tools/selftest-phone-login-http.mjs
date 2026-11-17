@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cw-phone-http-'));
 process.env.CW_DATA_DIR = directory;
@@ -39,6 +40,7 @@ let smsGate = null;
 let smsStarted = null;
 let passwordFailure = false;
 let secondAccountFailure = false;
+let gameToken = 'fixture-token';
 let externalCalls = 0;
 const roleFailures = new Set();
 const liveClients = new Set();
@@ -61,12 +63,20 @@ const roleLists = new Map([
 Object.defineProperty(GameClient.prototype, 'connected', { get() { return liveClients.has(this); } });
 GameClient.prototype.connect = async function (login) {
   this.login = login;
+  this.stopping = false;
   connections.push({ client: this, login });
   liveClients.add(this);
-  return { result: 0, playerInfo: roleLists.get(login.eworldParams.openId)?.[0]?.roleInfo };
+  const roles = roleLists.get(login.eworldParams.openId) || [];
+  const role = (roles.find(row => row.worldId === login.worldId) ?? roles[0])?.roleInfo;
+  return { result: 0, playerInfo: role && { ...role, playerId: role.id } };
 };
+GameClient.prototype.send = () => {};
+GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.request = async function (name) {
-  assert.equal(name, 'GameWorldListRequest');
+  if (name === 'OnWaterRequest') return { building: [] };
+  if (name === 'AllItemRequest') return { items: [] };
+  if (name === 'EmailBoxRequest') return { email: [] };
+  if (name !== 'GameWorldListRequest') return {};
   const id = this.login.eworldParams.openId;
   if (roleFailures.has(id)) throw new Error('模拟角色列表读取超时');
   return { recentWorlds: roleLists.get(id) || [], latestGroupId: 1 };
@@ -95,7 +105,7 @@ globalThis.fetch = async (url, options) => {
     const bodies = {
       '/api/public/info': { publicKey: publicKeyBase64 },
       '/api/init': { initId: 'fixture-init', channel: { appKey: channelAppKey } },
-      '/api/user/login': { openId: sdkId === 'fixture-sdk-id-2' ? 'fixture-game-id-2' : 'fixture-game-id', token: 'fixture-token', sign: 'fixture-sign', ts: Date.now() },
+      '/api/user/login': { openId: sdkId === 'fixture-sdk-id-2' ? 'fixture-game-id-2' : 'fixture-game-id', token: gameToken, sign: 'fixture-sign', ts: Date.now() },
     };
     assert.ok(bodies[parsed.pathname], 'unexpected game login request');
     return Response.json({ code: 0, data: bodies[parsed.pathname] });
@@ -160,7 +170,9 @@ globalThis.fetch = async (url, options) => {
   return new Response(encryptForm(JSON.stringify(payload)));
 };
 
-const app = createConsole({ port: 0, protocol: {}, captureController: { inspectCaptureRecovery: () => ({ pending: false }) } });
+const app = createConsole({ port: 0,
+  protocol: { OnWaterRequest: true, OnWaterResponse: true, AllItemRequest: true, AllItemResponse: true },
+  captureController: { inspectCaptureRecovery: () => ({ pending: false }) } });
 let closed = false;
 try {
   const root = await app.listen();
@@ -170,6 +182,37 @@ try {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     return { status: response.status, data: await response.json() };
+  }
+  async function accountApi(route, body, id = 'fixture-game-id') {
+    const response = await nativeFetch(root + '/api/' + route + '?account=' + encodeURIComponent(id), {
+      method: body === undefined ? 'GET' : 'POST',
+      body: body === undefined ? undefined : JSON.stringify({ confirm: true, ...body }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(data));
+    return data;
+  }
+  async function waitForLoop(id, worldId) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const session = app.sessions.get(id);
+      if (session?.loop.running && session.loop.completed >= 1 && session.client?.connected
+        && session.client.login.worldId === worldId) return session;
+      await sleep(10);
+    }
+    const session = app.sessions.get(id);
+    assert.fail('等待所选角色自动挂机超时 ' + JSON.stringify({ running: session?.loop.running, completed: session?.loop.completed,
+      stopping: session?.loop.controller?.signal.aborted, error: session?.loop.error, login: session?.client?.login.worldId,
+      log: session?.log.slice(-8) }));
+  }
+  async function disconnect(id) {
+    const job = app.sessions.get(id)?.loop.job;
+    const result = await nativeFetch(root + '/api/disconnect?account=' + encodeURIComponent(id), {
+      method: 'POST', body: JSON.stringify({ confirm: true }),
+    });
+    assert.equal(result.status, 200);
+    await job;
   }
 
   const missing = await request('/status');
@@ -357,6 +400,51 @@ try {
   assert.equal(loadStore().accounts.length, 1);
   assert.equal(loadStore().accounts[0].login.worldId, 3000000002);
   assert.equal(loadStore().accounts[0].lastSeen.nickname, '星海船长');
+  const initialSession = await waitForLoop('fixture-game-id', 3000000002);
+  assert.equal(initialSession.loop.rounds, 0);
+  assert.equal(loadStore().accounts[0].automation.autoStart, true);
+  const refreshRunning = await request('', { confirm: true, phone, password });
+  const oldRunningClient = initialSession.client;
+  assert.equal((await request('/save', { confirm: true, id: refreshRunning.data.id, choiceId: refreshRunning.data.choices[0].id })).status, 200);
+  await waitForLoop('fixture-game-id', 3000000001);
+  assert.equal(oldRunningClient.connected, false);
+  assert.equal(loadStore().accounts[0].automation.autoStart, true);
+
+  // 顶号等待中保存同一角色的新凭证，取消旧等待后直接接续挂机。
+  const loginSettings = await accountApi('login-settings');
+  await accountApi('login-settings', { revision: loginSettings.revision, settings: {
+    ...loginSettings.settings, reconnectEnabled: true, baseDelaySeconds: 900, jitterSeconds: 0,
+    deep: { ...loginSettings.settings.deep, enabled: false },
+  } });
+  const kickedClient = initialSession.client;
+  const previousLoopJob = initialSession.loop.job;
+  kickedClient.closeReason = 'kicked';
+  liveClients.delete(kickedClient);
+  kickedClient.emit('fatal', { reason: 'SCChannelExpired' });
+  kickedClient.emit('close', { reason: 'kicked' });
+  assert.equal(initialSession.loginBlocked, true);
+  assert.equal(initialSession.loginRecovery.status, 'waiting');
+  const previousRecoveryJob = initialSession.loginRecoveryJob;
+  const previousRecoveryController = initialSession.loginRecoveryController;
+  gameToken = 'fixture-refreshed-token';
+  const sameRoleRefresh = await request('', { confirm: true, phone, password });
+  assert.equal(sameRoleRefresh.status, 200);
+  const beforeSameRoleSave = connections.length;
+  assert.equal((await request('/save', {
+    confirm: true, id: sameRoleRefresh.data.id, choiceId: sameRoleRefresh.data.choices[0].id,
+  })).status, 200);
+  await waitForLoop('fixture-game-id', 3000000001);
+  assert.equal(previousRecoveryController.signal.aborted, true);
+  await previousRecoveryJob;
+  assert.equal(initialSession.loginRecoveryJob, null);
+  assert.equal(initialSession.loginBlocked, false);
+  assert.equal(initialSession.client.login.eworldParams.token, gameToken);
+  assert.equal(connections.length, beforeSameRoleSave + 1, '新凭证只建立一次挂机连接');
+  assert.notEqual(initialSession.loop.job, previousLoopJob);
+  assert.equal(liveClients.size, 1);
+  assert.equal(loadStore().accounts[0].automation.autoStart, true);
+  await disconnect('fixture-game-id');
+  assert.equal(loadStore().accounts[0].automation.autoStart, false);
   assert.equal((await request('/save', { confirm: true, id: preview.data.id, choiceId: preview.data.choices[0].id })).status, 400);
 
   // 所有短信关联账号及其已有角色都进入同一列表，选择第二个 APP 账号持久化到正确身份。
@@ -371,6 +459,8 @@ try {
   const savedSecond = await request('/save', { confirm: true, id: smsPreview.data.id, choiceId: smsPreview.data.choices[2].id });
   assert.equal(savedSecond.data.account.id, 'fixture-game-id-2');
   assert.equal(loadStore().accounts.find(row => row.id === 'fixture-game-id-2').login.worldId, 4000000008);
+  await waitForLoop('fixture-game-id-2', 4000000008);
+  await disconnect('fixture-game-id-2');
 
   // 单账号读取失败保留其他账号结果，原凭证可重试，已有选择 ID 保持稳定。
   roleFailures.add('fixture-game-id-2');
@@ -411,6 +501,7 @@ try {
   liveClients.add(activeClient);
   session.client = activeClient;
   session.player = { playerId: 11, nickname: '海风船长', worldId: 3000000010 };
+  session.productionSyncRequired = false;
   session.queueTail = Promise.resolve();
   const beforeReuse = connections.length;
   const reused = await request('', { confirm: true, phone, password });
@@ -423,6 +514,8 @@ try {
   assert.equal(activeClient.connected, true);
   assert.equal(loadStore().accounts[0].login.worldId, 3000000001);
   assert.equal(loadStore().accounts[0].lastSeen.worldId, 3000000010);
+  assert.equal(session.loop.running, false);
+  assert.equal(loadStore().accounts[0].automation.autoStart, false);
 
   // 不同角色保存先停旧任务与连接，并把停止状态持久化。
   const changed = await request('', { confirm: true, phone, password });

@@ -59,18 +59,21 @@ function fixture({ catalog = {} } = {}) {
   };
   const api = new Function('env', sources + `
     let current = 'a', loopSettingsRevision = 1, loopFieldDefaults = null;
-    const accounts = [], $ = env.node, window = { confirm: env.confirm };
+    const accounts = [], $ = env.node, window = { confirm: env.confirm }, loopIntervalSaves = new Map();
     const setTimeout = env.setTimeout, clearTimeout = env.clearTimeout;
     const call = (route, options) => env.call(current, route, options);
     const configRenderUsage = () => {}, configUpdateVisibility = () => env.updateVisibility?.();
     const configActivate = () => { env.focuses++; }, configActivateGroup = () => {};
     const configRender = () => { env.renders++; };
-    const resetWorldMap = () => {}, resetActivityRanks = () => {};
+    const resetWorldMap = () => {};
     const clear = node => node, el = () => ({});
     return {
       editor: configEditor, groups: configGroups, set: configSet, load: configLoad, save: configSave, flush: configFlush,
       dirty: configIsDirty, importFile: configImportFile, mayChange: configMayChangeAccount,
       revision: () => loopSettingsRevision,
+      setLoopRevision(revision) { loopSettingsRevision = revision; },
+      intervalSaved: configIntervalSaved,
+      intervalSaves: loopIntervalSaves,
       change(next) { current = next; configAccountChanged(); },
     };
   `)(env);
@@ -89,6 +92,126 @@ function fixture({ catalog = {} } = {}) {
     },
   };
 }
+
+await test('页头间隔保存同步配置版本，后续草稿保存保留新间隔', async () => {
+  const f = fixture();
+  await f.load();
+  const prior = f.editor.data.revision;
+  const next = structuredClone(f.view('a').settings);
+  next.loop.everySeconds = 123;
+  const saved = saveAutomationSettings('a', next, { file: f.file, revision: prior });
+  f.intervalSaved('a', 123, prior, saved.revision);
+  assert.equal(f.editor.data.revision, saved.revision);
+  assert.equal(f.editor.data.settings.loop.everySeconds, 123);
+  assert.equal(f.editor.baseline.loop.everySeconds, 123);
+  assert.equal(f.editor.draft.loop.everySeconds, 123);
+  assert.equal(f.dirty(), false);
+  f.set('factory.keepStock', 124);
+  await f.tick(600);
+  assert.equal(f.view('a').settings.loop.everySeconds, 123);
+  assert.equal(f.view('a').settings.factory.keepStock, 124);
+  assert.equal(f.editor.saveError, null);
+});
+
+await test('旧版本和旧账号间隔响应不覆盖当前配置草稿', async () => {
+  const f = fixture();
+  await f.load();
+  const before = structuredClone(f.editor.data);
+  f.intervalSaved('b', 180, before.revision, before.revision + 1);
+  assert.deepEqual(f.editor.data, before);
+  f.intervalSaved('a', 180, before.revision - 1, before.revision);
+  assert.deepEqual(f.editor.data, before);
+  f.set('factory.keepStock', 200);
+  f.intervalSaved('a', 180, before.revision, before.revision + 1);
+  assert.equal(f.editor.draft.factory.keepStock, 200);
+  assert.equal(f.editor.draft.loop.everySeconds, 180);
+  assert.equal(f.dirty(), true);
+});
+
+await test('间隔提交期间的新草稿等待响应再按新版本保存', async () => {
+  const f = fixture(), gate = deferred();
+  await f.load();
+  const prior = f.editor.data.revision;
+  const next = structuredClone(f.view('a').settings);
+  next.loop.everySeconds = 137;
+  const saved = saveAutomationSettings('a', next, { file: f.file, revision: prior });
+  f.intervalSaves.set('a', { writing: true, promise: gate.promise });
+  f.set('factory.keepStock', 138);
+  await f.tick(600);
+  const flushing = f.flush();
+  await settle();
+  assert.equal(f.posts().length, 0);
+  f.intervalSaved('a', 137, prior, saved.revision);
+  f.intervalSaves.delete('a');
+  gate.resolve(true);
+  assert.equal(await flushing, true);
+  assert.equal(f.posts().length, 1);
+  assert.equal(f.posts()[0].payload.revision, saved.revision);
+  assert.equal(f.view('a').settings.loop.everySeconds, 137);
+  assert.equal(f.view('a').settings.factory.keepStock, 138);
+  assert.equal(f.editor.saveError, null);
+});
+
+await test('间隔提交前的草稿保存继续执行，避免相互等待', async () => {
+  const f = fixture(), gate = deferred();
+  await f.load();
+  f.intervalSaves.set('a', { writing: false, promise: gate.promise });
+  f.set('factory.keepStock', 139);
+  assert.equal(await f.flush(), true);
+  assert.equal(f.view('a').settings.factory.keepStock, 139);
+  f.intervalSaves.delete('a');
+  gate.resolve(true);
+});
+
+await test('草稿无修改时任务操作仍等待间隔保存并使用新版本', async () => {
+  const f = fixture(), gate = deferred();
+  await f.load();
+  const prior = f.editor.data.revision;
+  f.intervalSaves.set('a', { writing: true, promise: gate.promise });
+  let commandRevision = null;
+  const command = f.flush().then(ready => { if (ready) commandRevision = f.revision(); return ready; });
+  await settle();
+  assert.equal(commandRevision, null);
+  assert.equal(f.posts().length, 0);
+  f.intervalSaved('a', 141, prior, prior + 1);
+  f.setLoopRevision(prior + 1);
+  f.intervalSaves.delete('a');
+  gate.resolve(true);
+  assert.equal(await command, true);
+  assert.equal(commandRevision, prior + 1);
+  assert.equal(f.posts().length, 0);
+});
+
+await test('等待间隔期间切号或间隔保存失败会阻止后续任务操作', async () => {
+  for (const outcome of ['switched', 'failed']) {
+    const f = fixture(), gate = deferred();
+    await f.load();
+    f.intervalSaves.set('a', { writing: true, promise: gate.promise });
+    const flushing = f.flush();
+    await settle();
+    if (outcome === 'switched') { f.change('b'); await f.load(); }
+    f.intervalSaves.delete('a');
+    gate.resolve(outcome !== 'failed');
+    assert.equal(await flushing, false);
+    assert.equal(f.posts().length, 0);
+  }
+});
+
+await test('等待间隔响应期间切号或重新载入会取消旧草稿提交', async () => {
+  for (const change of ['account', 'reload']) {
+    const f = fixture(), gate = deferred();
+    await f.load();
+    f.intervalSaves.set('a', { writing: true, promise: gate.promise });
+    f.set('factory.keepStock', 140);
+    const saving = f.save();
+    if (change === 'account') { f.change('b'); await f.load(); }
+    else await f.load(true);
+    f.intervalSaves.delete('a');
+    gate.resolve(true);
+    assert.equal(await saving, false);
+    assert.equal(f.posts().length, 0);
+  }
+});
 
 await test('打开配置不写盘，连续输入只保存最终值并更新版本提示', async () => {
   const f = fixture(); await f.load(); await f.tick(1000);

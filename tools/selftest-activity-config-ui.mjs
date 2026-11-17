@@ -102,7 +102,7 @@ function loadFixture(initial = dataFor([])) {
   const state = { next: structuredClone(initial), renders: [], usageRenders: 0, messages: [], calls: [] };
   const api = new Function('state', 'renderGroups', definitions + '\n' + dirtySource + '\n' + loadSource + '\n' + saveSource + '\n' + toggleSource + `
     const current = 'isolated-account', accounts = [];
-    const savingTasks = new Set();
+    const savingTasks = new Set(), loopIntervalSaves = new Map();
     let loopVersion = 0, loopSettingsRevision = 7;
     const setTaskSwitch = (input, value) => { input.checked = value; };
     const refreshLoop = () => {};

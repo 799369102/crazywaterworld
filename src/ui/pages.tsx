@@ -9,8 +9,8 @@ import { Badge } from "./badge"
 import { DialogFooter, DialogHeader, DialogTitle } from "./dialog"
 import { MessageCircle, Music2, Plus, QrCode, Smartphone, X } from "lucide-react"
 
-function Panel({ title, help, titleAfter, collapseId, children }: { title: string; help?: string; titleAfter?: React.ReactNode; collapseId?: string; children: React.ReactNode }) {
-  return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}{collapseId && <CardAction className="row-span-1 self-center"><Button type="button" size="sm" variant="ghost" data-panel-toggle={collapseId} aria-controls={collapseId} aria-expanded="false">展开</Button></CardAction>}</CardHeader><CardContent id={collapseId} hidden={!!collapseId}>{children}</CardContent></Card>
+function Panel({ title, help, titleAfter, children }: { title: string; help?: string; titleAfter?: React.ReactNode; children: React.ReactNode }) {
+  return <Card><CardHeader><CardTitle className="title-with-help">{title}{help && <HelpTip title={title}>{help}</HelpTip>}</CardTitle>{titleAfter && <CardAction className="row-span-1 self-center max-md:col-span-2 max-md:col-start-1 max-md:row-start-2 max-md:justify-self-start">{titleAfter}</CardAction>}</CardHeader><CardContent>{children}</CardContent></Card>
 }
 
 function Option({ id, label, checked = false }: { id: string; label: string; checked?: boolean }) {
@@ -39,16 +39,6 @@ export function overviewPage() {
       <div className="bar overview-task-filter"><Input id="overview-task-search" type="search" aria-label="查找运行状态" placeholder="功能名称或状态" /><label htmlFor="overview-task-filter">显示</label><select id="overview-task-filter" defaultValue="enabled"><option value="enabled">已开启</option><option value="issues">异常 / 受总控限制</option><option value="all">全部项目</option></select></div>
       <p id="overview-task-summary" className="dim" role="status">等待读取运行状态</p>
       <div id="overview-task-groups" />
-    </Panel>
-    <Panel title="活动统计" collapseId="activity-stats-content" help="活动名称取游戏当前期数配置。福利与达标奖励分别核对；“已达成已领”不表示所有档位都已完成，未同步不会记为已领取。时间使用北京时间MM-DD。">
-      <div className="bar"><Button id="activity-stats-refresh" variant="outline" size="sm">刷新统计</Button><span id="activity-stats-status" className="dim" role="status">连接后读取</span></div>
-      <div id="activity-stats-table" className="activity-statistics-scroll" aria-label="活动统计表格" tabIndex={0} />
-    </Panel>
-    <Panel title="活动排行榜" collapseId="activity-rank-content" help="只读查看游戏返回的玩家排行，不领取奖励或发起挑战。按页签切换，未开放与未上榜会单独说明。">
-      <div className="bar"><Button id="activity-rank-refresh" variant="outline" size="sm">刷新排行</Button><span id="activity-rank-status" className="dim" role="status">连接后读取</span></div>
-      <div id="activity-rank-tabs" className="config-subtabs" role="tablist" aria-label="活动排行榜" />
-      <div id="activity-rank-panel" role="tabpanel"><p id="activity-rank-mine" className="dim" /><div id="activity-rank-table" className="activity-rank-table" /></div>
-      <div className="bar"><Button id="activity-rank-prev" variant="outline" size="sm" disabled>上一页</Button><span id="activity-rank-page" className="dim" /><Button id="activity-rank-next" variant="outline" size="sm" disabled>下一页</Button></div>
     </Panel>
     <Panel title="世界概览" help="只读地图。移动位置按已同步起终点和行军时间推算。自动刷新仅影响本模块，不改挂机间隔；可设5–300秒。" titleAfter={<div className="world-refresh-controls"><Button id="world-map-auto-refresh" size="sm" variant="outline" aria-pressed="true">自动刷新：开</Button><label className="world-refresh-setting">每<input id="world-map-refresh-seconds" aria-label="世界概览刷新秒数" type="number" min="5" max="300" step="1" defaultValue="10" />秒</label></div>}>
       <div id="world-map-fleets" className="fleet-summary" aria-label="我的舰队" />

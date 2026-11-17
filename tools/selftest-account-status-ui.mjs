@@ -93,14 +93,14 @@ function fixture(rows = [
     const setInterval = (callback, delay) => { env.intervals.push({ callback, delay }); };
     const reportError = error => env.errors.push(error);
     const configMayChangeAccount = async () => env.allowed;
+    const configFlush = async () => env.onFlush ? env.onFlush() : true;
+    const saveLoopInterval = async () => env.onIntervalSave ? env.onIntervalSave() : true;
     const refreshProgression = () => env.effects.push('progression');
     const refreshManualWorld = () => env.effects.push('world');
     const refreshActivities = () => env.effects.push('activities');
     const refreshStages = () => env.effects.push('stages');
-    const refreshLoop = () => env.effects.push('loop');
+    const refreshLoop = () => { loopAccount = current; renderHostingControl(); env.effects.push('loop'); };
     const renderOverview = data => env.overviews.push(structuredClone(data));
-    const refreshActivityRanks = () => env.effects.push('rankings');
-    const refreshActivityStatistics = () => env.effects.push('statistics');
     const maybeRefreshWorldMap = () => env.effects.push('world-map');
     ${overview ? overviewScript : "const refreshOverview = () => env.effects.push('overview');"}
     const subscribe = () => env.effects.push('subscribe');
@@ -109,22 +109,23 @@ function fixture(rows = [
     const loginSettingsAccountChanged = () => env.effects.push('login-settings');
     const appointmentsAccountChanged = () => {};
     const renderAccounts = () => env.effects.push('account-cards');
-    const resetActivityStatistics = () => env.effects.push('clear-statistics');
     const resetWorldMap = () => env.effects.push('clear-map');
     const resetProductionPlan = () => env.effects.push('clear-production');
     let accounts = [], current = null, dailyAccount = null, dailyVersion = 0;
-    let activityStatsOwner = null, worldMapOwner = null, productionPlanOwner = null;
-    let productionPlanBusy = false, loopReads = 0;
+    let worldMapOwner = null, productionPlanOwner = null;
+    let productionPlanBusy = false, loopReads = 0, loopAccount = null;
     ${accountScript}
     ${pollingScript}
     env.api = {
       connectionStatus, renderAccountOptions, paintConnection, setBusy,
-      setAccountStatus, refreshAccountStatuses, loadAccounts, selectLoadedAccount, refreshOverview,
+      setAccountStatus, refreshAccountStatuses, loadAccounts, selectLoadedAccount, refreshOverview, renderHostingControl,
       current: () => current, rows: () => accounts, snapshot: () => snapshot,
       disconnected, connectingAccounts,
+      loopReady(ready) { loopAccount = ready ? current : null; renderHostingControl(); },
       initialize(rows, selected) {
         accounts = structuredClone(rows);
         current = selected;
+        loopAccount = selected;
         snapshot = accounts.find(account => account.id === current)?.status ?? {};
         accountDetailsOwner = current;
         dailyAccount = current;
@@ -421,17 +422,18 @@ await test('连接失败清除进行中状态并允许下一次连接', async ()
 await test('暂停和恢复在切号后仍更新原账号，不影响新账号状态', async () => {
   for (const paused of [true, false]) {
     const env = fixture([
-      { id: 'account-a', title: '甲', status: { connected: paused, paused: !paused } },
+      { id: 'account-a', title: '甲', status: { connected: paused, looping: paused, paused: !paused } },
       { id: 'account-b', title: '乙', status: { connected: true } },
     ]);
     const gate = deferred();
     env.respond = () => gate.promise;
     const request = env.node('account-pause').onclick();
+    await settle();
     env.select('account-b');
     gate.resolve({ paused, connected: false });
     await request;
     assert.equal(env.calls[0].route, '/api/accounts/pause');
-    assert.deepEqual(env.calls[0].payload, { paused });
+    assert.deepEqual(env.calls[0].payload, paused ? { paused: true } : { paused: false, start: true, confirm: true });
     assert.equal(env.calls[0].owner, 'account-a');
     assert.equal(env.row('account-a').status.connected, false);
     assert.equal(env.row('account-a').status.paused, paused);
@@ -440,6 +442,108 @@ await test('暂停和恢复在切号后仍更新原账号，不影响新账号�
     assert.equal(env.api.current(), 'account-b');
     assert.deepEqual(env.effects, []);
     assert.match(env.option('account-a').text, paused ? /已暂停/ : /未连接/);
+  }
+});
+
+await test('统一托管按钮覆盖空闲、运行、暂停、顶号和恢复中的状态', async () => {
+  for (const [status, label] of [
+    [{ connected: false }, '开始托管'],
+    [{ connected: true, looping: false }, '开始托管'],
+    [{ connected: true, looping: true }, '暂停托管'],
+    [{ paused: true, looping: true }, '恢复托管'],
+    [{ loginBlocked: true }, '恢复托管'],
+    [{ loginBlocked: true, reconnecting: true }, '暂停托管'],
+  ]) {
+    const env = fixture([{ id: 'a', title: '甲', status }]);
+    assert.equal(env.node('account-pause').textContent, label);
+    assert.equal(env.node('account-pause').disabled, false);
+  }
+  assert.equal(fixture([]).node('account-pause').disabled, true);
+  const stopping = fixture([{ id: 'a', title: '甲', status: { looping: true, loopStopping: true } }]);
+  assert.equal(stopping.node('account-pause').disabled, true);
+  await stopping.node('account-pause').onclick();
+  assert.equal(stopping.calls.length, 0);
+});
+
+await test('开始托管先保存草稿和间隔，重复点击与轮询保持单个请求', async () => {
+  const env = fixture(), gate = deferred(), order = [];
+  env.onFlush = async () => { order.push('draft'); await gate.promise; return true; };
+  env.onIntervalSave = async () => { order.push('interval'); return true; };
+  env.respond = async (route, record) => {
+    if (route === '/api/accounts/pause') {
+      order.push('start');
+      assert.deepEqual(record.payload, { paused: false, start: true, confirm: true });
+      env.serverAccounts[0].status = { connected: true, looping: true };
+      return env.serverAccounts[0].status;
+    }
+    return { accounts: env.serverAccounts };
+  };
+  const request = env.node('account-pause').onclick();
+  await env.node('account-pause').onclick();
+  env.api.renderHostingControl();
+  assert.equal(env.node('account-pause').disabled, true);
+  assert.equal(env.calls.length, 0);
+  gate.resolve();
+  await request; await settle();
+  assert.deepEqual(order, ['draft', 'interval', 'start']);
+  assert.equal(env.calls.filter(call => call.route === '/api/accounts/pause').length, 1);
+  assert.equal(env.node('account-pause').textContent, '暂停托管');
+  assert.equal(env.node('account-pause').disabled, false);
+});
+
+await test('间隔加载前等待开始和恢复，正在运行时仍可暂停', async () => {
+  for (const status of [{}, { paused: true }, { looping: true }]) {
+    const env = fixture([{ id: 'a', title: '甲', status }]);
+    env.api.loopReady(false);
+    assert.equal(env.node('account-pause').disabled, !status.looping);
+    env.api.loopReady(true);
+    assert.equal(env.node('account-pause').disabled, false);
+  }
+});
+
+await test('暂停立即提交且允许处理未保存或无效的配置', async () => {
+  const env = fixture([{ id: 'a', title: '甲', status: { connected: true, looping: true } }]);
+  env.onFlush = env.onIntervalSave = async () => { throw new Error('暂停不应等待设置'); };
+  env.respond = async (route, record) => {
+    if (route === '/api/accounts/pause') {
+      assert.deepEqual(record.payload, { paused: true });
+      env.serverAccounts[0].status = { paused: true, connected: false, looping: false };
+      return env.serverAccounts[0].status;
+    }
+    return { accounts: env.serverAccounts };
+  };
+  await env.node('account-pause').onclick(); await settle();
+  assert.equal(env.errors.length, 0);
+  assert.equal(env.node('account-pause').textContent, '恢复托管');
+  assert.equal(env.node('account-pause').disabled, false);
+});
+
+await test('开始前保存失败或切号均取消启动，错误后可以重试', async () => {
+  for (const failure of ['draft', 'interval', 'request']) {
+    const env = fixture();
+    env.onFlush = async () => failure !== 'draft';
+    env.onIntervalSave = async () => failure !== 'interval';
+    env.respond = async route => {
+      if (route === '/api/accounts/pause') throw new Error('启动失败');
+      return { accounts: env.serverAccounts };
+    };
+    await env.node('account-pause').onclick(); await settle();
+    assert.equal(env.calls.filter(call => call.route === '/api/accounts/pause').length, failure === 'request' ? 1 : 0);
+    assert.equal(env.node('account-pause').disabled, false);
+    assert.equal(env.node('account-pause').textContent, '开始托管');
+  }
+  for (const phase of ['draft', 'interval']) {
+    const env = fixture(), gate = deferred();
+    if (phase === 'draft') env.onFlush = () => gate.promise;
+    else env.onIntervalSave = () => gate.promise;
+    const request = env.node('account-pause').onclick();
+    await settle();
+    env.select('account-b');
+    gate.resolve(true);
+    await request;
+    assert.equal(env.calls.filter(call => call.route === '/api/accounts/pause').length, 0);
+    assert.equal(env.api.current(), 'account-b');
+    assert.equal(env.node('account-pause').disabled, false);
   }
 });
 

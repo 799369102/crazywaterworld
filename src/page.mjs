@@ -8,13 +8,11 @@ const progressionScript = readFileSync(new URL('./ui/progression.js', import.met
 const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url), 'utf8');
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
-const giftCodeScript = readFileSync(new URL('./gift-codes-ui.js', import.meta.url), 'utf8');
-const rankingScript = readFileSync(new URL('./activity-rankings-ui.js', import.meta.url), 'utf8');
-const activityStatisticsScript = readFileSync(new URL('./activity-statistics-ui.js', import.meta.url), 'utf8');
-const inventoryScript = readFileSync(new URL('./inventory-ui.js', import.meta.url), 'utf8');
+const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),'utf8');
+const inventoryScript=readFileSync(new URL('./inventory-ui.js',import.meta.url),'utf8');
 const productionPlanningScript = readFileSync(new URL('./production-planning-ui.js', import.meta.url), 'utf8');
-const worldMapScript = readFileSync(new URL('./world-map-ui.js', import.meta.url), 'utf8');
-import { mapMotionPosition } from './world-map-geometry.mjs';
+const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
+import {mapMotionPosition} from './world-map-geometry.mjs';
 const phoneLoginScript = readFileSync(new URL('./phone-login-ui.js', import.meta.url), 'utf8');
 const alipayLoginScript = readFileSync(new URL('./alipay-login-ui.js', import.meta.url), 'utf8');
 const accountAddScript = readFileSync(new URL('./account-add-ui.js', import.meta.url), 'utf8');
@@ -22,6 +20,7 @@ const accountPickerScript = readFileSync(new URL('./account-picker-ui.js', impor
 const helpTipsScript = readFileSync(new URL('./help-tips.js', import.meta.url), 'utf8');
 const appointmentsScript = readFileSync(new URL('./appointments-ui.js', import.meta.url), 'utf8');
 const appointmentsCss = readFileSync(new URL('./appointments.css', import.meta.url), 'utf8');
+const themeScript = readFileSync(new URL('./theme-ui.js', import.meta.url), 'utf8');
 
 export const PAGE = `<!doctype html>
 <html lang="zh-CN">
@@ -32,6 +31,7 @@ export const PAGE = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
 <meta name="format-detection" content="telephone=no">
+<script id="theme-init">${themeScript}</script>
 <style>@layer properties, theme, base, components, page, utilities; @layer page { ${consoleCss} ${settingsCss} ${appointmentsCss} } ${componentCss}</style>
 </head>
 <body>
@@ -451,22 +451,6 @@ function subscribe() {
 }
 
 // ---- 账号 ------------------------------------------------------------------
-function setBusy(text, state) {
-  const pill = $('busy');
-  pill.textContent = text;
-  pill.dataset.state = state;
-}
-function paintConnection() {
-  if (snapshot.syncingProduction) setBusy('正在同步生产状态', 'busy');
-  else if (snapshot.paused) setBusy('已暂停 · 可自行上号', 'paused');
-  else if (snapshot.reconnecting) {
-    const seconds = Math.max(0, Math.ceil((snapshot.loginRecovery?.nextAttemptAt - Date.now()) / 1000));
-    setBusy(snapshot.loginRecovery?.status === 'connecting' ? '异地登录 · 正在自动重连' : '异地登录 · ' + seconds + ' 秒后重试', 'busy');
-  }
-  else if (snapshot.loginBlocked) setBusy('异地登录 · 等待恢复托管', 'paused');
-  else if (snapshot.connected) setBusy('已连接', 'on');
-  else setBusy('未连接', 'off');
-}
 let snapshot = { connected: false, state: 'IDLE', busy: null, looping: false };
 const disconnected = new Set();
 const connectingAccounts = new Set();
@@ -566,6 +550,14 @@ function refreshAccountStatuses() {
 }
 
 let accountDetailsOwner=null;
+const hostingActions = new Set();
+function renderHostingControl() {
+  const resume = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting);
+  const running = snapshot.looping || snapshot.reconnecting;
+  $('account-pause').disabled = !current || hostingActions.has(current) || !!snapshot.loopStopping || (!(running && !resume) && loopAccount !== current);
+  $('account-pause').textContent = resume ? '恢复托管' : running ? '暂停托管' : '开始托管';
+  $('account-pause').title = resume ? '重新登录游戏并按已保存的任务和轮数开始托管' : running ? '停止任务并断开游戏连接，方便自行上号' : '按已保存的任务和轮数开始托管';
+}
 function renderAccountSelect() {
   appointmentsAccountChanged();
   if (dailyAccount !== current || snapshot.paused || disconnected.has(current)) {
@@ -573,12 +565,6 @@ function renderAccountSelect() {
     clear($('dailies-table'));
     $('dailies-hint').textContent = snapshot.paused ? '账号已暂停' : '点击探测查看当前日常';
   }
-  const box=$('account');
-  const choices=accounts.length?accounts.map(a=>[a.id,a.title]):[['','没有账号']];
-  if(box.options.length!==choices.length||choices.some(([id,label],i)=>box.options[i]?.value!==id||box.options[i]?.text!==label)){
-    box.replaceChildren(...choices.map(([id,label])=>new Option(label,id)));
-  }
-  box.disabled=!accounts.length;box.value=current||'';
   if(accountDetailsOwner!==current){
     accountSelectionVersion++;
     accountDetailsOwner=current;
@@ -586,13 +572,10 @@ function renderAccountSelect() {
     $('who').textContent=current?'等待连接':'未选择账号';$('res').textContent='';
     if ($('account-info-dialog').open) $('account-info-dialog').close();
   }
-  if(activityStatsOwner!==null&&activityStatsOwner!==current)resetActivityStatistics();
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
   $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
-  $('account-pause').disabled = !current;
-  $('account-pause').textContent = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '恢复托管' : '暂停托管';
-  $('account-pause').title = snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting) ? '结束自行上号，允许控制台重新登录游戏' : '断开游戏连接，方便自行上号';
+  renderHostingControl();
   paintConnection();
   $('connect').disabled = snapshot.paused || snapshot.reconnecting || snapshot.connected || connectingAccounts.has(current) || !accounts.length;
   $('connect').hidden = !current || snapshot.connected || snapshot.paused || snapshot.reconnecting || snapshot.loginBlocked;
@@ -602,7 +585,23 @@ function renderAccountSelect() {
 }
 
 async function loadAccounts(reload) {
-  const data = await call('/api/accounts');
+  const version = ++accountLoadVersion;
+  const revision = ++accountStatusRevision;
+  accountsLoading++;
+  let data;
+  try {
+    data = await call('/api/accounts');
+  } finally {
+    accountsLoading--;
+  }
+  if (version !== accountLoadVersion) return;
+  if (revision !== accountStatusRevision) {
+    for (const row of data.accounts) {
+      const existing = accounts.find(account => account.id === row.id);
+      if (existing) row.status = existing.status;
+    }
+  }
+  accountStatusRevision++;
   const previous = current;
   accounts = data.accounts;
   if (!current && data.activeId) current = data.activeId;
@@ -648,13 +647,20 @@ $('account').onchange = async () => {
 };
 $('account-pause').onclick = async () => {
   const account = current;
-  $('account-pause').disabled = true;
+  if (!account || hostingActions.has(account) || snapshot.loopStopping) return;
+  const paused = !snapshot.paused && !(snapshot.loginBlocked && !snapshot.reconnecting) && !!(snapshot.looping || snapshot.reconnecting);
+  hostingActions.add(account);
+  accountStatusRevision++;
+  renderHostingControl();
   try {
-    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify({ paused: !(snapshot.paused || (snapshot.loginBlocked && !snapshot.reconnecting)) }) });
-    const row = accounts.find(a => a.id === account);
-    if (row) row.status = status;
+    if (!paused) {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (current !== account || !await saveLoopInterval()) return;
+    }
     if (current !== account) return;
-    snapshot = status;
+    const status = await call('/api/accounts/pause', { method: 'POST', body: JSON.stringify(paused ? { paused: true } : { paused: false, start: true, confirm: true }) });
+    setAccountStatus(account, status);
+    if (current !== account) return;
     if (!status.paused) disconnected.delete(account);
     renderAccountSelect();
     refreshProgression();
@@ -662,26 +668,40 @@ $('account-pause').onclick = async () => {
     refreshOverview();
     refreshLoop();
     refreshActivities();
+  } catch (error) {
+    if (current === account) reportError(error);
   } finally {
-    if (current === account) $('account-pause').disabled = false;
+    hostingActions.delete(account);
+    if (current === account) {
+      renderAccountSelect();
+      refreshAccountStatuses();
+      refreshLoop();
+    }
   }
 };
 
 $('connect').onclick = async () => {
-  setBusy('连接中…', 'busy');
+  const account = current;
+  if (!account || connectingAccounts.has(account)) return;
+  accountStatusRevision++;
+  connectingAccounts.add(account);
+  renderAccountSelect();
   try {
     await call('/api/connect', { method: 'POST' });
-    disconnected.delete(current);
+    disconnected.delete(account);
+    const status = accounts.find(row => row.id === account)?.status ?? {};
+    setAccountStatus(account, { ...status, connected: true, state: 'READY', loginBlocked: false, reconnecting: false });
+    if (account !== current) return;
     refreshManualWorld();
-    snapshot.connected = true;
-    snapshot.loginBlocked = false;
-    snapshot.reconnecting = false;
-    renderAccountSelect();
     refreshProgression();
     refreshOverview();
   } catch (error) {
-    paintConnection();
     reportError(error);
+  } finally {
+    accountStatusRevision++;
+    connectingAccounts.delete(account);
+    renderAccountSelect();
+    void refreshAccountStatuses();
   }
 };
 // ---- 总览 ------------------------------------------------------------------
@@ -727,16 +747,16 @@ let overviewPending = false;
 async function refreshOverview() {
   if (overviewPending===current || !current || snapshot.paused || snapshot.loginBlocked || disconnected.has(current) || document.hidden || ($('tab-overview').classList.contains('hidden')&&$('tab-heroes').classList.contains('hidden')&&(!$('account-info-dialog').open||!snapshot.connected))) return;
   const account = current;
+  const statusRevision = accountStatusRevision;
   overviewPending = account;
-  if (!snapshot.connected) setBusy('连接中…', 'busy');
+  if (!snapshot.connected) setBusy('连接中…');
   try {
     const data = await call('/api/overview');
     if (account !== current || snapshot.paused || disconnected.has(account)) return;
-    snapshot = data.status;
+    if (statusRevision === accountStatusRevision) setAccountStatus(account, data.status);
+    else data.status = snapshot;
     renderAccountSelect();
     renderOverview(data);
-    if(!$('tab-overview').classList.contains('hidden'))void refreshActivityRanks();
-    if(!$('tab-overview').classList.contains('hidden'))void refreshActivityStatistics();
     if(!$('tab-overview').classList.contains('hidden'))maybeRefreshWorldMap();
     $('hint').textContent = '';
     paintConnection();
@@ -809,6 +829,7 @@ $('stage-stop').onclick = () => stageCommand(false);
 let loopVersion = 0;
 let loopAccount = null,loopFieldDefaults=null;
 const savingTasks = new Set();
+const loopIntervalSaves = new Map();
 let loopSettingsRevision = null;
 function selectIdleGroup(value) {
   document.querySelector('[aria-label="挂机设置分组"]').hidden=false;
@@ -901,8 +922,6 @@ function renderAutomationOverview(data){
 }
 $('overview-task-search').oninput=()=>{if(overviewLoopData&&overviewLoopOwner===current)renderAutomationOverview(overviewLoopData);};
 $('overview-task-filter').onchange=$('overview-task-search').oninput;
-$('idle-go-settings').onclick=()=>document.querySelector('#tabs [data-tab="settings"]').click();
-$('idle-go-overview').onclick=()=>{document.querySelector('#tabs [data-tab="overview"]').click();$('overview-task-summary').scrollIntoView({block:'center'});};
 function filterIdleControls(){
  const query=$('idle-search').value.trim().toLowerCase(),mode=$('idle-filter').value;let count=0;
  for(const input of taskInputs){const row=input.closest('.task-setting');const match=row.dataset.unavailable!=='true'&&(!query||row.textContent.toLowerCase().includes(query))&&(mode!=='enabled'||input.getAttribute('aria-checked')==='true')&&(mode!=='blocked'||row.dataset.blocked==='true');row.hidden=!match;if(match)count++;}
@@ -911,23 +930,13 @@ function filterIdleControls(){
  for(const panel of document.querySelectorAll('[data-idle-panel]'))panel.hidden=filtering?![...panel.querySelectorAll('.task-setting')].some(row=>!row.hidden):document.querySelector('[data-idle-group="'+panel.dataset.idlePanel+'"]').getAttribute('aria-selected')!=='true';
  $('idle-filter-count').textContent=filtering?'跨分组找到 '+count+' 项':'';
 }
-function openChallengeConfig(id){
-  const hash='#config-group-'+id;
-  if(location.hash!==hash)location.hash=hash;
-  else{activateConsolePage(document.querySelector('#tabs [data-tab="settings"]'));configApplyHash();}
-}
-$('single-go-pirate').onclick=()=>openChallengeConfig('pirate-hunt');
-$('single-go-stages').onclick=()=>openChallengeConfig('progression');
-$('single-go-mutual').onclick=()=>activateConsolePage(document.querySelector('#tabs [data-tab=resources]'),'guild');
 $('idle-search').oninput=filterIdleControls;$('idle-filter').onchange=filterIdleControls;
 function renderLoop(data) {
   renderAutomationOverview(data);
   renderPirateAdvance(data.pirateAdvance);
-  $('runtime-version').textContent='当前服务加载时间：'+(data.runVersion?new Date(data.runVersion).toLocaleString('zh-CN'):'旧版服务，等待加载本次更新');
-  if(data.singleTasks)$('single-task-status').textContent='手动任务 · 首杀：'+(data.singleTasks.pirate?.running?'运行中':'未启动')+' · 主线：'+(data.singleTasks.stages?.running?'运行中':'未启动')+' · 联盟互助：'+(data.singleTasks.mutual?.running?'运行中':'未启动');
-  const challenge=data.challenges??{},challengeNotes=[challenge.mainline?.reason&&'主线：'+challenge.mainline.reason,...Object.entries(challenge.trials??{}).map(([id,row])=>row.reason&&'试炼'+id+'：'+row.reason),challenge.pirate?.reason&&'海盗：'+challenge.pirate.reason].filter(Boolean);
-  $('challenge-run-state').textContent=challengeNotes.join('；')||'推关与讨伐尚无执行记录';
   loopSettingsRevision = data.settingsRevision;
+  snapshot.looping = data.running;
+  snapshot.loopStopping = data.stopping;
   for (const input of taskInputs) {
     if (savingTasks.has(current + ':' + input.dataset.autoTask)) continue;
     const task = (data.controls ?? []).find(t => t.key === input.dataset.autoTask);
@@ -939,16 +948,14 @@ function renderLoop(data) {
     if(note){note.textContent=task?.configurationNote||(task?.enabled&&task?.blockedBy?.length?'需先开启：'+task.blockedBy.join('、'):'');note.hidden=!note.textContent;}
     input.disabled = !task;
   }
-  if (loopAccount !== current || data.running) {
+  if (loopAccount !== current || !loopIntervalSaves.has(current) && $('loop-every').value === String(loopFieldDefaults?.seconds)) {
     $('loop-every').value = data.everyMs / 1000;
-    $('loop-rounds').value = data.rounds;
-    loopFieldDefaults={rounds:data.rounds,seconds:data.everyMs/1000};
   }
+  loopFieldDefaults={seconds:data.everyMs/1000};
   filterIdleControls();
   loopAccount = current;
-  $('loop-every').disabled = $('loop-rounds').disabled = data.running;
-  $('loop-start').disabled = data.running;
-  $('loop-stop').disabled = !data.running || data.stopping;
+  renderHostingControl();
+  $('loop-every').disabled = !current || loopIntervalSaves.has(current);
   $('loop-hint').textContent = (data.recovery ? '网络恢复中（第 ' + data.recovery.attempt + ' 次），已完成 ' : data.running ? '后台挂机中，已完成 ' : '未在挂机，累计 ') + data.completed + ' 轮' + (data.error ? '，已中止' : '');
   if (data.stopping) $('loop-hint').textContent = '正在暂停，等待在途请求结束';
 
@@ -958,7 +965,6 @@ let loopReads = 0;
 async function refreshLoop() {
   if(document.hidden)return;
   const account = current, version = ++loopVersion;
-  if ($('tab-idle').classList.contains('hidden')&&$('tab-overview').classList.contains('hidden')&&$('tab-settings').classList.contains('hidden')) return;
   if (loopAccount !== account || !account) {
     $('loop-hint').textContent = account ? '正在读取设置' : '请选择账号';
     for (const input of taskInputs) {
@@ -968,10 +974,13 @@ async function refreshLoop() {
     }
     if(overviewLoopOwner!==account){overviewLoopData=null;overviewLoopOwner=account;overviewRenderKey='';clear($('overview-task-groups'));$('overview-task-summary').textContent=account?'正在读取运行状态':'请先选择账号';}
     loopSettingsRevision = null;
+    $('loop-every').disabled = true;
+    $('loop-every').value = '';
+    $('loop-every').removeAttribute('aria-invalid');
+    $('loop-interval-status').textContent = '';
     $('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
     $('pirate-advance-state').textContent=account?'正在读取首杀状态':'请选择账号';
     $('pirate-manual-failures').value=pirateFailureOptions.get(account)??1;
-    $('loop-start').disabled = $('loop-stop').disabled = true;
   }
   if (!account) return;
   loopReads++;
@@ -1019,38 +1028,60 @@ async function toggleAutoTask(input) {
 }
 for (const input of taskInputs) input.onclick = () => toggleAutoTask(input);
 
-$('loop-start').onclick = async () => {
-  const account = current;
-  if (!await configFlush()) { reportError(new Error('配置尚未保存，请先处理配置页的提示')); return; }
-  if (account !== current) return;
-  try {
-    await call('/api/loop/start', {
-      method: 'POST',
-      body: JSON.stringify({
-        confirm: true,
-        rounds: Number($('loop-rounds').value || 0),
-        everySeconds: Number($('loop-every').value || 60),
-      }),
-    });
-    if (account === current) {
-      snapshot.loginBlocked = false;
-      snapshot.reconnecting = false;
-      renderAccountSelect();
+async function saveLoopInterval() {
+  const account = current, input = $('loop-every');
+  if (!account || loopAccount !== account) return false;
+  if (loopIntervalSaves.has(account)) return loopIntervalSaves.get(account).promise;
+  const everySeconds = Number(input.value);
+  if (!input.reportValidity() || !Number.isSafeInteger(everySeconds) || everySeconds < 1 || everySeconds > 86400) {
+    input.setAttribute('aria-invalid', 'true');
+    $('loop-interval-status').textContent = '请输入 1–86400 的整数秒数';
+    return false;
+  }
+  input.removeAttribute('aria-invalid');
+  if (everySeconds === loopFieldDefaults?.seconds) return true;
+  input.disabled = true;
+  $('loop-interval-status').textContent = '正在保存间隔';
+  ++loopVersion;
+  const pending = { writing: false, promise: null };
+  loopIntervalSaves.set(account, pending);
+  pending.promise = (async () => {
+    try {
+      if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+      if (account !== current) return false;
+      const revision = loopSettingsRevision;
+      pending.writing = true;
+      const updated = await call('/api/loop/interval', {
+        method: 'POST', body: JSON.stringify({ confirm: true, everySeconds, revision }),
+      });
+      if (account === current) {
+        ++loopVersion;
+        input.value = String(updated.everyMs / 1000);
+        configIntervalSaved(account, everySeconds, revision, updated.settingsRevision);
+        renderLoop(updated);
+        $('loop-interval-status').textContent = '间隔已保存，下一轮生效';
+      }
+      return true;
+    } catch (error) {
+      if (account === current) {
+        input.setAttribute('aria-invalid', 'true');
+        $('loop-interval-status').textContent = '间隔保存失败，请重试';
+        reportError(error);
+      }
+      return false;
+    } finally {
+      loopIntervalSaves.delete(account);
+      if (account === current) {
+        input.disabled = false;
+        refreshLoop();
+      }
     }
-    refreshLoop();
-  } catch (error) {
-    $('loop-hint').textContent = '';
-    reportError(error);
-  }
-};
-$('loop-stop').onclick = async () => {
-  try {
-    await call('/api/loop/stop', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-    refreshLoop();
-  } catch (error) {
-    $('loop-hint').textContent = '';
-    reportError(error);
-  }
+  })();
+  return pending.promise;
+}
+$('loop-every').onchange = saveLoopInterval;
+$('loop-every').onkeydown = event => {
+  if (event.key === 'Enter') { event.preventDefault(); saveLoopInterval(); }
 };
 
 let orderClockOffset=0;
@@ -2005,8 +2036,6 @@ ${progressionScript}
 ${helpTipsScript}
 ${mapMotionPosition.toString()}
 ${worldMapScript}
-${rankingScript}
-${activityStatisticsScript}
 ${inventoryScript}
 ${productionPlanningScript}
 ${settingsScript}
@@ -2106,7 +2135,6 @@ $('login-settings-form').onsubmit = async event => {
     $('login-settings-save').disabled = false;
   }
 };
-for(const button of document.querySelectorAll('[data-panel-toggle]'))button.onclick=()=>{const panel=$(button.dataset.panelToggle),open=panel.hidden;panel.hidden=!open;button.setAttribute('aria-expanded',String(open));button.textContent=open?'收起':'展开';};
 ${giftCodeScript}
 let selectedResource = 'dailies';
 function activateConsolePage(button, resource = selectedResource) {
@@ -2169,9 +2197,9 @@ async function boot() {
 }
 boot();
 setInterval(refreshOverview, 20000);
-setInterval(() => { if (!document.hidden && snapshot.reconnecting) paintConnection(); }, 1000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshLoop();refreshStages();}});
-setInterval(() => { if (!loopReads) refreshLoop(); }, 3000);
+setInterval(() => { if (!document.hidden && accounts.some(account => account.status?.reconnecting)) paintConnection(); }, 1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){void refreshAccountStatuses();refreshLoop();refreshStages();}});
+setInterval(() => { void refreshAccountStatuses(); if (!loopReads) refreshLoop(); }, 3000);
 setInterval(refreshStages, 3000);
 </script>
 </body>
