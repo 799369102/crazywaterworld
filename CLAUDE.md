@@ -74,11 +74,11 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 `page.mjs` 在模块加载时生成完整 `PAGE`，页面文件变更后需重启控制台。
 
 - `src/ui/*.tsx` 经 esbuild 输出 `src/ui/dist/console.mjs`，服务端渲染静态标记；浏览器没有 React，组件不能依赖 hooks 或事件属性。
-- 行为使用原生 JS：`page.mjs` 的脚本与 `settings-ui.js`、`ui/progression.js`、`ui/activities.js`、地图、礼包、仓库和活动统计/排行脚本共享页面作用域。
+- 行为使用原生 JS，`page.mjs` 的脚本与 `settings-ui.js`、`ui/progression.js`、`ui/activities.js`、地图、礼包和仓库脚本共享页面作用域。
 - 界面采用 shadcn/ui new-york-v4 的默认 neutral 主题。`src/ui/{button,card,table,switch,badge,dialog}.tsx` 用官方样式字符串；`theme.css` 的 `@layer components` 按官方样式定义 input、select、textarea、checkbox、radio、range、summary、页签、弹窗和气泡，运行时脚本直接创建原生元素也能得到相同外观，不要再给控件写专用外观。换主色只改 `:root` 的 `--primary`、`--primary-foreground`。
 - 样式层顺序为 `properties, theme, base, components, page, utilities`。`console.css`、`settings.css` 在 `page` 层，只放布局和间距，不用 Tailwind 处理，所以不能写 `@apply`。模板克隆元素带工具类，变体颜色写在 `theme.css` 的 `@layer utilities`。新增运行时模板需在 `layout.tsx` 的 `templates()` 声明。修改 TSX 或 `theme.css` 后执行 `npm run build:ui`，将 `src/ui/dist/` 一起提交；`npm start`、`npm test` 也会先构建。
 - 手机布局以 768px 为界：导航固定到底部，页头不吸顶。`table()` 生成的四列以上表格在 `main` 窄于 600px 时变为卡片，列名来自 `td[data-label]`。图标走 `art-thumbs.mjs` 的单图缩略图，页面不要再引用整张图集。
-- 顶层导航为总览、挂机、游戏配置、建筑一览、挑战、资源与玩法、账号。总览提供运行状态、只读活动统计/排行和世界地图；手动玩法归建筑一览、挑战或资源与玩法。
+- 顶层导航为总览、挂机、游戏配置、建筑一览、挑战、资源与玩法、账号。总览提供运行状态和只读世界地图。手动玩法归建筑一览、挑战或资源与玩法。
 - 游戏配置按账号草稿编辑。导入、保存、预览分别处理，保存不启动挂机；预览可连接读取真实状态但不写资源，运行安排预览无需连接。
 
 ## 自动任务接线
@@ -110,7 +110,7 @@ npm run sync-art              # 同步素材；缓存缺图可加 -- --fetch
 - `world-boss.mjs` 只在服务器当天参与次数为 0 时派一支空闲舰队；城战接续、万吨巨轮、首杀各自检查目标、耐久、汽油和持久防重记录。城战原生委任额度来自服务器 VIP 规则，不能写死次数；`cityWar.nativeCommissionLimit` 默认 -1 按 VIP 等待，0 关闭所选舰队的原生委任后接管，N 表示先用 N 次再关闭，关闭结果需回读 `MyFleetsResponse` 确认。
 - `equipment-forge.mjs` 管详细锻造，`equipment-crafting.mjs` 保留原手动制造；达到下单上限不应阻止完工领取。海兽放生与装备分解不能读取客户端本地锁定，页面帮助必须说明限制。`antique-upgrade.mjs` 管藏品激活、升星、大师等级和套装升级；激活只消耗对应碎片，升星可用万能碎片，套装与大师消耗金币/经验；结果未知时按持久键阻止重复发送。
 - `seasonal-activities.mjs` 与奖励模块处理新活动；消费动作与免费奖励分别门控。`side-rewards.mjs` 处理漫剧、擂台赛每日礼包和赛季宝箱；擂台赛状态只有推送，由 `server.mjs` 记在连接上。`gift-codes.mjs` 按账号保存记录，多账号各自排队、发送跨账号串行；未知或连接失败只停该账号，限频停止同批未发送账号，未知码不重发。
-- 世界地图、活动统计和排行榜是只读展示。地图移动位置为已同步行军数据的推算，自动刷新间隔与挂机独立，不能承诺实时坐标。
+- 世界地图为只读展示。地图移动位置为已同步行军数据的推算，自动刷新间隔与挂机独立，不能承诺实时坐标。
 
 ## 数据与验证约定
 

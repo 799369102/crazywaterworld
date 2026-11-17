@@ -65,7 +65,7 @@ function fixture({ catalog = {} } = {}) {
     const configRenderUsage = () => {}, configUpdateVisibility = () => env.updateVisibility?.();
     const configActivate = () => { env.focuses++; }, configActivateGroup = () => {};
     const configRender = () => { env.renders++; };
-    const resetWorldMap = () => {}, resetActivityRanks = () => {};
+    const resetWorldMap = () => {};
     const clear = node => node, el = () => ({});
     return {
       editor: configEditor, groups: configGroups, set: configSet, load: configLoad, save: configSave, flush: configFlush,

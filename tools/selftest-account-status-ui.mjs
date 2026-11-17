@@ -99,8 +99,6 @@ function fixture(rows = [
     const refreshStages = () => env.effects.push('stages');
     const refreshLoop = () => env.effects.push('loop');
     const renderOverview = data => env.overviews.push(structuredClone(data));
-    const refreshActivityRanks = () => env.effects.push('rankings');
-    const refreshActivityStatistics = () => env.effects.push('statistics');
     const maybeRefreshWorldMap = () => env.effects.push('world-map');
     ${overview ? overviewScript : "const refreshOverview = () => env.effects.push('overview');"}
     const subscribe = () => env.effects.push('subscribe');
@@ -109,11 +107,10 @@ function fixture(rows = [
     const loginSettingsAccountChanged = () => env.effects.push('login-settings');
     const appointmentsAccountChanged = () => {};
     const renderAccounts = () => env.effects.push('account-cards');
-    const resetActivityStatistics = () => env.effects.push('clear-statistics');
     const resetWorldMap = () => env.effects.push('clear-map');
     const resetProductionPlan = () => env.effects.push('clear-production');
     let accounts = [], current = null, dailyAccount = null, dailyVersion = 0;
-    let activityStatsOwner = null, worldMapOwner = null, productionPlanOwner = null;
+    let worldMapOwner = null, productionPlanOwner = null;
     let productionPlanBusy = false, loopReads = 0;
     ${accountScript}
     ${pollingScript}

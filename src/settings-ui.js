@@ -859,7 +859,7 @@ async function configMayChangeAccount(next) {
   return window.confirm('当前配置未能自动保存。切换账号会丢弃这些更改，是否继续？');
 }
 function configAccountChanged() {
-  resetWorldMap();resetActivityRanks();
+  resetWorldMap();
   if (configEditor.owner === current) return;
   configCancelSaveTimer(); configEditor.savePromise = null; configEditor.saving = false; configEditor.saveError = null; configEditor.saveRetries = 0; configEditor.busy = false;
   configEditor.serial++; configEditor.owner = null; configEditor.data = null; configEditor.draft = null; configEditor.baseline = null; configEditor.loading = false; configEditor.errors = {};

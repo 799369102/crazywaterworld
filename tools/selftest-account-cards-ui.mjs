@@ -183,11 +183,10 @@ function fixture(initial = sampleAccounts()) {
     const giftAccountChanged = () => {};
     const loginSettingsAccountChanged = () => {};
     const appointmentsAccountChanged = () => {};
-    const resetActivityStatistics = () => {};
     const resetWorldMap = () => {};
     const resetProductionPlan = () => {};
     let accounts=structuredClone(env.serverRows),current=env.selected,dailyAccount=current,dailyVersion=0;
-    let activityStatsOwner=null,worldMapOwner=null,productionPlanOwner=null,productionPlanBusy=false;
+    let worldMapOwner=null,productionPlanOwner=null,productionPlanBusy=false;
     ${accountScript}
     ${cardsScript}
     snapshot=accounts.find(row=>row.id===current)?.status??{};

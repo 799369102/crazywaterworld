@@ -315,15 +315,15 @@
 
 /* 四列以上的表格在窄屏变成一行一张卡片，避免内容被挤成竖排。 */
 @container main (max-width: 600px) {
-  .table-stack:not(.activity-statistics-scroll *) thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .table-stack:not(.activity-statistics-scroll *) :is(table, tbody, tr) { display: block; width: 100%; }
-  .table-stack:not(.activity-statistics-scroll *) tr { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
-  .table-stack:not(.activity-statistics-scroll *) tr:last-child { border-bottom: 0; }
-  .table-stack:not(.activity-statistics-scroll *) td { display: block; position: relative; min-height: 1.5rem; padding: 0.25rem 0 0.25rem 5.5rem; border: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-  .table-stack:not(.activity-statistics-scroll *) td::before { content: attr(data-label); position: absolute; left: 0; top: 0.3125rem; width: 5rem; color: var(--muted-foreground); font-size: 0.75rem; font-weight: 400; line-height: 1.4; }
-  .table-stack:not(.activity-statistics-scroll *) td:first-child { padding-left: 0; font-weight: 500; }
-  .table-stack:not(.activity-statistics-scroll *) td:first-child::before { display: none; }
-  .table-stack:not(.activity-statistics-scroll *) td:empty { display: none; }
+  .table-stack thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .table-stack :is(table, tbody, tr) { display: block; width: 100%; }
+  .table-stack tr { padding: 0.75rem 0; border-bottom: 1px solid var(--border); }
+  .table-stack tr:last-child { border-bottom: 0; }
+  .table-stack td { display: block; position: relative; min-height: 1.5rem; padding: 0.25rem 0 0.25rem 5.5rem; border: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  .table-stack td::before { content: attr(data-label); position: absolute; left: 0; top: 0.3125rem; width: 5rem; color: var(--muted-foreground); font-size: 0.75rem; font-weight: 400; line-height: 1.4; }
+  .table-stack td:first-child { padding-left: 0; font-weight: 500; }
+  .table-stack td:first-child::before { display: none; }
+  .table-stack td:empty { display: none; }
 }
 
 /* 只放必须盖过工具类的规则。 */

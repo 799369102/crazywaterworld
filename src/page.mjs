@@ -9,8 +9,6 @@ const settingsScript = readFileSync(new URL('./settings-ui.js', import.meta.url)
 const activitiesScript = readFileSync(new URL('./ui/activities.js', import.meta.url), 'utf8');
 const settingsCss = readFileSync(new URL('./settings.css', import.meta.url), 'utf8');
 const giftCodeScript=readFileSync(new URL('./gift-codes-ui.js',import.meta.url),'utf8');
-const rankingScript=readFileSync(new URL('./activity-rankings-ui.js',import.meta.url),'utf8');
-const activityStatisticsScript=readFileSync(new URL('./activity-statistics-ui.js',import.meta.url),'utf8');
 const inventoryScript=readFileSync(new URL('./inventory-ui.js',import.meta.url),'utf8');
 const productionPlanningScript = readFileSync(new URL('./production-planning-ui.js', import.meta.url), 'utf8');
 const worldMapScript=readFileSync(new URL('./world-map-ui.js',import.meta.url),'utf8');
@@ -552,7 +550,6 @@ function renderAccountSelect() {
     $('who').textContent=current?'等待连接':'未选择账号';$('res').textContent='';
     if ($('account-info-dialog').open) $('account-info-dialog').close();
   }
-  if(activityStatsOwner!==null&&activityStatsOwner!==current)resetActivityStatistics();
   if(worldMapOwner!==null&&worldMapOwner!==current)resetWorldMap();
   if (productionPlanOwner !== null && (productionPlanOwner !== current || !snapshot.connected || snapshot.paused || disconnected.has(current))) resetProductionPlan();
   $('production-plan-refresh').disabled = productionPlanBusy || !snapshot.connected || snapshot.paused || disconnected.has(current);
@@ -723,8 +720,6 @@ async function refreshOverview() {
     else data.status = snapshot;
     renderAccountSelect();
     renderOverview(data);
-    if(!$('tab-overview').classList.contains('hidden'))void refreshActivityRanks();
-    if(!$('tab-overview').classList.contains('hidden'))void refreshActivityStatistics();
     if(!$('tab-overview').classList.contains('hidden'))maybeRefreshWorldMap();
     $('hint').textContent = '';
     paintConnection();
@@ -2026,8 +2021,6 @@ ${progressionScript}
 ${helpTipsScript}
 ${mapMotionPosition.toString()}
 ${worldMapScript}
-${rankingScript}
-${activityStatisticsScript}
 ${inventoryScript}
 ${productionPlanningScript}
 ${settingsScript}
@@ -2127,7 +2120,6 @@ $('login-settings-form').onsubmit = async event => {
     $('login-settings-save').disabled = false;
   }
 };
-for(const button of document.querySelectorAll('[data-panel-toggle]'))button.onclick=()=>{const panel=$(button.dataset.panelToggle),open=panel.hidden;panel.hidden=!open;button.setAttribute('aria-expanded',String(open));button.textContent=open?'收起':'展开';};
 ${giftCodeScript}
 let selectedResource = 'dailies';
 function activateConsolePage(button, resource = selectedResource) {

@@ -104,18 +104,6 @@ section h2:first-child { margin-top:0 }
 .overview-task-group th:first-child { width:25% }
 .overview-task-group th:last-child { width:26% }
 .overview-task-group td { white-space:normal; overflow-wrap:anywhere; vertical-align:top }
-.activity-rank-table { max-height:360px; overflow:auto }
-.activity-rank-table th { position:sticky; top:0; background:var(--card) }
-#activity-rank-mine { margin:8px 0 }
-#activity-rank-tabs:empty { display:none }
-.activity-statistics-scroll { overflow:auto; max-height:480px }
-.activity-statistics-scroll>div { overflow:visible }
-.activity-statistics-scroll table { min-width:820px }
-.activity-statistics-scroll th,.activity-statistics-scroll td:nth-child(2),.activity-statistics-scroll td:nth-child(4) { white-space:nowrap }
-.activity-statistics-scroll th { position:sticky; top:0; background:var(--card); z-index:2 }
-.activity-statistics-scroll th:first-child,.activity-statistics-scroll td:first-child { position:sticky; left:0; min-width:105px; background:var(--card); z-index:1 }
-.activity-statistics-scroll th:first-child { z-index:3 }
-.activity-statistics-scroll td { vertical-align:top }
 
 /* ---- 世界地图 ---- */
 .world-refresh-controls { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-weight:400 }
