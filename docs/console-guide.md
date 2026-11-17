@@ -109,8 +109,6 @@ $env:CW_PHONE_CODE='123456'
 node src/app.mjs accounts login-phone --code "$env:CW_PHONE_CODE" --probe
 ```
 
-早期协议采集记录见 [手机号登录分析](phone-login.md)。
-
 ## 海面生产状态
 
 **建筑一览 → 海面**按工厂、农田、空位的顺序展示，活动工坊列在工厂表格中。工厂表格显示建筑、类型、等级、当前产物、自动生产开启状态和下一产物，当前产物附制造倒计时。点击“查看排产”可打开独立弹窗，查看全部生产格的产物、等待生产和空闲状态。弹窗支持“关闭”按钮和 Esc 键，海面刷新时同步更新详情。农田表格展示地块、等级、当前作物及成熟倒计时。
@@ -367,7 +365,7 @@ node src/app.mjs accounts login-phone --code "$env:CW_PHONE_CODE" --probe
 - [玩法与协议](gameplay.md)：协议字段、配置依据和结果确认方式。
 - [联盟自动化](alliance-automation.md) 与 [商船和工事](guild-ships-automation.md)：配置规则、协议依据及资源保护。
 - [超凡英雄活动](hero-raid-automation.md) 与 [硅矿自动化](silicon-automation.md)：活动条件、调度与结果确认。
-- [微信登录](wechat-login.md) 与 [手机号登录](phone-login.md)：登录流程、凭证来源和使用限制。
+- 登录流程、凭证来源和使用限制。[微信登录](wechat-login.md) · [手机号登录](#手机号登录)
 - [活动配置规则](activity-availability.md)：活动下线范围、时间依据及恢复方式。
 - 控制台同时适配电脑和手机宽度：手机导航固定在底部，宽表格显示为卡片；世界地图需点「移动地图」后才能拖动。
 

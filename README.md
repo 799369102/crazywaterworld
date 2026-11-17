@@ -113,7 +113,7 @@ npm start
 - 协议字段、配置依据和结果确认方式。[玩法与协议](docs/gameplay.md)
 - 联盟配置、商船、工事及资源保护。[联盟自动化](docs/alliance-automation.md) · [商船和工事](docs/guild-ships-automation.md)
 - 活动条件、调度与结果确认。[超凡英雄活动](docs/hero-raid-automation.md) · [硅矿自动化](docs/silicon-automation.md)
-- 登录流程、凭证来源和使用限制。[微信登录](docs/wechat-login.md) · [手机号登录](docs/phone-login.md)
+- 登录流程、凭证来源和使用限制。[微信登录](docs/wechat-login.md) · [手机号登录](docs/console-guide.md#手机号登录)
 - 活动下线范围、时间依据及恢复方式。[活动配置规则](docs/activity-availability.md)
 
 项目采用自定义的学习交流使用许可，仅允许非商业性的学习、技术研究、教学和交流用途。商业使用须取得相应权利人的书面授权。第三方组件和既有授权内容按各自适用的许可执行，具体范围见许可正文。[许可证](LICENSE)
