@@ -10,6 +10,8 @@ const cases = [
   ['selftest-storage-transactions.mjs'],
   ['selftest-settings-version.mjs'],
   ['selftest-settings-persistence.mjs'],
+  ['selftest-auto-start.mjs'],
+  ['selftest-loop-auto-start-ui.mjs'],
   ['selftest-appointments.mjs'],
   ['selftest-appointment-loop.mjs'],
   ['selftest-appointment-http.mjs'],

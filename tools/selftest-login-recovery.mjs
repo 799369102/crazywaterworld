@@ -387,7 +387,7 @@ try {
     } finally { await f.close(); }
   });
 
-  await test('关闭自动重连时挂机被顶号，随后开启配置仍可恢复连接', async () => {
+  await test('关闭自动重连时挂机被顶号，随后开启配置恢复连接并继续挂机', async () => {
     const f = await fixture({ delay: 220 });
     try {
       await f.configure({ reconnectEnabled: false });
@@ -399,7 +399,9 @@ try {
       await f.configure({ reconnectEnabled: true });
       await waitFor(() => f.state.logins === 2 && f.session().loginRecovery === null, '设置开启后账号恢复');
       assert.equal(f.session().client.connected, true);
-      assert.equal(f.session().loop.running, false);
+      assert.equal(f.session().loop.running, true);
+      assert.equal(f.session().loop.completed, 1);
+      assert.equal(f.saved().autoStart, true);
     } finally { await f.close(); }
   });
 

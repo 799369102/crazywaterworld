@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const temporaryRoot = fs.realpathSync(os.tmpdir());
 const directory = fs.mkdtempSync(path.join(temporaryRoot, 'cw-alipay-http-'));
@@ -13,7 +14,7 @@ fs.writeFileSync(process.env.CW_CONFIG_PACK, '[]');
 const { createConsole } = await import('../src/server.mjs');
 const { loadStore, saveStore, upsertAccount } = await import('../src/accounts.mjs');
 const { GameClient } = await import('../src/client.mjs');
-const originalMethods = Object.fromEntries(['connect', 'request', 'stop', 'connected', 'interleaveRead']
+const originalMethods = Object.fromEntries(['connect', 'request', 'send', 'sendWatch', 'stop', 'connected', 'interleaveRead']
   .map(name => [name, Object.getOwnPropertyDescriptor(GameClient.prototype, name)]));
 const liveClients = new Set();
 const connections = [];
@@ -32,15 +33,21 @@ const roleLists = new Map();
 Object.defineProperty(GameClient.prototype, 'connected', { configurable: true, get() { return liveClients.has(this); } });
 GameClient.prototype.connect = async function (login) {
   assert.equal(this.url, 'wss://fixture.invalid/gateway');
-  assert.equal(login.worldId, 0, '角色选择阶段仅登录最近区服');
   this.login = login;
   this.stopping = false;
   connections.push({ client: this, login });
   liveClients.add(this);
-  return { result: 0, playerInfo: defaultRoles[0].roleInfo };
+  const roles = roleLists.get(login.eworldParams.openId) ?? defaultRoles;
+  const role = (roles.find(row => row.worldId === login.worldId) ?? roles[0])?.roleInfo;
+  return { result: 0, playerInfo: role && { ...role, playerId: role.id, nickname: role.nickname || '未命名角色' } };
 };
+GameClient.prototype.send = () => {};
+GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.request = async function (name) {
-  assert.equal(name, 'GameWorldListRequest', '选择阶段只查询角色列表');
+  if (name === 'OnWaterRequest') return { building: [] };
+  if (name === 'AllItemRequest') return { items: [] };
+  if (name === 'EmailBoxRequest') return { email: [] };
+  if (name !== 'GameWorldListRequest') return {};
   const id = this.login.eworldParams.openId;
   reads.push({ client: this, id });
   const gate = roleGates.get(id);
@@ -194,7 +201,7 @@ function holdQueue(session) {
 const controller = createController();
 const app = createConsole({
   port: 0,
-  protocol: {},
+  protocol: { OnWaterRequest: true, OnWaterResponse: true, AllItemRequest: true, AllItemResponse: true },
   alipayLoginController: controller,
   captureController: { inspectCaptureRecovery: () => ({ pending: false }) },
 });
@@ -212,6 +219,26 @@ try {
   const start = () => request('/start', { confirm: true });
   const status = id => request('/status?id=' + encodeURIComponent(id));
   const save = (id, choiceId) => request('/save', { confirm: true, id, choiceId });
+  async function waitForLoop(id, worldId) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const session = app.sessions.get(id);
+      if (session?.loop.running && session.loop.completed >= 1 && session.client?.login.worldId === worldId) return session;
+      await sleep(10);
+    }
+    const session = app.sessions.get(id);
+    assert.fail('等待支付宝所选角色自动挂机超时 ' + JSON.stringify({ running: session?.loop.running, completed: session?.loop.completed,
+      stopping: session?.loop.controller?.signal.aborted, error: session?.loop.error, login: session?.client?.login.worldId,
+      log: session?.log.slice(-8) }));
+  }
+  async function disconnect(id) {
+    const job = app.sessions.get(id)?.loop.job;
+    const result = await fetch(root + '/api/disconnect?account=' + encodeURIComponent(id), {
+      method: 'POST', body: JSON.stringify({ confirm: true }),
+    });
+    assert.equal(result.status, 200);
+    await job;
+  }
   async function preview(id) {
     for (let attempt = 0; attempt < 100; attempt++) {
       const result = await status(id);
@@ -266,6 +293,7 @@ try {
   assert.equal(first.roleError, null);
   assert.equal(loadStore().accounts.length, 1, '扫码和读取角色均不保存账号');
   assert.equal(liveClients.size, 0, '临时查询客户端完成后关闭');
+  assert.equal(connections.at(-1).login.worldId, 0, '保存所选角色前仅登录最近区服读取列表');
   const firstReads = reads.length;
   await status(first.id);
   await status(first.id);
@@ -285,8 +313,11 @@ try {
   assert.equal(saved.data.selectedRole.worldId, 3000000002);
   assert.match(saved.data.account.title, /星海船长/);
   assert.match(saved.data.account.title, /海港2服/);
-  assert.equal(connections.length, beforeSaveConnections, '保存不额外连接游戏');
   const idOfAccount = saved.data.account.id;
+  const initialSession = await waitForLoop(idOfAccount, 3000000002);
+  assert.equal(connections.length, beforeSaveConnections + 1, '保存后自动连接所选角色');
+  assert.equal(initialSession.loop.rounds, 0);
+  assert.equal(loadStore().accounts.find(row => row.id === idOfAccount).automation.autoStart, true);
   let store = loadStore();
   assert.equal(store.accounts.length, 2);
   assert.equal(store.activeId, idOfAccount);
@@ -299,11 +330,15 @@ try {
   assert.equal((await save(third.id, first.choices[2].id)).status, 400);
   const thirdSaved = await save(third.id, third.choices[2].id);
   assert.equal(thirdSaved.status, 200);
+  await waitForLoop(idOfAccount, 4000000003);
   assert.equal(thirdSaved.data.selectedRole.nickname, '灯塔守望');
   store = loadStore();
   assert.equal(store.accounts.find(account => account.id === idOfAccount).login.worldId, 4000000003);
   assert.equal(store.accounts.find(account => account.id === idOfAccount).lastSeen.worldId, 4000000003);
   assert.equal(store.accounts.find(account => account.id === idOfAccount).label, '灯塔守望', '自动昵称随所选角色变化');
+  assert.equal(store.accounts.find(account => account.id === idOfAccount).automation.autoStart, true);
+  await disconnect(idOfAccount);
+  store = loadStore();
 
   // 在线账号复用已有连接查询，保存时维持重扫码停止旧任务与连接的约定。
   const session = app.sessions.get(idOfAccount);
@@ -341,6 +376,7 @@ try {
   assert.equal(account.lastSeen.nickname, '海风船长');
   assert.equal(account.label, '我的支付宝账号', '人工备注保持');
   assert.equal(account.automation.enabled, false);
+  assert.equal(account.automation.autoStart, false);
   assert.equal(account.automation.productionSyncRequired, true);
   assert.match(mergedSaved.data.account.title, /我的支付宝账号.*海风船长.*海港10服/);
 
@@ -405,6 +441,8 @@ try {
   assert.equal((await save(single.id)).status, 200);
   assert.equal(loadStore().accounts.find(row => row.id === 'alipay:single-account').lastSeen.nickname, '未命名角色');
   assert.equal(loadStore().accounts.find(row => row.id === 'alipay:single-account').label, '未命名角色');
+  await waitForLoop('alipay:single-account', 3000000008);
+  await disconnect('alipay:single-account');
 
   // 查询并发共用同一请求，取消、过期、刷新都丢弃旧结果并关闭临时连接。
   for (const action of ['cancel', 'expire', 'refresh']) {
@@ -522,6 +560,8 @@ try {
   const cleanupSaved = await save(cleanup.id, cleanup.choices[1].id);
   assert.equal(cleanupSaved.status, 200);
   assert.equal(cleanupSaved.data.account.id, 'alipay:cleanup-account');
+  await waitForLoop('alipay:cleanup-account', 3000000002);
+  await disconnect('alipay:cleanup-account');
   assert.equal((await save(cleanup.id, cleanup.choices[1].id)).status, 400);
   assert.equal((await status(cleanup.id)).data.phase, 'cancelled');
   controller.cancelError = null;

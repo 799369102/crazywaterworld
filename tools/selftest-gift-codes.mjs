@@ -99,7 +99,7 @@ await overlap[1].done;release();await busyJob.done;assert.deepEqual(busy.sent,['
 assert.throws(()=>startGiftCodeBatch([target(fakeClient('v-empty'))],'  '),/每批/);
 assert(!fs.existsSync(path.join(process.env.CW_DATA_DIR,'gift-codes-v-empty.json')),'输入无效时任何账号都不开始');
 
-const accountRow=(id,extra={})=>({id,label:'账号'+id,url:'ws://127.0.0.1:1',login:{},...extra});
+const accountRow=(id,extra={})=>({id,label:'账号'+id,url:'ws://127.0.0.1:1',login:{},automation:{autoStart:false},...extra});
 fs.writeFileSync(path.join(process.env.CW_DATA_DIR,'accounts.json'),JSON.stringify({version:1,activeId:'h1',accounts:[
   accountRow('h1'),accountRow('h2',{automation:{paused:true,enabled:false}}),accountRow('h3'),accountRow('h4'),accountRow('h5'),accountRow('h6'),
 ]}));

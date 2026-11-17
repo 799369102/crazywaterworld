@@ -131,7 +131,7 @@ GameClient.prototype.request = async () => ({});
 GameClient.prototype.sendWatch = async () => ({});
 GameClient.prototype.stop = function () { this.stopping = true; live.delete(this); };
 
-saveStore({ activeId: 'a', accounts: [{ id: 'a', url: 'ws://invalid.invalid', login: {} }] });
+saveStore({ activeId: 'a', accounts: [{ id: 'a', url: 'ws://invalid.invalid', login: {}, automation: { autoStart: false } }] });
 const app = createConsole({ port: 0 });
 await app.listen();
 const port = app.server.address().port;

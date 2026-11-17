@@ -164,10 +164,6 @@ section h2:first-child { margin-top:0 }
 .loop-form { display:flex; align-items:flex-end; flex-wrap:wrap; gap:12px }
 .loop-form label { display:grid; gap:8px }
 .loop-form input { width:112px }
-.idle-notes .bar { margin-bottom:0 }
-.idle-more { margin-top:12px }
-.idle-more>summary { width:fit-content; color:var(--muted-foreground) }
-.idle-more p { margin-top:8px }
 .idle-filter-bar { margin-block:0 }
 .idle-filter-bar #idle-search { flex:1 1 130px; width:auto; max-width:320px }
 .idle-filter-bar label { color:var(--muted-foreground); font-weight:400 }

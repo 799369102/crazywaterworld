@@ -342,11 +342,12 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const sameRole = currentRoleId && selectedRoleId ? currentRoleId === selectedRoleId
       : toNumber(session?.player?.worldId) === roleWorldId
         && toNumber(session?.player?.bornWorldId || previous?.login?.worldId) === choice.worldId;
-    if (session && (stopExisting || !sameRole)) {
-      const reason = stopExisting ? '支付宝账号已重新扫码，请重新连接' : '已选择其他角色，停止旧角色任务';
+    if (session && (stopExisting || !sameRole || session.loginBlocked || session.loginRecoveryJob)) {
+      const reason = stopExisting ? '支付宝账号已重新扫码，正在更新连接'
+        : sameRole ? '账号凭证已更新，正在恢复连接' : '已选择其他角色，停止旧角色任务';
       requireProductionSync(session);
       session.generation++;
-      stopLoop(session, reason);
+      stopLoop(session, reason, { preserveAutoStart: true });
       saveAutomation(session.id, { enabled: false });
       session.stages.stop(reason);
       session.mutualAid.stop(reason);
@@ -361,13 +362,18 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const fallbackLabel = entry.credential.source === 'alipay' ? '未命名角色' : entry.userName;
     const label = existing?.label && existing.label !== existing.lastSeen?.nickname ? existing.label : choice.role.nickname || fallbackLabel;
     const { account, created } = upsertAccount(store, credential, { label });
+    account.automation = { ...account.automation, autoStart: autoStartEnabled(account), loginBlocked: false, loginRecovery: null };
     rememberSeen(account, { ...choice.role, nickname: choice.role.nickname || '未命名角色', worldId: roleWorldId });
     setActive(store, account.id);
     saveStore(store);
     emit(null, 'info', `${sourceLabel}${created ? '已新增' : '已更新'}账号 ${describeAccount(account).title}，已选择 ${choice.worldName} ${choice.role.nickname || '未命名角色'}`);
+    const savedSession = sessionFor(account.id);
+    savedSession.loginBlocked = false;
+    savedSession.loginRecovery = null;
+    void startAutomaticLoop(savedSession);
     return {
       ok: true,
-      account: { ...describeAccount(account, { active: true }), status: accountStatus(sessionFor(account.id)) },
+      account: { ...describeAccount(account, { active: true }), status: accountStatus(savedSession) },
       selectedRole: { nickname: choice.role.nickname || '未命名角色', worldId: choice.worldId, worldName: choice.worldName,
         roleWorldId, roleWorldName: choice.role.worldName || choice.worldName },
     };
@@ -493,6 +499,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       dailySingle: dailySingleState(),
       loop: {
         running: false,
+        autoStart: saved?.autoStart ?? saved?.enabled ?? true,
         rounds: preferences?.loop.rounds ?? saved?.rounds ?? 0,
         completed: 0,
         everyMs: (preferences?.loop.everySeconds ?? saved?.everySeconds ?? 60) * 1000,
@@ -1018,8 +1025,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           if (!active()) break;
           if (!session.client?.connected || session.generation !== generation) throw Object.assign(new Error('连接尚未恢复'), { recoverable: true });
           // 挂机完整一轮后才清零，防止刚登录又被顶号无限重试。
-          saveLoginRecovery(session, session.loop.running ? { ...session.loginRecovery, status: 'connected' } : null, { loginBlocked: false });
+          saveLoginRecovery(session, session.loop.running || autoStartEnabled(account)
+            ? { ...session.loginRecovery, status: 'connected' } : null, { loginBlocked: false });
           emit(session, 'state', '游戏连接已恢复', { pauseChanged: true });
+          void startAutomaticLoop(session);
           return;
         } catch (error) {
           if (!active()) break;
@@ -1085,7 +1094,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const recoverable = (kicked ? policy.autoReconnect : instance.closeReason !== 'protocol' && instance.closeReason !== 'login-rejected');
     loop.connectionFailure = { reason, recoverable };
     if (recoverable) loop.attemptController?.abort();
-    else stopLoop(session, reason + '，已停止挂机', { cancelRecovery: false });
+    else stopLoop(session, reason + '，已停止挂机', { cancelRecovery: false, preserveAutoStart: true });
   }
 
   // 每次连接把服务端给的昵称/等级/区服写回账号文件，账号列表里就能看到人话标记。
@@ -1463,24 +1472,30 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     const credential = { url, login: body, loginFrameHex: rawFrameHex, source: platform === 'douyin' ? 'douyin-mitm' : 'mitm', capturedAt: new Date().toISOString() };
     const store = loadStore();
     const { account, created } = upsertAccount(store, credential);
-    if (created) account.automation = { enabled: true, everySeconds: 60 };
+    account.automation = { ...account.automation, autoStart: autoStartEnabled(account) };
     saveStore(store);
     const title = describeAccount(account).title;
     emit(null, 'info', created ? `新账号已入库：${title}` : `账号凭证已刷新：${title}`);
 
     const session = sessionFor(account.id);
     if (session.paused) return { id: account.id };
+    if (autoStartEnabled(account)) {
+      if (session.loginBlocked && !loginRecoveryActive(session)) {
+        cancelLoginRecovery(session);
+        saveLoginRecovery(session, null, { loginBlocked: false });
+      }
+      await startAutomaticLoop(session);
+      return { id: account.id };
+    }
     try {
-      await ensureConnected(session, account);
+      await ensureConnected(session, account, { explicitLogin: true });
       emit(null, 'info', `${title} 的角色信息已读取（游戏那边会被顶下线一次，重进即可）`);
-      if (created && account.automation.enabled) startLoop(session, account, { rounds: 0 });
-      else if (!session.loop.running && !session.stages.view().running && !session.mutualAid.view().running && ![...session.trials.values()].some(task => task.view().running)) {
+      if (!session.loop.running && !session.stages.view().running && !session.mutualAid.view().running && ![...session.trials.values()].some(task => task.view().running)) {
         session.client?.stop();
         session.client = null;
         session.player = null;
       }
     } catch (error) {
-      if (created) saveAutomation(account.id, { enabled: false });
       emit(null, 'warn', `读取角色信息失败，账号本身已经存好了：${error.message}`);
     }
     return { id: account.id };
@@ -1518,7 +1533,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       scoped = found.session;
       if (req.method === 'POST' && found.session.syncingProduction
         && !['/api/accounts/pause', '/api/disconnect', '/api/loop/stop', '/api/stages/stop', '/api/pirates/advance/stop',
-          '/api/guild/mutual/stop', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
+          '/api/guild/mutual/stop', '/api/loop/auto-start', '/api/settings', '/api/settings/validate', '/api/login-settings', '/api/week-order/settings', '/api/hero-raid/settings', '/api/merchant/settings', '/api/activities/settings', '/api/appointments/settings', '/api/logs/clear'].includes(parsed.pathname)) {
         throw new Error('正在自动同步手动操作后的生产状态，请等待同步完成后操作');
       }
       if (longRunning) found.session.busy = route;
@@ -2321,10 +2336,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             session.loginBlocked = false;
             saveLoginRecovery(session, null);
           }
-          const generation = ++session.generation;
+          session.generation++;
           if (paused) {
             requireProductionSync(session);
-            stopLoop(session, '账号暂停，结束挂机');
+            stopLoop(session, '账号暂停，结束挂机', { preserveAutoStart: true });
             session.stages.stop('账号已暂停'); session.mutualAid.stop('账号已暂停'); for (const task of session.trials.values()) task.stop('账号已暂停');
             session.client?.stop();
             session.worldClient?.stop();
@@ -2332,10 +2347,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
             emit(session, 'state', '账号已暂停，可以自行上号', { pauseChanged: true });
           } else {
             emit(session, 'state', '账号已恢复托管', { pauseChanged: true });
-            if (account.automation?.enabled) {
-              await session.loop.job;
-              if (generation === session.generation && !session.loop.running) startLoop(session, account);
-            }
+            await startAutomaticLoop(session);
           }
         }
         json(accountStatus(session));
@@ -2344,7 +2356,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (route === 'POST /api/connect') {
         const payload = jsonBody();
         const { account, session } = scoped_(parsed);
-        json(await connect(session, account, { explicitLogin: true }));
+        const result = await connect(session, account, { explicitLogin: true });
+        await startAutomaticLoop(session);
+        json(result);
         return;
       }
       if (route === 'POST /api/disconnect') {
@@ -3141,6 +3155,16 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         json(loopView(session));
         return;
       }
+      if (route === 'POST /api/loop/auto-start') {
+        const payload = jsonBody();
+        needConfirm(payload);
+        if (typeof payload.autoStart !== 'boolean') throw new Error('自动开始挂机必须是开关值');
+        const { account, session } = scoped_(parsed);
+        saveAutomation(account.id, { autoStart: payload.autoStart, enabled: payload.autoStart });
+        if (payload.autoStart) await startAutomaticLoop(session);
+        json(loopView(session));
+        return;
+      }
       if (route === 'POST /api/loop/stop') {
         const payload = jsonBody();
         needConfirm(payload);
@@ -3222,14 +3246,34 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     if (!account) return;
     account.automation = { ...account.automation, ...change };
     saveStore(store);
+    if (Object.hasOwn(change, 'autoStart') && sessions.has(id)) sessions.get(id).loop.autoStart = change.autoStart;
   }
 
-  function stopLoop(session, reason, { cancelRecovery = true } = {}) {
+  function autoStartEnabled(account) {
+    return account.automation?.autoStart ?? account.automation?.enabled ?? true;
+  }
+
+  async function startAutomaticLoop(session) {
+    try {
+      const generation = session.generation;
+      if (session.loop.controller?.signal.aborted) await session.loop.job;
+      if (closing || sessions.get(session.id) !== session || generation !== session.generation
+        || session.paused || session.loop.running || session.loginBlocked && !loginRecoveryActive(session)) return;
+      const account = loadStore().accounts.find(row => row.id === session.id);
+      if (!account || !autoStartEnabled(account)) return;
+      startLoop(session, account, { rounds: 0 });
+    } catch (error) {
+      session.loop.error = error.message;
+      emit(session, 'error', `无法自动开始挂机：${error.message}`);
+    }
+  }
+
+  function stopLoop(session, reason, { cancelRecovery = true, preserveAutoStart = false } = {}) {
     if (cancelRecovery) cancelLoginRecovery(session);
     session.pirateAdvance?.stop(reason);
     const loop = session.loop;
+    if (!session.paused || !preserveAutoStart) saveAutomation(session.id, { enabled: false, ...(!preserveAutoStart ? { autoStart: false } : {}) });
     if (!loop.running || loop.controller?.signal.aborted) return;
-    if (!session.paused) saveAutomation(session.id, { enabled: false });
     loop.controller.abort();
     emit(session, 'info', reason);
   }
@@ -3256,7 +3300,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       if (options.explicitLogin || session.loginRecovery?.status !== 'connected') saveLoginRecovery(session, null);
       session.loginBlocked = false;
     }
-    saveAutomation(account.id, { enabled: rounds === 0, rounds, everySeconds, loginBlocked: session.loginBlocked });
+    saveAutomation(account.id, { enabled: rounds === 0, autoStart: rounds === 0, rounds, everySeconds, loginBlocked: session.loginBlocked });
     Object.assign(loop, { running: true, rounds, completed: 0, everyMs: everySeconds * 1000,
       history: [], error: null, recovery: null, connectionFailure: null, challengeRun: createChallengeRun(), controller: new AbortController() });
     const { signal } = loop.controller;
@@ -3478,6 +3522,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         return {...control,observation:state,...runtimeProgress(control,state,displayUsage,{running:loop.running,connected:!!session.client?.connected,treasureReward,freeTimes:session.client?.freeRecruitTimes,now:Date.now()+(session.client?.serverClockOffsetMs||0)}),nextCheck:loop.running&&session.client?.connected&&control.enabled&&!control.blockedBy.length?nextCheck:null,stale:!loop.running||!session.client?.connected};
       }),
       running: loop.running,
+      autoStart: loop.autoStart,
       recovery: loop.recovery,
       stopping: !!loop.controller?.signal.aborted,
       tasks: automationTasks.filter(task => isActivityTaskAvailable(task.key, session.client)).map(({ key, label, group }) => ({
@@ -3522,8 +3567,9 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
           const address = `http://${host}:${server.address().port}`;
           emit(null, 'info', `控制台已启动 ${address}`);
           for (const account of loadStore().accounts) {
+            if (account.automation?.autoStart === undefined) saveAutomation(account.id, { autoStart: autoStartEnabled(account) });
             if (account.automation?.paused) continue;
-            if (!account.automation?.enabled && !account.automation?.loginBlocked) continue;
+            if (!autoStartEnabled(account) && !account.automation?.loginBlocked) continue;
             const session = sessionFor(account.id);
             if (session.loginBlocked) {
               // 旧版本仅保存 loginBlocked；迁移时按当前配置安排完整等待。
@@ -3531,9 +3577,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
               else if (loginRecoveryActive(session) && !reconnectPolicy(session).autoReconnect) cancelLoginRecovery(session, 'disabled');
               startLoginRecovery(session);
             }
-            if (!account.automation?.enabled) continue;
-            try { startLoop(session, account, { rounds: 0 }); }
-            catch (error) { emit(session, 'error', `无法恢复挂机：${error.message}`); }
+            void startAutomaticLoop(session);
           }
           resolve(address);
         });

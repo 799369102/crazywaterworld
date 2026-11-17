@@ -797,6 +797,7 @@ $('stage-stop').onclick = () => stageCommand(false);
 let loopVersion = 0;
 let loopAccount = null,loopFieldDefaults=null;
 const savingTasks = new Set();
+const loopAutoStartSaves = new Map();
 let loopSettingsRevision = null;
 function selectIdleGroup(value) {
   document.querySelector('[aria-label="挂机设置分组"]').hidden=false;
@@ -889,8 +890,6 @@ function renderAutomationOverview(data){
 }
 $('overview-task-search').oninput=()=>{if(overviewLoopData&&overviewLoopOwner===current)renderAutomationOverview(overviewLoopData);};
 $('overview-task-filter').onchange=$('overview-task-search').oninput;
-$('idle-go-settings').onclick=()=>document.querySelector('#tabs [data-tab="settings"]').click();
-$('idle-go-overview').onclick=()=>{document.querySelector('#tabs [data-tab="overview"]').click();$('overview-task-summary').scrollIntoView({block:'center'});};
 function filterIdleControls(){
  const query=$('idle-search').value.trim().toLowerCase(),mode=$('idle-filter').value;let count=0;
  for(const input of taskInputs){const row=input.closest('.task-setting');const match=row.dataset.unavailable!=='true'&&(!query||row.textContent.toLowerCase().includes(query))&&(mode!=='enabled'||input.getAttribute('aria-checked')==='true')&&(mode!=='blocked'||row.dataset.blocked==='true');row.hidden=!match;if(match)count++;}
@@ -899,23 +898,15 @@ function filterIdleControls(){
  for(const panel of document.querySelectorAll('[data-idle-panel]'))panel.hidden=filtering?![...panel.querySelectorAll('.task-setting')].some(row=>!row.hidden):document.querySelector('[data-idle-group="'+panel.dataset.idlePanel+'"]').getAttribute('aria-selected')!=='true';
  $('idle-filter-count').textContent=filtering?'跨分组找到 '+count+' 项':'';
 }
-function openChallengeConfig(id){
-  const hash='#config-group-'+id;
-  if(location.hash!==hash)location.hash=hash;
-  else{activateConsolePage(document.querySelector('#tabs [data-tab="settings"]'));configApplyHash();}
-}
-$('single-go-pirate').onclick=()=>openChallengeConfig('pirate-hunt');
-$('single-go-stages').onclick=()=>openChallengeConfig('progression');
-$('single-go-mutual').onclick=()=>activateConsolePage(document.querySelector('#tabs [data-tab=resources]'),'guild');
 $('idle-search').oninput=filterIdleControls;$('idle-filter').onchange=filterIdleControls;
 function renderLoop(data) {
   renderAutomationOverview(data);
   renderPirateAdvance(data.pirateAdvance);
-  $('runtime-version').textContent='当前服务加载时间：'+(data.runVersion?new Date(data.runVersion).toLocaleString('zh-CN'):'旧版服务，等待加载本次更新');
-  if(data.singleTasks)$('single-task-status').textContent='手动任务 · 首杀：'+(data.singleTasks.pirate?.running?'运行中':'未启动')+' · 主线：'+(data.singleTasks.stages?.running?'运行中':'未启动')+' · 联盟互助：'+(data.singleTasks.mutual?.running?'运行中':'未启动');
-  const challenge=data.challenges??{},challengeNotes=[challenge.mainline?.reason&&'主线：'+challenge.mainline.reason,...Object.entries(challenge.trials??{}).map(([id,row])=>row.reason&&'试炼'+id+'：'+row.reason),challenge.pirate?.reason&&'海盗：'+challenge.pirate.reason].filter(Boolean);
-  $('challenge-run-state').textContent=challengeNotes.join('；')||'推关与讨伐尚无执行记录';
   loopSettingsRevision = data.settingsRevision;
+  const autoStartSaving = loopAutoStartSaves.has(current);
+  setTaskSwitch($('loop-auto-start'), autoStartSaving ? loopAutoStartSaves.get(current) : data.autoStart === true);
+  $('loop-auto-start').disabled = !current || autoStartSaving;
+  $('loop-auto-start-status').textContent = autoStartSaving ? '正在保存' : '';
   for (const input of taskInputs) {
     if (savingTasks.has(current + ':' + input.dataset.autoTask)) continue;
     const task = (data.controls ?? []).find(t => t.key === input.dataset.autoTask);
@@ -935,8 +926,8 @@ function renderLoop(data) {
   filterIdleControls();
   loopAccount = current;
   $('loop-every').disabled = $('loop-rounds').disabled = data.running;
-  $('loop-start').disabled = data.running;
-  $('loop-stop').disabled = !data.running || data.stopping;
+  $('loop-start').disabled = data.running || autoStartSaving;
+  $('loop-stop').disabled = !data.running || data.stopping || autoStartSaving;
   $('loop-hint').textContent = (data.recovery ? '网络恢复中（第 ' + data.recovery.attempt + ' 次），已完成 ' : data.running ? '后台挂机中，已完成 ' : '未在挂机，累计 ') + data.completed + ' 轮' + (data.error ? '，已中止' : '');
   if (data.stopping) $('loop-hint').textContent = '正在暂停，等待在途请求结束';
 
@@ -956,6 +947,9 @@ async function refreshLoop() {
     }
     if(overviewLoopOwner!==account){overviewLoopData=null;overviewLoopOwner=account;overviewRenderKey='';clear($('overview-task-groups'));$('overview-task-summary').textContent=account?'正在读取运行状态':'请先选择账号';}
     loopSettingsRevision = null;
+    $('loop-auto-start').disabled = true;
+    setTaskSwitch($('loop-auto-start'), false);
+    $('loop-auto-start-status').textContent = '';
     $('pirate-advance-start').disabled=$('pirate-advance-stop').disabled=true;
     $('pirate-advance-state').textContent=account?'正在读取首杀状态':'请选择账号';
     $('pirate-manual-failures').value=pirateFailureOptions.get(account)??1;
@@ -1006,6 +1000,45 @@ async function toggleAutoTask(input) {
   }
 }
 for (const input of taskInputs) input.onclick = () => toggleAutoTask(input);
+
+async function toggleLoopAutoStart() {
+  const account = current, input = $('loop-auto-start');
+  if (!account || loopAccount !== account || loopAutoStartSaves.has(account)) return;
+  const autoStart = input.getAttribute('aria-checked') !== 'true';
+  loopAutoStartSaves.set(account, autoStart);
+  setTaskSwitch(input, autoStart);
+  input.disabled = true;
+  $('loop-start').disabled = $('loop-stop').disabled = true;
+  $('loop-auto-start-status').textContent = '正在保存';
+  ++loopVersion;
+  try {
+    if (!await configFlush()) throw new Error('配置尚未保存，请先处理配置页的提示');
+    if (account !== current) return;
+    const updated = await call('/api/loop/auto-start', {
+      method: 'POST', body: JSON.stringify({ confirm: true, autoStart }),
+    });
+    loopAutoStartSaves.delete(account);
+    if (account === current) {
+      ++loopVersion;
+      renderLoop(updated);
+    }
+  } catch (error) {
+    if (account === current) {
+      ++loopVersion;
+      setTaskSwitch(input, !autoStart);
+      reportError(error);
+    }
+  } finally {
+    loopAutoStartSaves.delete(account);
+    if (account === current) {
+      input.disabled = false;
+      $('loop-auto-start-status').textContent = '';
+      if (overviewLoopOwner === account && overviewLoopData) renderLoop(overviewLoopData);
+      refreshLoop();
+    }
+  }
+}
+$('loop-auto-start').onclick = toggleLoopAutoStart;
 
 $('loop-start').onclick = async () => {
   const account = current;

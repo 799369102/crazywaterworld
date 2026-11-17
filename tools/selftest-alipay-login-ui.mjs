@@ -352,7 +352,12 @@ await test('配置确认等待中到期，不发送保存请求', async () => {
 });
 
 await test('保存暂停或异地登录阻止的账号后提示恢复托管', async () => {
-  for (const status of [{ paused: true, connected: false }, { loginBlocked: true, connected: false }]) {
+  for (const status of [
+    { paused: true, connected: false },
+    { loginBlocked: true, connected: false },
+    { paused: true, connected: true, looping: true },
+    { loginBlocked: true, connected: true, looping: true },
+  ]) {
     const f = fixture();
     await f.click('alipay-start');
     await f.captured();
@@ -382,6 +387,23 @@ await test('保存已连接账号后展示连接状态', async () => {
   await f.click('alipay-save');
   assert.match(f.node('alipay-hint').textContent, /游戏已连接/);
   assert.equal(f.env.disconnected.has('alipay:account'), false);
+});
+
+await test('保存后自动挂机已启动或正在连接时显示任务状态入口', async () => {
+  for (const connected of [false, true]) {
+    const f = fixture();
+    await f.click('alipay-start');
+    await f.captured();
+    const respond = f.env.respond;
+    f.env.respond = async (route, payload) => {
+      const data = await respond(route, payload);
+      if (route.endsWith('/save')) data.account.status = { connected, looping: true };
+      return data;
+    };
+    await f.click('alipay-save');
+    assert.match(f.node('alipay-hint').textContent, /账号已保存并切换.*按保存配置启动自动挂机.*「挂机」查看状态或调整任务/);
+    assert.deepEqual(f.env.accounts.find(account => account.id === 'alipay:account').status, { connected, looping: true });
+  }
 });
 
 await test('保存期间抑制重复请求，失败后可重试', async () => {

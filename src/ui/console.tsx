@@ -17,26 +17,19 @@ export function idlePanel(tasks: AutoTask[]) {
         <CardTitle className="title-with-help">定时挂机<HelpTip title="定时挂机">轮数填 0 表示持续运行。每轮只执行当前账号已开启的任务。关闭网页后继续在后台运行，日志同步输出到启动窗口；请保持启动窗口打开。</HelpTip><span className="dim heading-status" id="loop-hint" role="status" /></CardTitle>
       </CardHeader>
       <CardContent>
+        <div className="bar">
+          <Switch id="loop-auto-start" className="p-0" disabled aria-describedby="loop-auto-start-help" />
+          <label htmlFor="loop-auto-start">自动开始挂机</label>
+          <span id="loop-auto-start-status" className="dim" role="status" />
+        </div>
+        <p id="loop-auto-start-help" className="dim">新账号默认持续挂机，开关按账号保存。开启后在启动程序、登录或重连成功时自动运行。暂停挂机会记住关闭状态。</p>
         <div className="loop-form">
           <label htmlFor="loop-rounds">轮数<Input id="loop-rounds" type="number" min="0" defaultValue="0" /></label>
           <label htmlFor="loop-every">间隔（秒）<Input id="loop-every" type="number" min="1" max="86400" defaultValue="60" /></label>
           <Button id="loop-start" disabled>开始挂机</Button>
           <Button id="loop-stop" variant="outline" disabled>暂停挂机</Button>
         </div>
-        <p className="dim">关闭网页后继续挂机，日志同步显示在启动窗口。持续运行请将轮数设为 0，并保持启动窗口打开。</p>
-      </CardContent>
-    </Card>
-    <Card className="idle-notes">
-      <CardContent>
-        <p className="dim">推关与试炼、海盗讨伐开启并配置后，每轮自动执行。失败达到上限后停止对应玩法，暂停后重新开始挂机可重试。</p>
-        <p className="dim" id="challenge-run-state" role="status">推关与讨伐尚无执行记录</p>
-        <p className="dim" id="single-task-status">手动主线、试炼和首杀推进在挑战页开始；联盟互助仍需单独启动。</p>
-        <div className="bar"><Button id="single-go-pirate" variant="outline" size="sm">配置海盗讨伐</Button><Button id="single-go-stages" variant="outline" size="sm">配置推关与试炼</Button><Button id="single-go-mutual" variant="outline" size="sm">前往联盟互助</Button></div>
-        <details className="idle-more"><summary>使用说明</summary>
-          <p className="dim">本页只负责开启或关闭对应的自动挂机。收取、建造、种植、加速等执行细项，以及策略、权限和参数，都在<button id="idle-go-settings" type="button" className="inline-link">游戏配置</button>设置。</p>
-          <p className="dim">当前进度和条件统一在<button id="idle-go-overview" type="button" className="inline-link">总览 → 运行概览</button>查看。</p>
-          <p className="dim" id="runtime-version" />
-        </details>
+        <p className="dim">轮数 0 表示持续运行。关闭网页后继续挂机，请保持启动窗口打开。关闭自动开始后，当前任务可通过“暂停挂机”结束。</p>
       </CardContent>
     </Card>
     <div className="bar idle-filter-bar"><Input id="idle-search" type="search" aria-label="查找功能" placeholder="查找功能名称" /><label htmlFor="idle-filter">显示</label><select id="idle-filter" defaultValue="all"><option value="all">全部</option><option value="enabled">已开启</option></select><span id="idle-filter-count" role="status" /></div>

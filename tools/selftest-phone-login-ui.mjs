@@ -631,15 +631,41 @@ await test('保存成功后列表刷新失败仍保持成功和当前账号，�
   assert.equal(f.node('phone-entry').hidden, false);
 });
 
-await test('保存暂停账号后提示恢复托管，保存过程中保持暂停状态', async () => {
-  const f = fixture();
-  f.env.accounts.push({ id: 'saved-account', title: '已暂停账号', status: { paused: true, connected: false } });
-  await f.login();
-  f.chooseRole();
-  await f.click('phone-save');
-  assert.equal(f.env.accounts[1].status.paused, true);
-  assert.deepEqual(f.env.disconnectedAtSelection, [true]);
-  assert.match(f.node('phone-success-next').textContent, /恢复托管/);
+await test('保存暂停或异地登录阻止的账号优先提示恢复托管', async () => {
+  for (const status of [
+    { paused: true, connected: false },
+    { paused: true, connected: true, looping: true },
+    { loginBlocked: true, connected: true, looping: true },
+  ]) {
+    const f = fixture();
+    f.env.accounts.push({ id: 'saved-account', title: '已暂停账号', status });
+    await f.login();
+    f.chooseRole();
+    await f.click('phone-save');
+    assert.deepEqual(f.env.accounts[1].status, status);
+    assert.deepEqual(f.env.disconnectedAtSelection, [!status.connected]);
+    assert.match(f.node('phone-success-next').textContent, /恢复托管/);
+    assert.match(f.node('phone-step').textContent, /恢复托管/);
+  }
+});
+
+await test('保存后自动挂机已启动或正在连接时显示任务状态入口', async () => {
+  for (const connected of [false, true]) {
+    const f = fixture();
+    await f.login();
+    f.chooseRole();
+    const respond = f.env.respond;
+    f.env.respond = async (route, payload) => {
+      const data = await respond(route, payload);
+      if (route === prefix + '/save') data.account.status = { connected, looping: true };
+      return data;
+    };
+    await f.click('phone-save');
+    assert.match(f.node('phone-success-next').textContent, /按保存配置启动自动挂机.*「挂机」查看状态或调整任务/);
+    assert.equal(f.node('phone-step').textContent, '所选角色已保存 → 自动挂机');
+    assert.equal(f.node('phone-success').hidden, false);
+    assert.deepEqual(f.env.accounts[1].status, { connected, looping: true });
+  }
 });
 
 await test('同一APP切换角色采用保存后的断开状态并清除旧角色详情归属', async () => {
