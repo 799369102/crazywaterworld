@@ -1,6 +1,7 @@
 import {fleetRecordReason,legacyFleetReservationReason,reserveDispatch} from './fleet-availability.mjs';
 import { recordsInWorld, settleFleetSnapshot } from './fleet-settlement.mjs';
-// 按原生委任策略接管后的城战攻守。只移动本人舰队和正常维修，不宣战。
+import { runCityRepairSpeed } from './city-repair-speed.mjs';
+// 按原生委任策略接管后的城战攻守；维修加速须独立授权钻石预算，不宣战。
 import { exactAutomationId } from './automation-policy.mjs';
 import { loadMapAsset } from './world.mjs';
 
@@ -318,7 +319,7 @@ export function planCityWar(snapshot, settings, { usage = { counters: {} }, keys
 }
 
 function reconcile(snapshot,ledger,baseline){
- if(!snapshot.reason)settleFleetSnapshot(ledger,{worldId:snapshot.worldId,fleets:snapshot.fleets,now:snapshot.now,kinds:['cityRepair','cityDispatch','pirateFirst'],baseline});
+ if(!snapshot.reason)settleFleetSnapshot(ledger,{worldId:snapshot.worldId,fleets:snapshot.fleets,now:snapshot.now,kinds:['cityRepair','cityRepairSpeed','cityDispatch','pirateFirst'],baseline});
 }
 
 async function disableNativeCommission(client, protocol, ids) {
@@ -339,6 +340,8 @@ export async function runCityWar(client, protocol, config, player, { getSettings
   active.add(client);
   const results = [];
   try {
+    const speedOptions = { getSettings, ledger, enabled, onStep: entry => { results.push(entry); onStep?.(entry); } };
+    await runCityRepairSpeed(client, protocol, config, player, speedOptions);
     const read = async () => {
       const baseline = ledger.keyRecords();
       const snapshot = await readCityWar(client, protocol, config, player, getSettings()?.cityWar, { mapLoader });
@@ -430,6 +433,7 @@ export async function runCityWar(client, protocol, config, player, { getSettings
       if (entry.status !== 'rejected') remainingFuel -= step.cost;
       if (entry.status === 'unknown') break;
     }
+    await runCityRepairSpeed(client, protocol, config, player, speedOptions);
     return { ...plan, results, remainingFuel };
   } finally { active.delete(client); }
 }

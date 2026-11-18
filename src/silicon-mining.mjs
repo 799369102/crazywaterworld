@@ -59,6 +59,7 @@ export function watchSiliconMining(client) {
   const listeners = new Set(), minutes = new Map();
   const watcher = { subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
     wake() { for (const fn of listeners) { try { fn(); } catch {} } },
+    invalidateRepairMinutes() { minutes.delete(4); },
     repairMinutes() { const value = minutes.get(4); return value?.day === day(now(client)) ? value.minutes : null; } };
   client.on?.('message', ({ name, body }) => {
     if (name === 'SCSpeedUp') for (const row of body?.data ?? []) if (integer(row.type) && Number.isFinite(row.minutes) && row.minutes >= 0) minutes.set(row.type, { minutes: row.minutes, day: day(now(client)) });
@@ -346,6 +347,7 @@ async function sendAndCheck(client, protocol, player, options, snapshot, step, c
   let sent = false;
   try {
     sent = true;
+    if (step.kind === 'siliconSpeed' && step.repair) watchSiliconMining(client).invalidateRepairMinutes();
     await client.sendWatch(step.request, step.body, { window: 500 });
     const fresh = await readSiliconMining(client, protocol, options.config, player, { settings: getSettings(), ledger });
     if (who !== identity(player)) throw Error('写入后账号已切换，保留待确认记录');

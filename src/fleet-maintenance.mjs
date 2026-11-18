@@ -1,4 +1,5 @@
 import {settleFleetSnapshot} from './fleet-settlement.mjs';
+import {runCityRepairSpeed} from './city-repair-speed.mjs';
 // 战后补满：只维修现有配置所选的空闲舰队，不要求下一次出征目标或城战时段。
 import {exactAutomationId} from './automation-policy.mjs';
 import {rewardData} from './missing-rewards.mjs';
@@ -92,9 +93,9 @@ export function planFleetMaintenance(snapshot,settings,client){
  }return result;
 }
 function reconcile(snapshot,ledger){
- if(!snapshot.reason)settleFleetSnapshot(ledger,{worldId:snapshot.worldId,fleets:snapshot.rows.map(r=>r.fleet).filter(Boolean),now:snapshot.checkedAt,kinds:['cityDispatch','cityRepair','treasureRepair']});
+ if(!snapshot.reason)settleFleetSnapshot(ledger,{worldId:snapshot.worldId,fleets:snapshot.rows.map(r=>r.fleet).filter(Boolean),now:snapshot.checkedAt,kinds:['cityDispatch','cityRepair','cityRepairSpeed','treasureRepair']});
 }
-export async function runFleetMaintenance(client,player,{getSettings,ledger,enabled=()=>true,onStep,onView}={}){
+export async function runFleetMaintenance(client,player,{getSettings,ledger,protocol,config,enabled=()=>true,onStep,onView}={}){
  if(!enabled()||!fleetMaintenanceEnabled(getSettings?.())||active.has(client))return null;
  active.add(client);const failures=refused.get(client)??new Map();refused.set(client,failures);
  try{
@@ -125,6 +126,17 @@ export async function runFleetMaintenance(client,player,{getSettings,ledger,enab
    }catch(error){const rejected=error.prompt&&error.request==='RepairFleetRequest';if(rejected){ledger.cancel(ticket);failures.set(step.uniqueKey,{until:Date.now()+300000,signature});}entry={step,ok:false,status:rejected?'rejected':'unknown',error:error.message};}
    onStep?.(entry);view.state=entry.status==='confirmed'?'repairing':entry.status==='unknown'?'unknown':'waiting';view.condition=entry.note||entry.error;
    if(entry.status!=='rejected')remaining-=step.cost;if(entry.status==='unknown')break;
+  }
+  const speed=await runCityRepairSpeed(client,protocol,config,player,{getSettings,ledger,enabled,onStep});
+  if(speed.fleets){
+   watch.seedFleets(speed.fleets);
+   for(const row of plan.rows){
+    const fleet=speed.fleets.find(f=>f.buildingId===row.id);
+    if(fleet&&idle(fleet)&&fleet.durability===fleet.maxDura){row.state='full';row.condition='耐久已满';}
+    const pending=speed.results.find(e=>e.step.buildingId===row.id&&e.status==='unknown');
+    if(pending){row.state='unknown';row.condition=pending.note||pending.error;}
+   }
+   watch.hold(plan.reason?[...selected]:plan.rows.filter(r=>selected.has(r.id)&&!['full','busy'].includes(r.state)).map(r=>r.id));
   }
   onView?.(plan);return plan;
  }finally{active.delete(client);}

@@ -63,11 +63,10 @@ export function validateGuildRolePreconfiguration(roster, settings) {
   return { canManage: roster?.canManage === true, memberCount: members.size };
 }
 
-export async function transferGuildPresident(client, player, {
+export async function previewGuildPresidentTransfer(client, player, {
   targetId,
   expectedNickname,
   enabled = () => true,
-  wait = delay => new Promise(resolve => setTimeout(resolve, delay)),
 } = {}) {
   const id = idText(targetId);
   if (!id) throw new Error('请选择要转让盟主的成员');
@@ -82,12 +81,23 @@ export async function transferGuildPresident(client, player, {
   if (before.info.myTitle !== PRESIDENT) throw new Error('当前托管账号不是盟主，不能转让盟主');
   if (target.title === PRESIDENT) throw new Error('目标成员已经是盟主');
   if (!enabled()) throw new Error('账号连接已变化，请重新操作');
+  return { targetId: id, nickname: target.name };
+}
+
+export async function transferGuildPresident(client, player, {
+  targetId, expectedNickname, enabled = () => true,
+  wait = delay => new Promise(resolve => setTimeout(resolve, delay)),
+} = {}) {
+  const preview = await previewGuildPresidentTransfer(client, player, { targetId, expectedNickname, enabled });
+  if (preview.alreadyTransferred) return preview;
+  const id = preview.targetId;
+  if (!enabled()) throw new Error('账号连接已变化，请重新操作');
   await client.sendWatch('ChangeGuildMemberTitleRequest', { memberId: id, title: PRESIDENT }, { window: 800 });
   for (const delay of [250, 500, 1000]) {
     await wait(delay);
     const after = await readRawRoster(client, player);
     if (after.members.get(id)?.title === PRESIDENT && after.info.myTitle !== PRESIDENT) {
-      return { ok: true, targetId: id, nickname: target.name, myTitle: after.info.myTitle };
+      return { ok: true, targetId: id, nickname: preview.nickname, myTitle: after.info.myTitle };
     }
   }
   throw Object.assign(new Error('盟主转让请求已发送，但成员列表尚未确认结果，请立即进游戏核对'), { resultUnknown: true });

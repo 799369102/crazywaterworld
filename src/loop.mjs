@@ -451,7 +451,7 @@ export async function runLoop(client, protocol, {
       if(stop.aborted||!fleetMaintenanceEnabled(getSettings())){watchFleetMaintenance(client).hold([]);onMaintenance?.({enabled:false,rows:[],reason:'现有自动维修未开启'});return;}
       if(Date.now()<maintenanceAt)return;
       const version=maintenanceVersion;
-      try{await runFleetMaintenance(client,player,{getSettings,ledger:usageLedger,enabled:()=>!stop.aborted&&client.connected&&fleetMaintenanceEnabled(getSettings()),
+      try{await runFleetMaintenance(client,player,{getSettings,ledger:usageLedger,protocol,config,enabled:()=>!stop.aborted&&client.connected&&fleetMaintenanceEnabled(getSettings()),
         onView:onMaintenance,onStep:entry=>{summary.world.planned++;summary.world.results.push(entry);stepLog('world')({...entry,category:'战后维修',taskKey:'舰队战后维修'});}});}
       catch(error){onMaintenance?.({enabled:true,rows:[],reason:error.message});phaseFailure('world','战后维修',error);}
       finally{maintenanceAt=version!==maintenanceVersion?0:Date.now()+fleetMaintenanceInterval(getSettings());}

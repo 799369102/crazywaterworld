@@ -77,8 +77,8 @@ await bot.flush();
 assert.equal(members.get(applicant).title, 4);
 assert.equal(count(4), 4, '副盟满员时应由原副盟让位，仍保持四人');
 assert.equal(count(3), 20, '精英满员时应有人降到 R2，仍保持二十人');
-assert.equal([...members].filter(([id, member]) => original.get(id) === 4 && member.title === 3).length, 1);
-assert.equal([...members].filter(([id, member]) => original.get(id) === 3 && member.title === 2).length, 1);
+assert.equal([...members].filter(([id, member]) => original.get(id) === 4 && member.title === 2).length, 1);
+assert.equal([...members].filter(([id, member]) => original.get(id) === 3 && member.title === 2).length, 0);
 assert.equal(members.get(protectedVice).title, 4, '永久副盟主不能被选作让位成员');
 assert.equal(members.get(permanentVice2).title, 4, '第二名永久副盟主不能被选作让位成员');
 assert.equal(members.get(protectedElite).title, 3, '精英优先成员应优先保留 R3');
@@ -87,7 +87,8 @@ assert(bot.snapshot().baseline);
 
 clock += 120001;
 await bot.flush();
-assertOriginal();
+assert.equal(count(4), 3, '临时副盟到期后不补回原副盟');
+assert.notEqual(members.get(applicant).title, 4);
 assert.equal(bot.snapshot().leases.length, 0);
 
 // 同一成员的新消息仍可再次执行，并可用“下副盟”提前恢复整条让位链。
@@ -98,7 +99,7 @@ assert.equal(members.get(applicant).title, 4);
 clock += 1000;
 assert.equal(bot.receive(client, message(applicant, 'demote')).accepted, true);
 await bot.flush();
-assertOriginal();
+assert.equal(count(4), 3, '主动下位后保留空位');
 
 // 21:05 收尾会清除未到期租约，并按首次快照恢复所有成员。
 clock = Date.parse('2026-12-18T20:59:50+08:00');
@@ -134,17 +135,16 @@ await bot.flush();
 assertOriginal();
 assert.equal(bot.snapshot().baseline, null);
 
-// 当天没有临时职位和快照，也要在统一收尾时间执行配置的盟主转让。
+// 未保存过快照、没有确认恢复的当天，不得直接自动转让。
 await bot.restoreNow();
 clock = Date.parse('2026-12-21T21:05:00+08:00');
 bot.configure({ enabled: true, commandStart: '20:00', commandEnd: '21:00', leaseSeconds: 120, restoreAt: '21:05',
   allowedMemberIds: [applicant], protectedMemberIds: [protectedVice, protectedElite],
   transferTargetId: applicant, transferAfterRestore: true });
 await bot.flush();
-assert.equal(handovers.length, 2);
-assert.equal(handovers[1].targetId, applicant);
+assert.equal(handovers.length, 1);
 await bot.flush();
-assert.equal(handovers.length, 2, '同一天的统一恢复后转让只能执行一次');
+assert.equal(handovers.length, 1, '没有完成恢复不能自动转让');
 
 // R3 有空位时，精英优先名单中的 R2 会自动补到精英；永久副盟仍固定为 R4。
 await bot.restoreNow();

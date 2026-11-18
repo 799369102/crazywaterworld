@@ -52,8 +52,9 @@ import { pirateBoard } from './pirate-board.mjs';
 import { readGuild, readGuildMembers, claimGuildWelfare, claimMyGuildAid } from './guild.mjs';
 import { readGuildChat, watchGuildChat } from './guild-chat.mjs';
 import { createGuildRoleBot } from './guild-role-bot.mjs';
+import { createGuildRoleMonitor } from './guild-role-monitor.mjs';
 import { loadGuildRoleSettings, normalizeGuildRoleSettings, saveGuildRoleSettings } from './guild-role-settings.mjs';
-import { readGuildRoleMembers, transferGuildPresident, validateGuildRolePreconfiguration } from './guild-role-admin.mjs';
+import { readGuildRoleMembers, previewGuildPresidentTransfer, transferGuildPresident, validateGuildRolePreconfiguration } from './guild-role-admin.mjs';
 import { GUILD_ROLE_PAGE } from './guild-role-page.mjs';
 import { createGuildMutualTask, readMutualOptions, mutualOptions, loadMutualPreset, saveMutualPreset } from './guild-mutual.mjs';
 import { readFleetFormations, initializeFleetFormation } from './fleet-formation.mjs';
@@ -527,6 +528,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       guildRoleSettings,
       guildRoleCanManage: false,
       guildRoleReady: false,
+      guildRoleTransferring: false,
+      guildRoleMonitor: null, guildRoleRoster: null, guildRoleRosterVersion: 0,
       loop: {
         running: false,
         autoStart: saved?.autoStart ?? saved?.enabled ?? true,
@@ -575,12 +578,67 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
   }
 
   function armGuildRoleBot(session, account) {
-    if (!session.guildRoleCanManage || session.paused || session.guildRoleSettings.settings.enabled) return false;
+    if (!session.guildRoleCanManage || session.paused || session.guildRoleTransferring || session.guildRoleSettings.settings.enabled) return false;
     const next = { ...session.guildRoleSettings.settings, enabled: true };
     session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR, next, { revision: session.guildRoleSettings.revision });
     session.guildRoleBot.configure(session.guildRoleSettings.settings);
     emit(session, 'info', '检测到当前账号是盟主，联盟职位机器人已随托管自动启动');
     return true;
+  }
+
+  function publishGuildRole(session) {
+    for (const stream of streams) if (stream.account === session.id) writeStream(stream, 'event: guild-role-changed\ndata: {}\n\n');
+  }
+
+  function guildRoleStatus(session) {
+    return { ...session.guildRoleBot.snapshot(), canManage: session.guildRoleCanManage, ready: session.guildRoleReady,
+      transferring: session.guildRoleTransferring, rosterVersion: session.guildRoleRosterVersion, checkedAt: session.guildRoleRoster?.checkedAt,
+      revision: session.guildRoleSettings.revision };
+  }
+
+  function rememberGuildRoleRoster(session, roster) {
+    const previous = session.guildRoleRoster;
+    session.guildRoleRoster = roster;
+    session.guildRoleCanManage = roster.canManage;
+    if (!roster.canManage) session.guildRoleReady = false;
+    if (!previous || previous.canManage !== roster.canManage || JSON.stringify(previous.members) !== JSON.stringify(roster.members)) {
+      session.guildRoleRosterVersion++;
+      publishGuildRole(session);
+    }
+  }
+
+  function startGuildRoleMonitor(session, account, client) {
+    session.guildRoleMonitor?.stop();
+    const generation = session.generation;
+    const current = () => !closing && session.client === client && session.generation === generation && !session.paused && !session.guildRoleTransferring;
+    const monitor = createGuildRoleMonitor({
+      client, isCurrent: current,
+      readRoster: () => readJob(session, () => readGuildRoleMembers(client, session.player)),
+      onRoster: roster => {
+        rememberGuildRoleRoster(session, roster);
+        session.guildRoleBot.observeRoster(roster.members);
+        if (roster.canManage) {
+          armGuildRoleBot(session, account);
+          session.guildRoleBot.prepareLeadership(roster.members);
+          if (session.guildRoleBot.snapshot().needsInitialization) session.guildRoleReady = false;
+        }
+      },
+      initialize: async () => {
+        if (!current() || !session.guildRoleCanManage) return;
+        if (!session.guildRoleReady || !session.guildRoleBot.snapshot().baseline) {
+          await enqueue(session, async () => {
+            if (!current() || !session.guildRoleCanManage) return;
+            await session.guildRoleBot.initializeLeadership();
+            session.guildRoleReady = true;
+            publishGuildRole(session);
+          }, '核对盟主身份并初始化联盟职位');
+        }
+      },
+      revoke: () => { if (session.client === client) { session.guildRoleCanManage = false; session.guildRoleReady = false; publishGuildRole(session); } },
+      afterCheck: () => { void session.guildRoleBot.flush(); },
+      onError: error => emit(session, 'warn', '联盟职位后台核对失败，将自动重试：' + error.message),
+    });
+    session.guildRoleMonitor = monitor;
   }
 
   async function transferGuildPresidentAfterRestore(session, account, client, enabled, pending) {
@@ -590,8 +648,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
     }
     const roster = await readGuildRoleMembers(client, session.player);
     session.guildRoleCanManage = roster.canManage;
-    if (!roster.canManage) throw new Error('当前托管账号尚未成为盟主，已保留转让预配置并等待下次重试');
     const target = roster.members.find(member => member.id === pending.targetId);
+    if (!roster.canManage && target?.title !== 5) throw new Error('当前托管账号尚未成为盟主，已保留转让预配置并等待下次重试');
     if (!target) throw new Error('自动转让目标已经不在联盟');
     const result = await transferGuildPresident(client, session.player, {
       targetId: target.id,
@@ -997,7 +1055,7 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
     });
     instance.on('state', (event) => {
-      if (event.state === 'STOPPED') session.guildRoleBot.detach(instance);
+      if (event.state === 'STOPPED') { session.guildRoleBot.detach(instance); if (session.client === instance) session.guildRoleMonitor?.stop(); }
       trace(session, 'state', event);
       emit(session, 'state', STATE_TEXT[event.state] ?? event.state);
     });
@@ -1382,19 +1440,10 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         throw error;
       }
     }
-    let roleRoster = null;
-    try {
-      roleRoster = await readGuildRoleMembers(client, session.player);
-      session.guildRoleCanManage = roleRoster.canManage;
-    } catch {
-      session.guildRoleCanManage = false;
-    }
-    if (session.guildRoleCanManage) {
-      try { armGuildRoleBot(session, account); }
-      catch (error) { emit(session, 'warn', '联盟职位机器人自动启动失败：' + error.message); }
-    }
+    session.guildRoleCanManage = false;
     session.guildRoleReady = false;
-    const guildRoleAccepting = () => session.client === client && client.connected && !session.paused && session.guildRoleCanManage;
+    const guildRoleGeneration = session.generation;
+    const guildRoleAccepting = () => !closing && session.generation === guildRoleGeneration && session.client === client && client.connected && !session.paused && !session.guildRoleTransferring && session.guildRoleCanManage;
     const guildRoleEnabled = () => guildRoleAccepting() && session.guildRoleReady;
     session.guildRoleBot.attach(client, {
       getPlayer: () => session.player,
@@ -1402,19 +1451,14 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       accepting: guildRoleAccepting,
       schedule: work => enqueue(session, work, '联盟职位指令'),
       afterRestore: pending => transferGuildPresidentAfterRestore(session, account, client, guildRoleEnabled, pending),
-      onEvent: entry => emit(session, entry.level, entry.message, entry.extra),
+      onEvent: entry => {
+        emit(session, entry.level, entry.message, entry.extra);
+        publishGuildRole(session);
+        session.guildRoleMonitor?.invalidate();
+      },
     });
-    if (session.guildRoleCanManage) {
-      try {
-        await session.guildRoleBot.initializeLeadership(roleRoster?.members);
-        session.guildRoleReady = true;
-        await session.guildRoleBot.flush();
-        emit(session, 'info', '已保存盟主接管时的职位快照并完成永久副盟初始化');
-      } catch (error) {
-        session.guildRoleReady = false;
-        emit(session, 'warn', '联盟职位初始化失败，暂不执行指令；时段内实时消息仍会保留在队列：' + error.message);
-      }
-    }
+    // Start asynchronously: ensureConnected itself can be running inside the account queue.
+    startGuildRoleMonitor(session, account, client);
     try {
       const samePrefix = loadStore().accounts.filter(a => a.id.slice(0,8) === account.id.slice(0,8));
       const recovered = recoverPirateHunts(client, session.player, usageFor(session), account.id,
@@ -2851,38 +2895,51 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
       }
       if (route === 'GET /api/guild/role-bot') {
         const { session } = scoped_(parsed);
-        json(session.guildRoleBot.snapshot());
+        json(guildRoleStatus(session));
         return;
       }
       if (route === 'GET /api/guild-role/config') {
         const { session } = scoped_(parsed);
         json({
           revision: session.guildRoleSettings.revision, savedAt: session.guildRoleSettings.savedAt,
-          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot()
+          settings: session.guildRoleSettings.settings, status: guildRoleStatus(session)
         });
         return;
       }
       if (route === 'GET /api/guild-role/status') {
         const { session } = scoped_(parsed);
-        json(session.guildRoleBot.snapshot());
+        json(guildRoleStatus(session));
+        return;
+      }
+      if (route === 'GET /api/guild-role/roster') {
+        const { session } = scoped_(parsed);
+        json({ ...(session.guildRoleRoster || { members: [], total: 0, canManage: false }),
+          canManage: session.guildRoleCanManage, rosterVersion: session.guildRoleRosterVersion,
+          revision: session.guildRoleSettings.revision, status: guildRoleStatus(session) });
         return;
       }
       if (route === 'GET /api/guild-role/members') {
         const { account, session } = scoped_(parsed);
-        const roster = await progressionJob(session, account, route, null,
+        await progressionJob(session, account, route, null, () => null, { read: true });
+        await session.guildRoleMonitor?.refresh();
+        const roster = session.guildRoleRoster || { members: [], total: 0, canManage: false };
+        json({ ...roster, canManage: session.guildRoleCanManage, rosterVersion: session.guildRoleRosterVersion,
+          revision: session.guildRoleSettings.revision, settings: session.guildRoleSettings.settings, status: guildRoleStatus(session) });
+        return;
+      }
+      if (route === 'POST /api/guild-role/permanent-vice') {
+        const { account, session } = scoped_(parsed);
+        const payload = jsonBody(); needConfirm(payload);
+        const settings = normalizeGuildRoleSettings({ permanentViceMemberIds: payload.memberIds }, session.guildRoleSettings.settings);
+        const roster = await progressionJob(session, account, route + ':validate', null,
           client => readGuildRoleMembers(client, session.player), { read: true });
-        session.guildRoleCanManage = roster.canManage;
-        if (!roster.canManage) session.guildRoleReady = false;
-        const autoStarted = armGuildRoleBot(session, account);
-        if (roster.canManage && !session.guildRoleReady) {
-          await enqueue(session, () => session.guildRoleBot.initializeLeadership(roster.members), '初始化联盟职位');
-          session.guildRoleReady = true;
-          await session.guildRoleBot.flush();
-        }
-        json({
-          ...roster, autoStarted, revision: session.guildRoleSettings.revision,
-          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot()
-        });
+        validateGuildRolePreconfiguration(roster, { ...settings, allowedMemberIds: [], protectedMemberIds: [], transferTargetId: null });
+        // Re-read stable fields after asynchronous validation; the revision is checked atomically on save.
+        session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR,
+          { ...session.guildRoleSettings.settings, permanentViceMemberIds: settings.permanentViceMemberIds }, { revision: payload.revision });
+        session.guildRoleBot.configure(session.guildRoleSettings.settings);
+        session.guildRoleMonitor?.invalidate(); publishGuildRole(session);
+        json({ revision: session.guildRoleSettings.revision, settings: session.guildRoleSettings.settings, status: guildRoleStatus(session) });
         return;
       }
       if (route === 'POST /api/guild-role/config') {
@@ -2897,9 +2954,8 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         const transferChanged = settings.transferTargetId !== session.guildRoleSettings.settings.transferTargetId
           || settings.transferAfterRestore !== session.guildRoleSettings.settings.transferAfterRestore;
         if (snapshot.baseline && !settings.enabled) throw new Error('还有临时职位或原始快照，请先立即恢复全部职位再关闭机器人');
-        if (snapshot.baseline && (JSON.stringify(settings.protectedMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.protectedMemberIds)
-          || JSON.stringify(settings.permanentViceMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.permanentViceMemberIds))) {
-          throw new Error('临时职位生效期间不能修改精英优先或永久副盟名单，请先恢复全部职位');
+        if (snapshot.baseline && JSON.stringify(settings.protectedMemberIds) !== JSON.stringify(session.guildRoleSettings.settings.protectedMemberIds)) {
+          throw new Error('活动期间不能修改精英优先名单，请先恢复全部职位');
         }
         if (settings.enabled || listsChanged || transferChanged) {
           const roster = await progressionJob(session, account, `${route}:validate`, null,
@@ -2909,10 +2965,11 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         }
         session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR, settings, { revision: payload.revision });
         session.guildRoleBot.configure(session.guildRoleSettings.settings);
+        session.guildRoleMonitor?.invalidate(); publishGuildRole(session);
         emit(session, 'info', `联盟职位机器人配置已保存，当前${settings.enabled ? '启用' : '暂停'}`);
         json({
           revision: session.guildRoleSettings.revision, savedAt: session.guildRoleSettings.savedAt,
-          settings: session.guildRoleSettings.settings, status: session.guildRoleBot.snapshot()
+          settings: session.guildRoleSettings.settings, status: guildRoleStatus(session)
         });
         return;
       }
@@ -2921,21 +2978,36 @@ export function createConsole({ host = '127.0.0.1', port = 17321, onLog, recover
         needConfirm(jsonBody());
         await ensureConnected(session, account);
         const result = await session.guildRoleBot.restoreNow();
-        json({ ...result, status: session.guildRoleBot.snapshot() });
+        json({ ...result, status: guildRoleStatus(session) });
         return;
       }
       if (route === 'POST /api/guild-role/transfer-president') {
         const { account, session } = scoped_(parsed);
         const payload = jsonBody();
         needConfirm(payload);
-        const snapshot = session.guildRoleBot.snapshot();
-        if (snapshot.baseline || snapshot.queue.length || snapshot.leases.length) throw new Error('请先恢复全部职位，确认队列和临时副盟主均为空');
-        if (session.guildRoleSettings.settings.enabled) throw new Error('请先关闭联盟职位机器人并保存配置，再转让盟主');
-        const key = JSON.stringify([route, payload.targetId, payload.expectedNickname]);
-        const result = await progressionJob(session, account, key, '转让联盟盟主', (client, enabled) =>
-          transferGuildPresident(client, session.player, { targetId: payload.targetId, expectedNickname: payload.expectedNickname, enabled }));
-        emit(session, 'warn', `联盟盟主已转让给 ${result.nickname}`);
-        json(result);
+        if (session.guildRoleTransferring) throw new Error('盟主转让正在执行，请等待结果');
+        session.guildRoleTransferring = true; publishGuildRole(session);
+        try {
+          const key = JSON.stringify([route, payload.targetId, payload.expectedNickname]);
+          const result = await progressionJob(session, account, key, '恢复全部职务后转让盟主', async (client, enabled) => {
+            const target = { targetId: payload.targetId, expectedNickname: payload.expectedNickname, enabled };
+            // Validate the exact requested target before changing any member's role.
+            const preview = await previewGuildPresidentTransfer(client, session.player, target);
+            if (preview.alreadyTransferred && session.guildRoleBot.snapshot().baseline) throw new Error('盟主身份已变化，原始职务尚未确认恢复，请先核对游戏中的职位');
+            const restored = await session.guildRoleBot.restoreForTransfer({ enabled });
+            const current = session.guildRoleBot.snapshot();
+            if (current.baseline || current.queue.length || current.leases.length) throw new Error('职位恢复尚未确认完成，本次不转让盟主');
+            const transferred = await transferGuildPresident(client, session.player, target);
+            return { ...transferred, restored: restored.restored };
+          });
+          session.guildRoleSettings = saveGuildRoleSettings(account.id, DATA_DIR,
+            { ...session.guildRoleSettings.settings, enabled: false, transferAfterRestore: false }, { revision: session.guildRoleSettings.revision });
+          session.guildRoleBot.configure(session.guildRoleSettings.settings);
+          emit(session, 'warn', `联盟盟主已转让给 ${result.nickname}`);
+          json(result);
+        } finally {
+          session.guildRoleTransferring = false; session.guildRoleMonitor?.invalidate(); publishGuildRole(session);
+        }
         return;
       }
       if (route === 'GET /api/guild/tech' || route === 'GET /api/trials' || route === 'GET /api/equipment' || route === 'GET /api/guild' || route === 'GET /api/pirates/hunt' || route === 'GET /api/fleets/formation') {

@@ -287,6 +287,21 @@ test('巨轮加速开关控制秒数与预算显隐，关闭后保留配置', ()
   assert(visible(seconds.node)); assert(visible(budget.node));
 });
 
+test('城战维修加速开关联动两项预算，隐藏和重新开启保留已设置额度', () => {
+  const f = fixture();
+  Object.assign(f.editor.draft.cityWar, { autoRepair: true, maxRepairSpeedDiamondCost: 100, dailyRepairSpeedDiamondLimit: 500 });
+  f.mount(f.groups.find(group => group.id === 'cityWar').fields.filter(field => [
+    'cityWar.autoRepair', 'cityWar.repairSpeedUp', 'cityWar.maxRepairSpeedDiamondCost', 'cityWar.dailyRepairSpeedDiamondLimit',
+  ].includes(field.key)));
+  const speed = f.widget('cityWar.repairSpeedUp'), single = f.widget('cityWar.maxRepairSpeedDiamondCost'), daily = f.widget('cityWar.dailyRepairSpeedDiamondLimit');
+  assert.equal(speed.spec.kind, 'switch'); assert.equal(single.spec.unit, '钻石'); assert.equal(daily.spec.unit, '钻石');
+  assert(!visible(single.node)); assert(!visible(daily.node));
+  f.set('cityWar.repairSpeedUp', true); assert(visible(single.node)); assert(visible(daily.node));
+  f.set('cityWar.autoRepair', false); assert(!visible(speed.node)); assert(!visible(single.node)); assert(!visible(daily.node));
+  f.set('cityWar.autoRepair', true); assert(visible(single.node)); assert(visible(daily.node));
+  assert.equal(f.editor.draft.cityWar.maxRepairSpeedDiamondCost, 100); assert.equal(f.editor.draft.cityWar.dailyRepairSpeedDiamondLimit, 500);
+});
+
 test('手动收起只改变展示状态，重新启用自动展开所属设置', () => {
   const f = fixture(); f.editor.draft.merchant.autoSpeedUp = true;
   const fields = f.merchantFields.filter(field => [

@@ -23,6 +23,7 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     <span class="metric"><span>排队</span><b id="queueCount">0</b></span>
     <span class="metric"><span>临时副盟</span><b id="leaseCount">0</b></span>
     <span class="metric"><span>永久副盟</span><b id="permanentViceCount">0</b></span>
+    <span class="metric"><span>永久名单应用</span><b id="permanentViceState">--</b></span>
     <span class="metric"><span>原始快照</span><b id="baselineState">无</b></span>
   </div>
   <p class="notice" id="notice"></p>
@@ -52,12 +53,12 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     </section>
     <section>
       <div class="section-head"><h2>联盟操作</h2></div>
-      <div class="footer-actions"><button id="restoreNow">立即恢复全部职位</button><button class="danger" id="transfer">转让盟主</button></div>
+      <div class="footer-actions"><button id="restoreNow">立即恢复全部职位</button><button class="danger" id="transfer">恢复职务并转让盟主</button></div>
     </section>
   </main>
 </div>
 <dialog id="transferDialog">
-  <div class="dialog-body"><h2>确认转让盟主</h2><p id="transferText"></p><input id="confirmName" autocomplete="off" placeholder="输入目标成员昵称"></div>
+  <div class="dialog-body"><h2>确认恢复职务并转让盟主</h2><p id="transferText"></p><input id="confirmName" autocomplete="off" placeholder="输入目标成员昵称"></div>
   <div class="dialog-actions"><button id="cancelTransfer">取消</button><button class="danger" id="confirmTransfer">确认转让</button></div>
 </dialog>
 <script>
@@ -68,15 +69,20 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
   let permissionSaveTail = Promise.resolve();
   let permissionEditVersion = 0;
   let permissionDirty = false;
+  let formDirty = false;
+  const permissionDirtyFields = new Set();
+  let events = null;
+  let rosterVersion = -1;
   const roles = { 2: 'R2 普通', 3: 'R3 精英', 4: 'R4 副盟主', 5: 'R5 盟主' };
   const query = () => '?account=' + encodeURIComponent(state.account);
   const permissionDraftKey = account => 'crazywaterworld:guild-role-permissions:' + account;
   function writePermissionDraft() {
     try { localStorage.setItem(permissionDraftKey(state.account), JSON.stringify({
-      revision: state.revision,
+      revision: state.revision, fields: [...permissionDirtyFields],
       allowedMemberIds: state.settings.allowedMemberIds,
       protectedMemberIds: state.settings.protectedMemberIds,
       permanentViceMemberIds: state.settings.permanentViceMemberIds,
+      transferTargetId: state.settings.transferTargetId, transferAfterRestore: state.settings.transferAfterRestore,
     })); } catch {}
   }
   function restorePermissionDraft() {
@@ -86,6 +92,9 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
       state.settings.allowedMemberIds = draft.allowedMemberIds.map(String);
       state.settings.protectedMemberIds = draft.protectedMemberIds.map(String);
       if (Array.isArray(draft.permanentViceMemberIds)) state.settings.permanentViceMemberIds = draft.permanentViceMemberIds.map(String);
+      if (draft.fields?.includes('transferTargetId')) state.settings.transferTargetId = draft.transferTargetId;
+      if (draft.fields?.includes('transferAfterRestore')) state.settings.transferAfterRestore = draft.transferAfterRestore;
+      for (const field of draft.fields || ['allowedMemberIds', 'protectedMemberIds', 'permanentViceMemberIds']) permissionDirtyFields.add(field);
       permissionEditVersion += 1; permissionDirty = true;
       return true;
     } catch { return false; }
@@ -122,20 +131,27 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     const account = state.account;
     const version = permissionEditVersion;
     const settings = settingsPayload(fromForm);
+    const permanentOnly = !fromForm && permissionDirtyFields.size === 1 && permissionDirtyFields.has('permanentViceMemberIds');
     permissionSaveTail = permissionSaveTail.catch(() => {}).then(async () => {
       if (state.account !== account) return null;
-      const data = await api('/api/guild-role/config', { method: 'POST', keepalive: true, body: JSON.stringify({ confirm: true, revision: state.revision, settings }) });
+      const data = await api(permanentOnly ? '/api/guild-role/permanent-vice' : '/api/guild-role/config', { method: 'POST', keepalive: true, body: JSON.stringify(permanentOnly
+        ? { confirm: true, revision: state.revision, memberIds: settings.permanentViceMemberIds }
+        : { confirm: true, revision: state.revision, settings }) });
       if (state.account !== account) return data;
       state.revision = data.revision; state.status = data.status; renderStatus();
       if (permissionEditVersion === version) {
-        state.settings = data.settings; permissionDirty = false; clearPermissionDraft(account); fillSettings(); renderMembers();
+        state.settings = data.settings; permissionDirty = false; permissionDirtyFields.clear(); clearPermissionDraft(account);
+        if (fromForm) formDirty = false;
+        if (!formDirty) fillSettings(); renderMembers();
       }
-      notify(message);
+      if (permissionEditVersion !== version) writePermissionDraft();
+      notify(permanentOnly ? '永久副盟名单已保存，实际生效状态见上方' : message);
       return data;
     });
     return permissionSaveTail;
   }
-  function schedulePermissionSave() {
+  function schedulePermissionSave(field = 'all') {
+    permissionDirtyFields.add(field);
     permissionEditVersion += 1; permissionDirty = true; writePermissionDraft();
     clearTimeout(permissionSaveTimer);
     permissionSaveTimer = setTimeout(() => {
@@ -153,6 +169,13 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     const s = state.status || {}; $('botState').textContent = s.active ? '运行中' : s.enabled ? '等待托管/盟主' : '未启动'; $('botDot').classList.toggle('on', !!s.active);
     $('windowState').textContent = s.commandWindow || '--'; $('queueCount').textContent = (s.queue || []).length; $('leaseCount').textContent = (s.leases || []).length;
     $('permanentViceCount').textContent = s.permanentViceMemberCount || 0;
+    const permanent = s.permanentVice || {};
+    $('permanentViceState').textContent = ({ saved: '已保存，等待时段/盟主', applying: '正在应用', applied: '已生效', 'waiting-slot': '已保存，等待空位', error: '应用失败，将重试' })[permanent.status] || '--';
+    $('permanentViceState').title = permanent.error || '';
+    if (typeof s.canManage === 'boolean') state.canManage = s.canManage;
+    $('restoreNow').disabled = !state.canManage || !s.ready || !!s.transferring;
+    $('transfer').disabled = !state.canManage || !!s.transferring;
+    $('enabledLabel').textContent = state.canManage ? (s.ready ? '随托管自动运行' : '正在初始化职位') : '等待成为盟主';
     $('baselineState').textContent = s.baseline ? s.baseline.day + ' · ' + s.baseline.memberCount + ' 人' : '无';
     const host = $('queue'); host.replaceChildren();
     if (!(s.queue || []).length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = '当前没有排队指令'; host.append(empty); return; }
@@ -184,20 +207,22 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
       input.addEventListener('change', () => {
         const ids = new Set(state.settings[field]);
         if (input.checked && ids.size >= maxSelections) { input.checked = false; notify('永久副盟最多选择 2 人', 'error'); return; }
-        input.checked ? ids.add(member.id) : ids.delete(member.id); state.settings[field] = [...ids]; pickerSummary(field, summaryId); schedulePermissionSave();
+        input.checked ? ids.add(member.id) : ids.delete(member.id); state.settings[field] = [...ids]; pickerSummary(field, summaryId); schedulePermissionSave(field);
       });
       label.append(input, name, meta); host.append(label);
     }
     pickerSummary(field, summaryId);
   }
   function renderTransferTargets() {
-    const select = $('transferTarget'), selected = state.settings?.transferTargetId || '';
+    const select = $('transferTarget'), selected = formDirty ? select.value : state.settings?.transferTargetId || '';
     select.replaceChildren(); const none = document.createElement('option'); none.value = ''; none.textContent = '不设置'; select.append(none);
     for (const member of state.members) {
       const option = document.createElement('option'); option.value = member.id; option.textContent = member.name + ' · ' + (roles[member.title] || ('R' + member.title)); select.append(option);
     }
     select.value = selected;
-    if (select.value !== selected) state.settings.transferTargetId = null;
+    if (select.value !== selected && selected) {
+      const missing = document.createElement('option'); missing.value = selected; missing.textContent = selected + '（当前名单中未找到）'; select.append(missing); select.value = selected;
+    }
   }
   function renderMembers() {
     renderPicker('allowedMemberIds', 'allowedOptions', 'allowedSearch', 'allowedSummary', () => true);
@@ -213,15 +238,56 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     state.account = new URLSearchParams(location.search).get('account') || data.activeId || data.accounts[0]?.id || '';
     if (!state.account) throw new Error('还没有可管理的账号'); select.value = state.account;
   }
-  async function loadConfig() { const data = await api('/api/guild-role/config'); state.revision = data.revision; state.settings = data.settings; state.status = data.status; restorePermissionDraft(); fillSettings(); renderStatus(); }
-  async function loadMembers() {
-    const data = await api('/api/guild-role/members'); state.members = data.members; state.canManage = data.canManage;
-    if (data.settings) { state.revision = data.revision; state.settings = data.settings; state.status = data.status; renderStatus(); }
-    $('memberCount').textContent = data.total + ' 名成员'; $('restoreNow').disabled = !data.canManage; $('transfer').disabled = !data.canManage; fillSettings(); renderMembers();
-    if (!data.canManage) notify('当前账号尚未成为盟主：配置可以提前保存，职位操作将在成为盟主后生效');
+  async function loadConfig() {
+    const account = state.account, data = await api('/api/guild-role/config');
+    if (account !== state.account || permissionDirty || formDirty || data.revision < state.revision) return;
+    state.revision = data.revision; state.settings = data.settings; state.status = data.status;
+    restorePermissionDraft(); fillSettings(); renderStatus(); renderMembers();
   }
-  async function loadAll() { await loadConfig(); await loadMembers(); if (permissionDirty) await saveSettings({ fromForm: false, message: '已恢复并保存上次的成员权限' }); }
-  async function reloadStatus() { state.status = await api('/api/guild-role/status'); renderStatus(); }
+  function acceptRoster(data) {
+    state.members = data.members || []; state.canManage = data.canManage;
+    rosterVersion = data.rosterVersion ?? rosterVersion;
+    if (data.status) state.status = data.status;
+    renderMembers(); renderStatus();
+  }
+  async function loadMembers() {
+    const account = state.account, data = await api('/api/guild-role/members');
+    if (account !== state.account) return;
+    if (data.settings && !permissionDirty && !formDirty) { state.revision = data.revision; state.settings = data.settings; fillSettings(); }
+    acceptRoster(data);
+    if (!data.canManage) notify('当前账号尚未成为盟主：配置可以提前保存，后台检测到盟主后自动生效');
+  }
+  async function syncRoster() {
+    const account = state.account, data = await api('/api/guild-role/roster');
+    if (account === state.account) acceptRoster(data);
+  }
+  function connectEvents() {
+    events?.close();
+    events = new EventSource('/api/events' + query());
+    const account = state.account;
+    events.addEventListener('guild-role-changed', () => { if (account === state.account) reloadStatus().catch(() => {}); });
+  }
+  async function loadAll() {
+    const account = state.account;
+    await loadConfig(); if (account !== state.account) return;
+    await loadMembers(); if (account !== state.account) return;
+    connectEvents();
+    if (permissionDirty) await saveSettings({ fromForm: false, message: '已恢复并保存上次的成员权限' });
+  }
+  async function reloadStatus() {
+    const account = state.account, data = await api('/api/guild-role/status');
+    if (account !== state.account) return;
+    state.status = data; renderStatus();
+    if (data.rosterVersion !== rosterVersion) await syncRoster();
+    if (data.revision !== state.revision && !permissionDirty && !formDirty) await loadConfig();
+  }
+  for (const id of ['start', 'end', 'lease', 'restore']) $(id).addEventListener('input', () => { formDirty = true; });
+  $('transferTarget').addEventListener('change', () => { state.settings.transferTargetId = $('transferTarget').value || null; schedulePermissionSave('transferTargetId'); });
+  $('transferAfterRestore').addEventListener('change', () => { state.settings.transferAfterRestore = $('transferAfterRestore').checked; schedulePermissionSave('transferAfterRestore'); });
+  addEventListener('pagehide', () => {
+    events?.close();
+    if (permissionDirty) saveSettings({ fromForm: false }).catch(() => {});
+  });
   $('allowedSearch').addEventListener('input', () => renderPicker('allowedMemberIds', 'allowedOptions', 'allowedSearch', 'allowedSummary', () => true));
   $('protectedSearch').addEventListener('input', () => renderPicker('protectedMemberIds', 'protectedOptions', 'protectedSearch', 'protectedSummary', () => true));
   $('permanentViceSearch').addEventListener('input', () => renderPicker('permanentViceMemberIds', 'permanentViceOptions', 'permanentViceSearch', 'permanentViceSummary', () => true, 2));
@@ -229,7 +295,7 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
     const previous = state.account, next = event.target.value;
     try {
       if (permissionDirty) await saveSettings({ fromForm: false, message: '成员权限已自动保存' });
-      state.account = next; permissionEditVersion += 1; permissionDirty = false;
+      events?.close(); state.account = next; permissionEditVersion += 1; permissionDirty = false; permissionDirtyFields.clear(); formDirty = false; rosterVersion = -1;
       const params = new URLSearchParams(location.search); params.set('account', state.account); history.replaceState(null, '', '/guild-role?' + params.toString());
       await loadAll();
     } catch (error) { state.account = previous; event.target.value = previous; notify(error.message, 'error'); }
@@ -237,12 +303,12 @@ export const GUILD_ROLE_PAGE = String.raw`<!doctype html>
   $('refresh').addEventListener('click', () => busy($('refresh'), loadAll()).catch(error => notify(error.message, 'error')));
   $('refreshMembers').addEventListener('click', () => busy($('refreshMembers'), loadMembers().then(() => notify('成员当前职务已刷新'))).catch(error => notify(error.message, 'error')));
   $('refreshStatus').addEventListener('click', () => busy($('refreshStatus'), reloadStatus()).catch(error => notify(error.message, 'error')));
-  $('allowedClear').addEventListener('click', () => { state.settings.allowedMemberIds = []; renderPicker('allowedMemberIds', 'allowedOptions', 'allowedSearch', 'allowedSummary', () => true); schedulePermissionSave(); });
-  $('protectedClear').addEventListener('click', () => { state.settings.protectedMemberIds = []; renderPicker('protectedMemberIds', 'protectedOptions', 'protectedSearch', 'protectedSummary', () => true); schedulePermissionSave(); });
-  $('permanentViceClear').addEventListener('click', () => { state.settings.permanentViceMemberIds = []; renderPicker('permanentViceMemberIds', 'permanentViceOptions', 'permanentViceSearch', 'permanentViceSummary', () => true, 2); schedulePermissionSave(); });
+  $('allowedClear').addEventListener('click', () => { state.settings.allowedMemberIds = []; renderPicker('allowedMemberIds', 'allowedOptions', 'allowedSearch', 'allowedSummary', () => true); schedulePermissionSave('allowedMemberIds'); });
+  $('protectedClear').addEventListener('click', () => { state.settings.protectedMemberIds = []; renderPicker('protectedMemberIds', 'protectedOptions', 'protectedSearch', 'protectedSummary', () => true); schedulePermissionSave('protectedMemberIds'); });
+  $('permanentViceClear').addEventListener('click', () => { state.settings.permanentViceMemberIds = []; renderPicker('permanentViceMemberIds', 'permanentViceOptions', 'permanentViceSearch', 'permanentViceSummary', () => true, 2); schedulePermissionSave('permanentViceMemberIds'); });
   $('save').addEventListener('click', () => busy($('save'), saveSettings()).catch(error => notify(error.message, 'error')));
-  $('restoreNow').addEventListener('click', () => { if (!confirm('立即按原始快照恢复全部成员职位？')) return; busy($('restoreNow'), api('/api/guild-role/restore', { method: 'POST', body: JSON.stringify({ confirm: true }) }).then(data => { state.status = data.status; renderStatus(); notify(data.restored ? '全部职位已恢复' : '当前没有需要恢复的职位'); })).catch(error => notify(error.message, 'error')); });
-  $('transfer').addEventListener('click', () => { const target = state.members.find(member => member.id === $('transferTarget').value); if (!target) return notify('请先选择盟主转让目标', 'error'); $('transferText').textContent = '目标成员：' + target.name; $('confirmName').value = ''; $('transferDialog').showModal(); $('confirmName').focus(); });
+  $('restoreNow').addEventListener('click', () => { if (!confirm('立即按原始快照恢复全部成员职位？开启自动转让时，恢复成功后会按设置转让盟主。')) return; busy($('restoreNow'), api('/api/guild-role/restore', { method: 'POST', body: JSON.stringify({ confirm: true }) }).then(data => { state.status = data.status; renderStatus(); notify(data.restored ? '全部职位已恢复' : '当前没有需要恢复的职位'); })).catch(error => notify(error.message, 'error')); });
+  $('transfer').addEventListener('click', () => { const target = state.members.find(member => member.id === $('transferTarget').value); if (!target) return notify('请先选择盟主转让目标', 'error'); $('transferText').textContent = '将先按原始快照恢复全部职务，确认成功后转让给：' + target.name + '。恢复失败时不会转让，无需关闭机器人。'; $('confirmName').value = ''; $('transferDialog').showModal(); $('confirmName').focus(); });
   $('cancelTransfer').addEventListener('click', () => $('transferDialog').close());
   $('confirmTransfer').addEventListener('click', () => { const target = state.members.find(member => member.id === $('transferTarget').value); if (!target) return; busy($('confirmTransfer'), api('/api/guild-role/transfer-president', { method: 'POST', body: JSON.stringify({ confirm: true, targetId: target.id, expectedNickname: $('confirmName').value }) }).then(() => { $('transferDialog').close(); notify('盟主已转让给 ' + target.name); return loadAll(); })).catch(error => notify(error.message, 'error')); });
   loadAccounts().then(loadAll).catch(error => notify(error.message, 'error'));

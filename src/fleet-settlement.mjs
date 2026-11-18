@@ -3,7 +3,7 @@ import { normalize } from './worlds.mjs';
 import { reconcilePirateFlights } from './pirates.mjs';
 import { emitDiagnostic } from './trace-log.mjs';
 
-const fleetKey = /^(?:radar-send|world-boss|pirate-first|cityWar|treasureRepair|treasureFollow|treasureSpeed|treasure|silicon|silicon-repair|silicon-retreat|silicon-speed):(\d+):/;
+const fleetKey = /^(?:radar-send|world-boss|pirate-first|cityWar|cityRepairSpeed|treasureRepair|treasureFollow|treasureSpeed|treasure|silicon|silicon-repair|silicon-retreat|silicon-speed):(\d+):/;
 const repairKinds = new Set(['cityRepair', 'treasureRepair']);
 const integer = Number.isSafeInteger;
 const dayOf = (seconds) => Math.floor((seconds + 28800) / 86400);
@@ -118,6 +118,7 @@ export function outstandingFleets(records, worldId) {
     if (d.kind === 'pirateFirst') return !['won', 'lost'].includes(d.outcome);
     return (
       repairKinds.has(d.kind) ||
+      d.kind === 'cityRepairSpeed' ||
       d.kind === 'treasureSpeed' ||
       d.kind === 'citySlot' ||
       d.kind === 'cityDispatch' ||
@@ -168,6 +169,26 @@ export function settleFleetSnapshot(
     if (own.length !== 1) continue;
     const fleet = own[0],
       home = fleetAtHome(fleet);
+    if (d.kind === 'cityRepairSpeed') {
+      // 必须观察到同一轮维修缩短，或在原结束时间之前修满回港，才确认花钻成功。
+      const shortened = fleet.state === 4 && fleet.repairing?.startTs === d.repairStart &&
+        integer(fleet.repairing.endTs) && fleet.repairing.endTs > now && fleet.repairing.endTs < d.beforeEnd;
+      const completedEarly = home && integer(now) && now < d.beforeEnd &&
+        integer(fleet.durability) && fleet.durability >= d.targetDurability;
+      if (!r.confirmed && (shortened || completedEarly)) {
+        ledger.resolveKey(key, true);
+        changes.push({ key, reason: '确认城战维修加速' });
+      }
+      if (home) {
+        if (r.confirmed || shortened || completedEarly) ledger.releaseCompletedKey(key);
+        else {
+          // 自然修好不能证明加速扣费成功：释放舰队，保留未知消费预算。
+          ledger.resolveKey(key, false);
+        }
+        changes.push({ key, reason: '城战维修结束，释放加速舰队锁' });
+      }
+      continue;
+    }
     if (d.kind === 'treasureSpeed') {
       if (treasureSpeedConfirmed(fleet, d)) {
         ledger.resolveKey(key, true);
